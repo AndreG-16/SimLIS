@@ -1,22 +1,27 @@
 name: retail
+site_type: retail
+
 time_resolution_min: 15
 sim_horizon_days: 7
 
 site:
   n_chargers: 8
   rated_power_kw: 50
-  site_grid_limit_kw: 300
+  grid_limit_kw: 300
   efficiency: 0.95
   operation_window: "07:00-22:00"
   charging_strategy: "immediate"
+  usage_rate: 0.4        # optional
 
 vehicles:
-  battery_capacity_kwh: [50, 60, 75]
   soc_target: 0.8
-  max_pwr_vehicle_kw: 11
+  battery_capacity_kwh: 60
+  max_pwr_vehicle_kw: 50
 
 data:
   arrivals_xlsx: "data/Ankunft.xlsx"
+  arrivals_sheet: "Ankunft"
   durations_xlsx: "data/Standzeiten.xlsx"
+  durations_sheet: "Standdauer"
   soc_xlsx: "data/SoC_Ankunft.xlsx"
-  interpret_arrivals_as: "deterministic"
+  soc_sheet: "SoC"
