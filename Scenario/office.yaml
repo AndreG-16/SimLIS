@@ -16,16 +16,10 @@ vehicles:
   soc_target: 1.0     # Gewünschter Ladezustand am Ende des Ladeprozesses
   battery_capacity_kwh: 60      # Batteriekapazität des Fahrzeugs
   max_pwr_vehicle_kw: 50      # Maximale Ladeleistung, die das Fahrzeug aufnehmen kann
+  expected_session_per_charger_per_day: 4.0
 
-data:
-  arrivals_xlsx: "data/Ankunft.xlsx"
-  arrivals_sheet: "Ankunft"
-  durations_xlsx: "data/Standzeiten.xlsx"
-  durations_sheet: "Standdauer"
-  soc_xlsx: "data/SoC_Ankunft.xlsx"
-  soc_sheet: "SoC"
-
-arrival_time
+# Zeiten, an denen die Fahrer an den Ladepunkten ankommen
+arrival_time_distribution:
   type: lognormal_mixture
   time_unit: minutes
 
@@ -39,7 +33,7 @@ arrival_time
     Sun: 0.00
 
   components_per_weekday:
-     Mon:
+    Mon:
       - mu: 1.80      # Peak Morgens
         sigma: 0.25     # Streuung der Ankünfte
         shift_minutes: 360     # 06:00 Start
@@ -86,3 +80,37 @@ arrival_time
         weight: 0.40
     Sat: []
     Sun: []
+
+# Parkdauer in Minuten ab Ankunft; Verteilung ist eine Mischung aus Kurz- und Langzeitparkern
+parking_duration_distribution:
+  type: lognormal_mixture
+  time_unit: minutes
+  max_duration_minutes: 720     # 12 Stunden
+
+  components:
+    - name: short_stay      # Mitarbeiter, die zum Beispiel teilzeit arbeiten
+      weight: 0.15      # Anteil der Mitarbeiter, die teilzeit arbeiten
+      mu: 270     # 4.5 Stunden
+      sigma: 0.2
+
+    - name: long_stay     # Langzeitparker / Vollzeitkräfte
+      weight: 0.85      # Anteil der Mitarbeiter, die vollzeit arbeiten
+      mu: 570       # 9.5 Stunden
+      sigma: 0.3
+
+# Batteriezustand bei Ankunft; Verteilung ist eine Mischung aus spontanen Laden und Laden aufgrund niedrigem Batteriezustand
+soc_at_arrival_distribution:
+  type: lognormal_mixture
+  value_unit: fraction        # 0.0 bis 1.0
+  max_soc: 0.85               # 85 % maximaler SoC bei Ankunft
+
+  components:
+    - name: opportunistic_charging      # Laden aus Gelegenheit und nicht aus Notwendigkeit
+      weight: 0.80      # Anteil der Fahrer, die aus der Gelegenheit laden
+      mu: 0.45      # Durchschnittler SoC bei Ankunft
+      sigma: 0.2
+
+    - name: low_battery_charging      # Laden aufgrund leerer Batterie / gezielte Anfahrt
+      weight: 0.20      # Anteil der Fahrer, die aufgrund leerer Batterie laden
+      mu: 0.30
+      sigma: 0.3
