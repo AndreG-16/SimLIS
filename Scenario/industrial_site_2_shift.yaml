@@ -1,13 +1,13 @@
-name: highway
-site_type: highway      # Standort des Ladepunkts
+name: industrial_site
+site_type: industrial_site      # Standort des Ladepunkts
 
 time_resolution_min: 15     # Zeitschritt, in der die Simulation abgebildet wird
 sim_horizon_days: 7     # Länge der Simulation
 
 site:
-  number_chargers: 10     # Anzahl der Ladepunkte am Standort
-  rated_power_kw: 300     # Verfügbare Leistung pro Ladepunkt
-  grid_limit_p_avb_kw: 2000     # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  number_chargers: 20     # Anzahl der Ladepunkte am Standort
+  rated_power_kw: 150     # Verfügbare Leistung pro Ladepunkt
+  grid_limit_p_avb_kw: 1000     # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
   operation_window: "00:00 - 23:59"     # Betriebszeiten des Ladepunkts
   charger_efficiency: 0.95      # Verhältnis der aufgenommenen Leistung des Fahrzeugs zur abgegebenen Leistung des Ladepunkts
   charging_strategy: "immediate"      # Vom Betreiber festgelegte Strategie zur Bereitstellung des Stroms

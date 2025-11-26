@@ -5,13 +5,12 @@ time_resolution_min: 15
 sim_horizon_days: 7
 
 site:
-  n_chargers: 8
+  number_chargers: 8
   rated_power_kw: 50
-  grid_limit_kw: 300
-  efficiency: 0.95
-  operation_window: "07:00-22:00"
+  grid_limit_p_avb_kw: 300
+  operation_window: "6:00 - 20:00"
+  charger_efficiency: 0.95
   charging_strategy: "immediate"
-  usage_rate: 0.4        # optional
 
 vehicles:
   soc_target: 0.8
