@@ -1,21 +1,21 @@
 name: office
-site_type: office
+site_type: office      # Standort des Ladepunkts
 
-time_resolution_min: 15
-sim_horizon_days: 7
+time_resolution_min: 15     # Zeitschritt, in der die Simulation abgebildet wird
+sim_horizon_days: 7     # Länge der Simulation
 
 site:
-  number_chargers: 8
-  rated_power_kw: 22
-  grid_limit_p_avb_kw: 100
-  operation_window: "6:00 - 20:00"
-  charger_efficiency: 0.95
-  charging_strategy: "immediate"
+  number_chargers: 8     # Anzahl der Ladepunkte am Standort
+  rated_power_kw: 22     # Verfügbare Leistung pro Ladepunkt
+  grid_limit_p_avb_kw: 100     # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  operation_window: "06:00 - 20:00"     # Betriebszeiten des Ladepunkts
+  charger_efficiency: 0.95      # Verhältnis der aufgenommenen Leistung des Fahrzeugs zur abgegebenen Leistung des Ladepunkts
+  charging_strategy: "immediate"      # Vom Betreiber festgelegte Strategie zur Bereitstellung des Stroms
 
 vehicles:
-  soc_target: 1.0
-  battery_capacity_kwh: 60
-  max_pwr_vehicle_kw: 50
+  soc_target: 1.0     # Gewünschter Ladezustand am Ende des Ladeprozesses
+  battery_capacity_kwh: 60      # Batteriekapazität des Fahrzeugs
+  max_pwr_vehicle_kw: 50      # Maximale Ladeleistung, die das Fahrzeug aufnehmen kann
 
 data:
   arrivals_xlsx: "data/Ankunft.xlsx"
@@ -24,3 +24,65 @@ data:
   durations_sheet: "Standdauer"
   soc_xlsx: "data/SoC_Ankunft.xlsx"
   soc_sheet: "SoC"
+
+arrival_time
+  type: lognormal_mixture
+  time_unit: minutes
+
+  weekday_weight:     # Anteil der Mitarbeiter zur Gesamtbelegschaft, die an den entsprechenden Tagen nicht im Home Office oder Außerhalb arbeitet
+    Mon: 0.70
+    Tue: 0.90
+    Wed: 0.95
+    Thu: 0.90
+    Fri: 0.60
+    Sat: 0.00
+    Sun: 0.00
+
+  components_per_weekday:
+     Mon:
+      - mu: 1.80      # Peak Morgens
+        sigma: 0.25     # Streuung der Ankünfte
+        shift_minutes: 360     # 06:00 Start
+        weight: 0.75      # Anteil der Belegschaft, die Morgens anfängt zu arbeiten
+      - mu: 4.20      # Peak Mittags
+        sigma: 0.45
+        shift_minutes: 360
+        weight: 0.25
+    Tue:
+      - mu: 1.75
+        sigma: 0.27
+        shift_minutes: 360
+        weight: 0.70
+      - mu: 4.10
+        sigma: 0.42
+        shift_minutes: 360
+        weight: 0.30
+    Wed:
+      - mu: 1.78
+        sigma: 0.26
+        shift_minutes: 360
+        weight: 0.72
+      - mu: 4.15
+        sigma: 0.42
+        shift_minutes: 360
+        weight: 0.28
+    Thu:
+      - mu: 1.80
+        sigma: 0.27
+        shift_minutes: 360
+        weight: 0.70
+      - mu: 4.20
+        sigma: 0.45
+        shift_minutes: 360
+        weight: 0.30
+    Fri:
+      - mu: 1.60
+        sigma: 0.30
+        shift_minutes: 360
+        weight: 0.60
+      - mu: 3.80
+        sigma: 0.50
+        shift_minutes: 360
+        weight: 0.40
+    Sat: []
+    Sun: []
