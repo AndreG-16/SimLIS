@@ -283,4 +283,4 @@ def simulate_load_profile(scenario, start_datetime=None):
 
         load_kw[i] = total_power
 
-    return timestamps, load_kw
+    return timestamps, load_kw, sessions_all
