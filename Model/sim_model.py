@@ -3,7 +3,7 @@ import numpy as np
 from datetime import datetime, timedelta
 
 
-def load_scenario(path: str) -> dict[str, Any]:
+def load_scenario(path: str) -> dict[str, any]:
     """
     Lädt eine Szenario-YAML-Datei und gibt ein Dictionary zurück.
 
