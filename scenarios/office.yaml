@@ -16,7 +16,7 @@ vehicles:
   soc_target: 1.0     # Gewünschter Ladezustand am Ende des Ladeprozesses
   battery_capacity_kwh: 60      # Batteriekapazität des Fahrzeugs
   max_pwr_vehicle_kw: 50      # Maximale Ladeleistung, die das Fahrzeug aufnehmen kann
-  expected_session_per_charger_per_day: 4.0
+  expected_sessions_per_charger_per_day: 4.0
 
 # Zeiten, an denen die Fahrer an den Ladepunkten ankommen
 arrival_time_distribution:
