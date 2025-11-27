@@ -1,9 +1,10 @@
 import yaml
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 
+from typing import Any
 
-def load_scenario(path: str) -> dict[str, any]:
+def load_scenario(path: str) -> dict[str, Any]:
     """
     Lädt eine Szenario-YAML-Datei und gibt ein Dictionary zurück.
 
@@ -232,6 +233,78 @@ def build_sessions_for_day(scenario, day_start):
         )
     return sessions
 
+def is_in_operation_window(t: datetime, scenario: dict) -> bool:
+    """
+    Prüft, ob zum Zeitpunkt t am gegebenen Standort geladen werden darf.
+
+    Steuerung über YAML im Block scenario["site"]:
+
+    Variante mit operation_schedule (empfohlen):
+    -------------------------------------------
+    site:
+      operation_schedule:
+        Mon: "06:00-20:00"
+        Tue: "06:00-20:00"
+        Wed: "06:00-20:00"
+        Thu: "06:00-20:00"
+        Fri: "06:00-20:00"
+        Sat: "08:00-14:00"
+        Sun: "closed"      # oder "" für geschlossen
+
+      # Für 24/7-Standorte (z.B. Autobahn):
+      # operation_schedule:
+      #   Mon: "24/7"
+      #   ...
+      #   Sun: "24/7"
+
+    Falls operation_schedule nicht gesetzt ist, wird immer True zurückgegeben
+    (d.h. der Standort ist 24/7 offen).
+    """
+    site_cfg = scenario.get("site", {})
+    schedule = site_cfg.get("operation_schedule")
+
+    # Kein Schedule definiert -> immer offen
+    if schedule is None:
+        return True
+
+    # "Mon", "Tue", ...
+    day_label = t.strftime("%a")
+    rule = schedule.get(day_label)
+
+    # Nichts für diesen Tag definiert -> geschlossen
+    if rule is None:
+        return False
+
+    rule_str = str(rule).strip()
+
+    # leer oder "closed" -> geschlossen
+    if not rule_str:
+        return False
+
+    rule_upper = rule_str.upper()
+    if rule_upper in ("CLOSED", "CLOSE", "OFF", "0"):
+        return False
+
+    # 24/7 offen an diesem Tag
+    if rule_upper in ("24/7", "24H", "24HRS"):
+        return True
+
+    # Format: "HH:MM-HH:MM"
+    try:
+        start_str, end_str = [s.strip() for s in rule_str.split("-")]
+        sh, sm = map(int, start_str.split(":"))
+        eh, em = map(int, end_str.split(":"))
+    except Exception as e:
+        raise ValueError(
+            f"Ungültige operation_schedule-Angabe für {day_label}: '{rule_str}'"
+        ) from e
+
+    start_time = time(sh, sm)
+    end_time = time(eh, em)
+    current_time = t.time()
+
+    return start_time <= current_time < end_time
+
 
 def simulate_load_profile(scenario, start_datetime=None):
     """
@@ -263,9 +336,15 @@ def simulate_load_profile(scenario, start_datetime=None):
             day_start = first_day + timedelta(days=d)
             sessions_all.extend(build_sessions_for_day(scenario, day_start))
 
-    # Haupt-Loop über alle Zeitschritte
+       # Haupt-Loop über alle Zeitschritte
     for i, t in enumerate(timestamps):
-        # aktive Sessions in diesem Zeitschritt
+
+        # 1) Prüfen, ob die Station zu diesem Zeitpunkt überhaupt offen ist
+        if not is_in_operation_window(t, scenario):
+            load_kw[i] = 0.0
+            continue
+
+        # 2) aktive Sessions in diesem Zeitschritt
         active = [
             s for s in sessions_all
             if s["arrival_time"] <= t < s["departure_time"]
