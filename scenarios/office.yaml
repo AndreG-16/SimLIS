@@ -17,7 +17,7 @@ site:
     Wed: "09:00-20:00"
     Thu: "09:00-20:00"
     Fri: "09:00-20:00"
-    Sat: "09:00-20:00"
+    Sat: "closed"
     Sun: "closed"
   charger_efficiency: 0.95      # Verhältnis der aufgenommenen Leistung des Fahrzeugs zur abgegebenen Leistung des Ladepunkts
   charging_strategy: "immediate"      # Vom Betreiber festgelegte Strategie zur Bereitstellung des Stroms
