@@ -11,9 +11,14 @@ site:
   number_chargers: 8     # Anzahl der Ladepunkte am Standort
   rated_power_kw: 22     # Verfügbare Leistung pro Ladepunkt
   grid_limit_p_avb_kw: 100     # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
-  operation_window:     # Betriebszeiten des Ladepunkts
-    start: "06:00"
-    end: "20:00"
+  operation_schedule:     # Betriebszeiten des Ladepunkts
+    Mon: "09:00-20:00"
+    Tue: "09:00-20:00"
+    Wed: "09:00-20:00"
+    Thu: "09:00-20:00"
+    Fri: "09:00-20:00"
+    Sat: "09:00-20:00"
+    Sun: "closed"
   charger_efficiency: 0.95      # Verhältnis der aufgenommenen Leistung des Fahrzeugs zur abgegebenen Leistung des Ladepunkts
   charging_strategy: "immediate"      # Vom Betreiber festgelegte Strategie zur Bereitstellung des Stroms
 
