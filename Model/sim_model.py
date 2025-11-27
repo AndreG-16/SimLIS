@@ -3,9 +3,19 @@ import numpy as np
 from datetime import datetime, timedelta
 
 
-def load_scenario(path):
+def load_scenario(path: str) -> Dict[str, Any]:
     """
     Lädt eine Szenario-YAML-Datei und gibt ein Dictionary zurück.
+
+    Parameters
+    ----------
+    path : str
+        Pfad zur YAML-Szenariodatei.
+
+    Returns
+    -------
+    dict
+        Das eingelesene Szenario als Dictionary.
     """
     with open(path, "r", encoding="utf-8") as f:
         scenario = yaml.safe_load(f)
@@ -28,10 +38,18 @@ def create_time_index(scenario, start_datetime=None):
     list[datetime]
         Liste der Zeitstempel.
     """
-    if start_datetime is None:
-        start_datetime = datetime.now().replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
+
+    # 1) Falls start_datetime im Funktionsaufruf angegeben wurde → das hat PRIORITÄT
+    if start_datetime is not None:
+        base = start_datetime
+
+    # 2) Falls in YAML definiert
+    elif "start_datetime" in scenario:
+        base = datetime.fromisoformat(scenario["start_datetime"])
+
+    # 3) Fallback: Heute 00:00
+    else:
+        base = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
     dt_min = scenario["time_resolution_min"]
     n_days = scenario["sim_horizon_days"]
@@ -39,7 +57,8 @@ def create_time_index(scenario, start_datetime=None):
     n_steps = int(total_minutes / dt_min)
 
     dt = timedelta(minutes=dt_min)
-    timestamps = [start_datetime + i * dt for i in range(n_steps)]
+    timestamps = [base + i * dt for i in range(n_steps)]
+
     return timestamps
 
 
