@@ -10,7 +10,7 @@ start_datetime: "2025-06-24 00:00"      # Zeitpunkt, ab dem der Lastgang anfange
 site:
   number_chargers: 8     # Anzahl der Ladepunkte am Standort
   rated_power_kw: 22     # Verfügbare Leistung pro Ladepunkt
-  grid_limit_p_avb_kw: 100     # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  grid_limit_p_avb_kw: 150     # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
   operation_schedule:     # Betriebszeiten des Ladepunkts
     Mon: "09:00-20:00"
     Tue: "09:00-20:00"
@@ -26,7 +26,7 @@ vehicles:
   soc_target: 1.0     # Gewünschter Ladezustand am Ende des Ladeprozesses
   battery_capacity_kwh: 60      # Batteriekapazität des Fahrzeugs
   max_pwr_vehicle_kw: 50      # Maximale Ladeleistung, die das Fahrzeug aufnehmen kann
-  expected_sessions_per_charger_per_day: 4.0
+  expected_sessions_per_charger_per_day: 3.0
 
 # Zeiten, an denen die Fahrer an den Ladepunkten ankommen
 arrival_time_distribution:
