@@ -1,8 +1,6 @@
 """
 Anpassung des Lastprofils:
 - Verlängerung des Lastprofils auf einen gewünschten Zeithorizont, indem das Basisprofil (7 Tage) periodisch wiederholt wird
-- Umrechnung von Leistung [kW] in Energie [kWh]
-- einfache Tages-Aggregationen
 """
 
 from __future__ import annotations
