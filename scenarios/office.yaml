@@ -1,7 +1,7 @@
 name: office
 site_type: office      # Standort des Ladepunkts
 
-time_resolution_min: 15     # Zeitschritt, in der die Simulation abgebildet wird
+time_resolution_min: 60     # Zeitschritt, in der die Simulation abgebildet wird
 sim_horizon_days: 7     # Basislänge der Simulation
 
 result_horizon_days: 28     # gewünschter Analysehorizont
@@ -12,11 +12,11 @@ site:
   rated_power_kw: 22     # Verfügbare Leistung pro Ladepunkt
   grid_limit_p_avb_kw: 150     # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
   operation_schedule:     # Betriebszeiten des Ladepunkts
-    Mon: "09:00-20:00"
-    Tue: "09:00-20:00"
-    Wed: "09:00-20:00"
-    Thu: "09:00-20:00"
-    Fri: "09:00-20:00"
+    Mon: "07:00-20:00"
+    Tue: "07:00-20:00"
+    Wed: "07:00-20:00"
+    Thu: "07:00-20:00"
+    Fri: "07:00-20:00"
     Sat: "closed"
     Sun: "closed"
   charger_efficiency: 0.95      # Verhältnis der aufgenommenen Leistung des Fahrzeugs zur abgegebenen Leistung des Ladepunkts
