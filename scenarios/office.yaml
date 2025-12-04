@@ -1,96 +1,57 @@
 site_type: office      # Standort des Ladepunkts
 
 time_resolution_min: 360     # Zeitschritt, in der die Simulation abgebildet wird
-basis_simulation: 7     # Basislänge der Simulation
-
-simulation_horizon: 33     # gewünschter Analysehorizont
+basis_simulation: 7     # Basislänge der Simulation ist eine Woche, um Variation zwischen den Wochentagen abzubilden
+simulation_horizon: 28     # gewünschter Analysehorizont in Tagen
 start_datetime: "2025-06-24 00:00"      # Zeitpunkt, ab dem der Lastgang anfangen soll
 
 site:
   number_chargers: 8     # Anzahl der Ladepunkte am Standort
-  rated_power_kw: 22     # Verfügbare Leistung pro Ladepunkt
+  rated_power_kw: 22    # Verfügbare Leistung pro Ladepunkt
   grid_limit_p_avb_kw: 150     # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
-  operation_schedule:     # Betriebszeiten des Ladepunkts
-    Mon: "07:00-20:00"
-    Tue: "07:00-20:00"
-    Wed: "07:00-20:00"
-    Thu: "07:00-20:00"
-    Fri: "07:00-20:00"
-    Sat: "closed"
-    Sun: "closed"
+  expected_sessions_per_charger_per_day: [1.0, 3.0]      # Ladungen, die schätzungsweise pro LP an einem Tag stattfinden
   charger_efficiency: 0.95      # Verhältnis der aufgenommenen Leistung des Fahrzeugs zur abgegebenen Leistung des Ladepunkts
   charging_strategy: "immediate"      # Vom Betreiber festgelegte Strategie zur Bereitstellung des Stroms
 
+## hier ist der Fuhrpark abzubilden. Dieser besteht aus mehr als einem Fahrzeug. Hier macht es Sinn Fuhrparkdaten und Ladekurven als csv zu speichern und zu laden
 vehicles:
   soc_target: 1.0     # Gewünschter Ladezustand am Ende des Ladeprozesses
   battery_capacity_kwh: 60      # Batteriekapazität des Fahrzeugs
   max_pwr_vehicle_kw: 50      # Maximale Ladeleistung, die das Fahrzeug aufnehmen kann
-  expected_sessions_per_charger_per_day: 3.0      # Ladungen, die schätzungsweise pro LP an einem Tag stattfinden
+  ## Wie gehst du damit um, wenn die vorgegebenen Ladungen nicht gehalten werden können, weil besonders beim Office alle gleichzeitig ankommen?
 
 # Zeiten, an denen die Fahrer an den Ladepunkten ankommen
 arrival_time_distribution:
   type: lognormal_mixture
   time_unit: minutes
 
+## Leg hier nur die Grenzen fest und randomisiere weekday_weight und components_per_weeekday als Variable im Modell. 
+## Sonst ist das Modell zu starr -> jede Woche sieht gleich aus.
   weekday_weight:     # Anteil der Mitarbeiter zur Gesamtbelegschaft, die an den entsprechenden Tagen nicht im Home Office oder Außerhalb arbeitet
-    Mon: 0.70
-    Tue: 0.90
-    Wed: 0.95
-    Thu: 0.90
-    Fri: 0.60
-    Sat: 0.00
-    Sun: 0.00
+    working_day: [0.55, 0.95]
+    saturday: [0.00, 0.05]
+    sunday_holiday: [0.00]
 
   components_per_weekday:
-    Mon:
-      - mu: 1.80      # Peak Morgens
-        sigma: 0.25     # Streuung der Ankünfte
+  ## gestalte die unterschiedlichen peaks pro Tag modular ergänzbar, sodass diese je nach Schichtbetrieb angepasst werden können.
+    working_day:
+      - mu: [1.60, 1.80]      # Peak Morgens
+        sigma: [0.25, 0.30]     # Streuung der Ankünfte
         shift_minutes: 360     # 06:00 Start
         weight: 0.75      # Anteil der Belegschaft, die Morgens anfängt zu arbeiten
-      - mu: 4.20      # Peak Mittags
-        sigma: 0.45
+      - mu: [3.80, 4.20]      # Peak Mittags
+        sigma: [0.42, 0.50]
         shift_minutes: 360
         weight: 0.25
-    Tue:
-      - mu: 1.75
-        sigma: 0.27
-        shift_minutes: 360
-        weight: 0.70
-      - mu: 4.10
-        sigma: 0.42
-        shift_minutes: 360
-        weight: 0.30
-    Wed:
-      - mu: 1.78
-        sigma: 0.26
-        shift_minutes: 360
-        weight: 0.72
-      - mu: 4.15
-        sigma: 0.42
-        shift_minutes: 360
-        weight: 0.28
-    Thu:
-      - mu: 1.80
-        sigma: 0.27
-        shift_minutes: 360
-        weight: 0.70
-      - mu: 4.20
-        sigma: 0.45
-        shift_minutes: 360
-        weight: 0.30
-    Fri:
-      - mu: 1.60
-        sigma: 0.30
-        shift_minutes: 360
-        weight: 0.60
-      - mu: 3.80
-        sigma: 0.50
-        shift_minutes: 360
-        weight: 0.40
-    Sat: []
-    Sun: []
+    saturday:
+      - mu: [1.60, 1.80]      # Peak Morgens
+        sigma: [0.30, 0.50]     # Streuung der Ankünfte
+        shift_minutes: 360     # 06:00 Start
+        weight: 1.0      # Anteil der Belegschaft, die Morgens anfängt zu arbeiten
+    sunday_holiday: []
 
 # Parkdauer in Minuten ab Ankunft; Verteilung ist eine Mischung aus Kurz- und Langzeitparkern
+## Lege hier nur die Grenzen fest und randomisiere parking duration und "components" im Modell.
 parking_duration_distribution:
   type: lognormal_mixture
   time_unit: minutes
@@ -99,15 +60,16 @@ parking_duration_distribution:
   components:
     - name: short_stay      # Mitarbeiter, die zum Beispiel teilzeit arbeiten
       weight: 0.15      # Anteil der Mitarbeiter, die teilzeit arbeiten
-      mu: 270     # 4.5 Stunden
-      sigma: 0.2
+      mu: [265, 275]     # 4.5 Stunden
+      sigma: [0.15, 0.25]
 
     - name: long_stay     # Langzeitparker / Vollzeitkräfte
       weight: 0.85      # Anteil der Mitarbeiter, die vollzeit arbeiten
-      mu: 570       # 9.5 Stunden
-      sigma: 0.3
+      mu: [565, 575]       # 9.5 Stunden
+      sigma: [0.25, 0.35]
 
 # Batteriezustand bei Ankunft; Verteilung ist eine Mischung aus spontanen Laden und Laden aufgrund niedrigem Batteriezustand
+## Lege hier nur die Grenzen fest und randomisiere im Modell. Charging strategies unterscheiden sich je nach Standort. Lege die ggf. im Modell fest.
 soc_at_arrival_distribution:
   type: lognormal_mixture
   value_unit: fraction        # 0.0 bis 1.0
@@ -116,10 +78,10 @@ soc_at_arrival_distribution:
   components:
     - name: opportunistic_charging      # Laden aus Gelegenheit und nicht aus Notwendigkeit
       weight: 0.80      # Anteil der Fahrer, die aus der Gelegenheit laden
-      mu: 0.45      # Durchschnittler SoC bei Ankunft
-      sigma: 0.2
+      mu: [0.40, 0.50]      # Durchschnittler SoC bei Ankunft
+      sigma: [0.15, 0.25]
 
     - name: low_battery_charging      # Laden aufgrund leerer Batterie / gezielte Anfahrt
       weight: 0.20      # Anteil der Fahrer, die aufgrund leerer Batterie laden
-      mu: 0.30
-      sigma: 0.3
+      mu: [0.25, 0.35]
+      sigma: [0.25, 0.35]
