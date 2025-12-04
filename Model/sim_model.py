@@ -54,7 +54,7 @@ def create_time_index(scenario, start_datetime=None):
         base = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
     dt_min = scenario["time_resolution_min"]
-    n_days = scenario["sim_horizon_days"]
+    n_days = scenario["basis_simulation"]
     total_minutes = n_days * 24 * 60
     n_steps = int(total_minutes / dt_min)
 
@@ -338,7 +338,7 @@ def simulate_load_profile(scenario, start_datetime=None):
     sessions_all = []
     if timestamps:
         first_day = timestamps[0].replace(hour=0, minute=0, second=0, microsecond=0)
-        sim_days = scenario["sim_horizon_days"]
+        sim_days = scenario["basis_simulation"]
         for d in range(sim_days):
             day_start = first_day + timedelta(days=d)
             sessions_all.extend(build_sessions_for_day(scenario, day_start))
