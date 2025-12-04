@@ -27,8 +27,8 @@ arrival_time_distribution:
 
   weekday_weight:     # Anteil der Mitarbeiter zur Gesamtbelegschaft, die an den entsprechenden Tagen nicht im Home Office oder Außerhalb arbeitet
     working_day: [0.55, 0.95]     # Minimale und maximale Belegung an Werktagen
-    saturday: [0.00, 0.05]
-    sunday_holiday: [0.00]
+    saturday: [0.40, 0.90]
+    sunday_holiday: [0.7, 0.9]
 
   components_per_weekday:
   ## gestalte die unterschiedlichen peaks pro Tag modular ergänzbar, sodass diese je nach Schichtbetrieb angepasst werden können.
