@@ -1,397 +1,420 @@
 import yaml
 import numpy as np
-from datetime import datetime, timedelta, time
-
+from datetime import datetime, timedelta
 from typing import Any
 
-## 
+
+# ---------------------------------------------------------------------------
+# Szenario laden
+# ---------------------------------------------------------------------------
+
 def load_scenario(path: str) -> dict[str, Any]:
     """
-    Lädt eine Szenario-YAML-Datei und gibt ein Dictionary zurück.
-
-    Parameters
-    ----------
-    path : str
-        Pfad zur YAML-Szenariodatei.
-
-    Returns
-    -------
-    dict
-        Das eingelesene Szenario als Dictionary.
+    Liest eine YAML-Szenariodatei ein und gibt sie als Dictionary zurück.
     """
-    with open(path, "r", encoding="utf-8") as f:
-        scenario = yaml.safe_load(f)
+    with open(path, "r", encoding="utf-8") as file:
+        scenario = yaml.safe_load(file)
     return scenario
 
 
-def create_time_index(scenario, start_datetime=None):
+# ---------------------------------------------------------------------------
+# Hilfsfunktionen: Range-Verarbeitung und Tagtyp
+# ---------------------------------------------------------------------------
+
+def sample_from_range(value_definition: Any) -> float:
     """
-    Erzeugt eine Liste von Zeitstempeln über den Simulationshorizont.
+    Verarbeitet Werte aus der YAML, die entweder als Skalar oder als Liste
+    [min, max] (bzw. [value]) angegeben sind, und gibt einen float zurück.
 
-    Parameters
-    ----------
-    scenario : dict
-        Eingelesenes Szenario.
-    start_datetime : datetime or None
-        Startzeitpunkt der Simulation (Default: heute 00:00).
-
-    Returns
-    -------
-    list[datetime]
-        Liste der Zeitstempel.
+    Beispiele
+    ---------
+    0.45        -> 0.45
+    [0.3, 0.7]  -> Zufallswert ~ U(0.3, 0.7)
+    [0.0]       -> 0.0
     """
+    if isinstance(value_definition, (list, tuple)):
+        if len(value_definition) == 1:
+            return float(value_definition[0])
+        if len(value_definition) == 2:
+            lower_bound, upper_bound = value_definition
+            return float(np.random.uniform(lower_bound, upper_bound))
+        raise ValueError(f"Ungültiges Range-Format: {value_definition}")
 
-    # 1) Falls start_datetime im Funktionsaufruf angegeben wurde → das hat PRIORITÄT
+    return float(value_definition)
+
+
+def determine_bdew_day_type(current_datetime: datetime) -> str:
+    """
+    Ordnet ein Datum einem BDEW-Tagtyp zu:
+
+      - 'working_day'     (Montag bis Freitag)
+      - 'saturday'
+      - 'sunday_holiday'  (Sonntag, Feiertage optional ergänzbar)
+    """
+    weekday_index = current_datetime.weekday()  # Montag = 0, Sonntag = 6
+
+    if weekday_index <= 4:
+        return "working_day"
+    if weekday_index == 5:
+        return "saturday"
+    return "sunday_holiday"
+
+
+# ---------------------------------------------------------------------------
+# Zeitindex
+# ---------------------------------------------------------------------------
+
+def create_time_index(scenario: dict, start_datetime: datetime | None = None) -> list[datetime]:
+    """
+    Erzeugt eine Liste von Zeitstempeln über die Länge der Basis-Simulation.
+
+    Verwendet:
+      - scenario["start_datetime"] oder aktuellen Tag 00:00 als Start
+      - scenario["time_resolution_min"] als Zeitschritt
+      - scenario["basis_simulation"] als Anzahl der Tage
+    """
     if start_datetime is not None:
-        base = start_datetime
-
-    # 2) Falls in YAML definiert
+        simulation_start_datetime = start_datetime
     elif "start_datetime" in scenario:
-        base = datetime.fromisoformat(scenario["start_datetime"])
-
-    # 3) Fallback: Heute 00:00
+        simulation_start_datetime = datetime.fromisoformat(scenario["start_datetime"])
     else:
-        base = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        now = datetime.now()
+        simulation_start_datetime = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    dt_min = scenario["time_resolution_min"]
-    n_days = scenario["basis_simulation"]
-    total_minutes = n_days * 24 * 60
-    n_steps = int(total_minutes / dt_min)
+    time_resolution_min = scenario["time_resolution_min"]
+    number_of_days_in_basis_simulation = scenario["basis_simulation"]
 
-    dt = timedelta(minutes=dt_min)
-    timestamps = [base + i * dt for i in range(n_steps)]
+    total_minutes_in_simulation = number_of_days_in_basis_simulation * 24 * 60
+    number_of_time_steps = int(total_minutes_in_simulation / time_resolution_min)
 
-    return timestamps
+    time_step_delta = timedelta(minutes=time_resolution_min)
+    time_index = [
+        simulation_start_datetime + step_index * time_step_delta
+        for step_index in range(number_of_time_steps)
+    ]
 
-## components ist eine uneindeutige Variablenbezeichnung (z.B. Set_lognormal_parameters). Der Funktionsname lässt nicht auf die Funktion der Funktion schließen...z.B. create_random_lognormal_setofints
-def sample_mixture_lognormal(n_samples, components, max_value=None, unit="generic"):
+    return time_index
+
+
+# ---------------------------------------------------------------------------
+# Mischung von Lognormalverteilungen
+# ---------------------------------------------------------------------------
+
+def sample_lognormal_mixture(
+    number_of_samples: int,
+    mixture_components: list[dict[str, Any]],
+    max_value: float | None = None,
+    unit_description: str = "generic",
+) -> np.ndarray:
     """
-    Zieht Zufallswerte aus einer Mischung von Lognormalverteilungen.
+    Erzeugt Stichproben aus einer Mischung von Lognormalverteilungen.
 
     Parameters
     ----------
-    n_samples : int
-        Anzahl der zu erzeugenden Stichproben.
-    components : list[dict]
-        Liste von Komponenten mit Feldern 'mu', 'sigma', 'weight'.
-        Optional: weitere Felder wie 'shift_minutes'.
-    max_value : float or None
-        Falls angegeben, werden Werte auf diesen Maximalwert begrenzt.
-    unit : str
-        Nur für Debug/Lesbarkeit, wird nicht verwendet.
-
-    Returns
-    -------
-    np.ndarray
-        Array der gezogenen Werte (float).
+    number_of_samples : int
+        Anzahl der zu erzeugenden Zufallswerte.
+    mixture_components : list[dict]
+        Komponenten mit Schlüsseln 'mu', 'sigma', 'weight' und optional 'shift_minutes'.
+    max_value : float oder None
+        Optionaler Maximalwert, auf den die Zufallswerte begrenzt werden.
+    unit_description : str
+        Nur zur Dokumentation, hat keinen Einfluss auf die Berechnung.
     """
-    if n_samples <= 0:
+    if number_of_samples <= 0:
         return np.array([])
 
-    weights = np.array([c["weight"] for c in components], dtype=float)
-    weights = weights / weights.sum()
+    component_weights = np.array(
+        [component["weight"] for component in mixture_components],
+        dtype=float,
+    )
+    component_weights = component_weights / component_weights.sum()
 
-    ## Welcher Sample gehört zu welcher Komponente?
-    comp_idx = np.random.choice(len(components), size=n_samples, p=weights)
+    chosen_component_indices = np.random.choice(
+        len(mixture_components),
+        size=number_of_samples,
+        p=component_weights,
+    )
 
-    samples = np.zeros(n_samples, dtype=float)
+    sampled_values = np.zeros(number_of_samples, dtype=float)
 
-    for i, idx in enumerate(comp_idx):
-        ## wenn c ein Wert des Sets "components" ist, dann ist c =component. Nur c ist eine unverständliche Variablenbeschreibung.
-        c = components[idx]
-        mu = float(c["mu"])
-        sigma = float(c["sigma"])
+    for sample_index, component_index in enumerate(chosen_component_indices):
+        component = mixture_components[component_index]
 
-        ## x ist ein denkbar schlechter Variablenname...
-        x = np.random.lognormal(mean=mu, sigma=sigma)
+        mu_value = float(component["mu"])
+        sigma_value = float(component["sigma"])
 
-        # Optionaler Shift in Minuten, nur für arrival_time_distribution relevant
-        if "shift_minutes" in c:
-            x = x * 60.0 + float(c["shift_minutes"])
+        lognormal_value = np.random.lognormal(mean=mu_value, sigma=sigma_value)
 
-        samples[i] = x
+        if "shift_minutes" in component and component["shift_minutes"] is not None:
+            lognormal_value = lognormal_value * 60.0 + float(component["shift_minutes"])
+
+        sampled_values[sample_index] = lognormal_value
 
     if max_value is not None:
-        samples = np.minimum(samples, max_value)
+        sampled_values = np.minimum(sampled_values, max_value)
 
-    return samples
+    return sampled_values
 
-## was soll dt sein?
-def get_weekday_label(dt):
+
+# ---------------------------------------------------------------------------
+# Ankunftszeiten
+# ---------------------------------------------------------------------------
+
+def sample_arrival_times_for_day(scenario: dict, day_start_datetime: datetime) -> list[datetime]:
     """
-    Gibt Wochentagskürzel wie 'Mon', 'Tue', ... zurück.
+    Generiert alle Ankunftszeitpunkte für einen Tag als datetime-Objekte.
+
+    Grundlage:
+      - scenario["arrival_time_distribution"]["weekday_weight"][day_type] (als Range)
+      - scenario["site"]["expected_sessions_per_charger_per_day"] (als Range)
+      - scenario["arrival_time_distribution"]["components_per_weekday"][day_type]
+        (mu-/sigma-Ranges, shift_minutes, weight)
     """
-    return dt.strftime("%a")  # Mon, Tue, Wed, ...
+    day_type = determine_bdew_day_type(day_start_datetime)
 
+    number_of_chargers = scenario["site"]["number_chargers"]
+    expected_sessions_per_charger_range = scenario["site"]["expected_sessions_per_charger_per_day"]
+    expected_sessions_per_charger = sample_from_range(expected_sessions_per_charger_range)
 
-def sample_arrivals_for_day(scenario, day_start):
-    """
-    Erzeugt Ankunftszeitpunkte für einen Tag (als datetime-Objekte).
+    weekday_weight_range = scenario["arrival_time_distribution"]["weekday_weight"][day_type]
+    weekday_weight = sample_from_range(weekday_weight_range)
 
-    Nutzt arrival_time_distribution + weekday_weight + expected_sessions_per_charger_per_day.
-    """
-    arrival_cfg = scenario["arrival_time_distribution"]
-    ## Du benötigst die Funktion get_weekday_label nicht! weekday = day_start.strftime("%a"). Schreibe kompakt.
-    weekday = get_weekday_label(day_start)
+    number_of_sessions_today = int(
+        number_of_chargers * expected_sessions_per_charger * weekday_weight
+    )
 
-    weekday_weight = arrival_cfg["weekday_weight"][weekday]
-    n_chargers = scenario["site"]["number_chargers"]
-    sessions_per_charger = scenario["vehicles"]["expected_sessions_per_charger_per_day"]
-
-    n_today = int(n_chargers * sessions_per_charger * weekday_weight)
-    if n_today <= 0:
+    if number_of_sessions_today <= 0:
         return []
 
-    components_all = arrival_cfg["components_per_weekday"]
-    components = components_all.get(weekday, [])
-    ## Warum _min? minutes? minimum? uneindeutig.
-    samples_min = sample_mixture_lognormal(
-        n_samples=n_today,
-        components=components,
+    component_templates_for_day_type = scenario["arrival_time_distribution"]["components_per_weekday"][day_type]
+
+    realized_mixture_components: list[dict[str, Any]] = []
+    for component_template in component_templates_for_day_type:
+        realized_component: dict[str, Any] = {
+            "mu": sample_from_range(component_template["mu"]),
+            "sigma": sample_from_range(component_template["sigma"]),
+            "weight": sample_from_range(component_template.get("weight", 1.0)),
+            "shift_minutes": component_template.get("shift_minutes", None),
+        }
+        realized_mixture_components.append(realized_component)
+
+    if not realized_mixture_components:
+        return []
+
+    sampled_minutes_after_midnight = sample_lognormal_mixture(
+        number_of_samples=number_of_sessions_today,
+        mixture_components=realized_mixture_components,
         max_value=None,
-        unit="minutes",
+        unit_description="minutes",
     )
 
-    arrivals = [day_start + timedelta(minutes=float(m)) for m in samples_min]
-    arrivals.sort()
-    return arrivals
+    arrival_times_for_day = [
+        day_start_datetime + timedelta(minutes=float(minutes_value))
+        for minutes_value in sampled_minutes_after_midnight
+    ]
+    arrival_times_for_day.sort()
+
+    return arrival_times_for_day
 
 
-def sample_parking_durations(scenario, n_sessions):
+# ---------------------------------------------------------------------------
+# Parkdauer
+# ---------------------------------------------------------------------------
+
+def sample_parking_durations(scenario: dict, number_of_sessions: int) -> np.ndarray:
     """
-    Erzeugt Parkdauern in Minuten für n_sessions.
-    """
-    ## cfg/config ist kein guter Variablenname.
-    cfg = scenario["parking_duration_distribution"]
-    components = cfg["components"]
-    max_minutes = cfg["max_duration_minutes"]
+    Generiert Parkdauern in Minuten für die übergebene Anzahl an Sessions.
 
-    durations = sample_mixture_lognormal(
-        n_samples=n_sessions,
-        components=components,
-        max_value=max_minutes,
-        unit="minutes",
+    Verwendet:
+      - scenario["parking_duration_distribution"]["components"]
+        mit mu-/sigma-Ranges und weights
+    """
+    parking_duration_distribution = scenario["parking_duration_distribution"]
+    maximum_parking_duration_minutes = parking_duration_distribution["max_duration_minutes"]
+
+    realized_mixture_components: list[dict[str, Any]] = []
+
+    for component_template in parking_duration_distribution["components"]:
+        realized_component: dict[str, Any] = {
+            "mu": sample_from_range(component_template["mu"]),
+            "sigma": sample_from_range(component_template["sigma"]),
+            "weight": sample_from_range(component_template["weight"]),
+        }
+        realized_mixture_components.append(realized_component)
+
+    parking_durations_minutes = sample_lognormal_mixture(
+        number_of_samples=number_of_sessions,
+        mixture_components=realized_mixture_components,
+        max_value=maximum_parking_duration_minutes,
+        unit_description="minutes",
     )
-    return durations
+
+    return parking_durations_minutes
 
 
-def sample_soc_at_arrival(scenario, n_sessions):
+# ---------------------------------------------------------------------------
+# SoC bei Ankunft
+# ---------------------------------------------------------------------------
+
+def sample_soc_upon_arrival(scenario: dict, number_of_sessions: int) -> np.ndarray:
     """
-    Erzeugt SoC-Werte bei Ankunft (0..1) für n_sessions.
-    """
-    cfg = scenario["soc_at_arrival_distribution"]
-    components = cfg["components"]
-    max_soc = cfg["max_soc"]
+    Generiert SoC-Werte (0..1) bei Ankunft für mehrere Ladesessions.
 
-    soc_values = sample_mixture_lognormal(
-        n_samples=n_sessions,
-        components=components,
-        max_value=max_soc,
-        unit="soc_fraction",
+    Verwendet:
+      - scenario["soc_at_arrival_distribution"]
+        mit Komponenten und mu-/sigma-Ranges
+    """
+    soc_at_arrival_distribution = scenario["soc_at_arrival_distribution"]
+    maximum_soc_value = soc_at_arrival_distribution["max_soc"]
+
+    realized_mixture_components: list[dict[str, Any]] = []
+
+    for component_template in soc_at_arrival_distribution["components"]:
+        realized_component: dict[str, Any] = {
+            "mu": sample_from_range(component_template["mu"]),
+            "sigma": sample_from_range(component_template["sigma"]),
+            "weight": sample_from_range(component_template["weight"]),
+        }
+        realized_mixture_components.append(realized_component)
+
+    soc_values = sample_lognormal_mixture(
+        number_of_samples=number_of_sessions,
+        mixture_components=realized_mixture_components,
+        max_value=maximum_soc_value,
+        unit_description="soc_fraction",
     )
+
     return soc_values
 
-## Ergänze jedes Szenario durch ein zufällig gewähltes Auto des Fuhrparks. 
-## Damit kannst als Output nur noch das Auto angeben und die Attribute des Autos wie battery_capacity etc. entfernen.
-def build_sessions_for_day(scenario, day_start):
-    """
-    Baut für einen Tag eine Liste von Ladesessions (als Dictionaries).
 
-    Jede Session hat:
-      - arrival_time
-      - departure_time
-      - soc_arrival
-      - soc_target
-      - battery_capacity_kwh
-      - energy_required_kwh
-      - max_pwr_vehicle_kw
+# ---------------------------------------------------------------------------
+# Ladesessions eines Tages
+# ---------------------------------------------------------------------------
+
+def build_charging_sessions_for_day(scenario: dict, day_start_datetime: datetime) -> list[dict[str, Any]]:
     """
-    arrivals = sample_arrivals_for_day(scenario, day_start)
-    n = len(arrivals)
-    if n == 0:
+    Erzeugt für einen Tag eine Liste von Ladesessions mit allen relevanten Parametern.
+    """
+    arrival_times_for_day = sample_arrival_times_for_day(scenario, day_start_datetime)
+    number_of_sessions = len(arrival_times_for_day)
+
+    if number_of_sessions == 0:
         return []
 
-    durations_min = sample_parking_durations(scenario, n)
-    soc_arrival = sample_soc_at_arrival(scenario, n)
+    parking_durations_minutes = sample_parking_durations(scenario, number_of_sessions)
+    soc_values_at_arrival = sample_soc_upon_arrival(scenario, number_of_sessions)
 
-    soc_target = scenario["vehicles"]["soc_target"]
-    capacity = scenario["vehicles"]["battery_capacity_kwh"]
-    max_pwr_vehicle_kw = scenario["vehicles"]["max_pwr_vehicle_kw"]
+    target_soc = scenario["vehicles"]["soc_target"]
+    battery_capacity_kwh = scenario["vehicles"]["battery_capacity_kwh"]
+    max_vehicle_charging_power_kw = scenario["vehicles"]["max_pwr_vehicle_kw"]
 
-    sessions = []
-    for i in range(n):
-        a = arrivals[i]
-        d = a + timedelta(minutes=float(durations_min[i]))
-        soc_a = float(soc_arrival[i])
-        delta_soc = max(soc_target - soc_a, 0.0)
-        energy_req = delta_soc * capacity
+    charging_sessions_for_day: list[dict[str, Any]] = []
 
-        sessions.append(
-            {
-                "arrival_time": a,
-                "departure_time": d,
-                "soc_arrival": soc_a,
-                "soc_target": soc_target,
-                "battery_capacity_kwh": capacity,
-                "energy_required_kwh": energy_req,
-                "max_pwr_vehicle_kw": max_pwr_vehicle_kw,
-            }
+    for session_index in range(number_of_sessions):
+        arrival_time = arrival_times_for_day[session_index]
+        departure_time = arrival_time + timedelta(
+            minutes=float(parking_durations_minutes[session_index])
         )
-    return sessions
 
-## die Funktion ist nicht notwendig. Siehe yaml Kommentar.
-def is_in_operation_window(t: datetime, scenario: dict) -> bool:
+        soc_at_arrival = float(soc_values_at_arrival[session_index])
+        delta_soc = max(target_soc - soc_at_arrival, 0.0)
+        required_energy_kwh = delta_soc * battery_capacity_kwh
+
+        charging_session: dict[str, Any] = {
+            "arrival_time": arrival_time,
+            "departure_time": departure_time,
+            "soc_arrival": soc_at_arrival,
+            "soc_target": target_soc,
+            "battery_capacity_kwh": battery_capacity_kwh,
+            "energy_required_kwh": required_energy_kwh,
+            "max_charging_power_kw": max_vehicle_charging_power_kw,
+        }
+        charging_sessions_for_day.append(charging_session)
+
+    return charging_sessions_for_day
+
+
+# ---------------------------------------------------------------------------
+# Hauptsimulation: Lastprofil
+# ---------------------------------------------------------------------------
+
+def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None):
     """
-    Prüft, ob zum Zeitpunkt t am gegebenen Standort geladen werden darf.
+    Führt die Lastgang-Simulation für die im Szenario definierte Basis-Simulation durch.
 
-    Steuerung über YAML im Block scenario["site"]:
-
-    Variante mit operation_schedule (empfohlen):
-    -------------------------------------------
-    site:
-      operation_schedule:
-        Mon: "06:00-20:00"
-        Tue: "06:00-20:00"
-        Wed: "06:00-20:00"
-        Thu: "06:00-20:00"
-        Fri: "06:00-20:00"
-        Sat: "08:00-14:00"
-        Sun: "closed"      # oder "" für geschlossen
-
-      # Für 24/7-Standorte (z.B. Autobahn):
-      # operation_schedule:
-      #   Mon: "24/7"
-      #   ...
-      #   Sun: "24/7"
-
-    Falls operation_schedule nicht gesetzt ist, wird immer True zurückgegeben
-    (d.h. der Standort ist 24/7 offen).
+    Rückgabe:
+      - Liste von Zeitstempeln
+      - Array mit Lastwerten in kW
+      - Liste aller Ladesessions
     """
-    site_cfg = scenario.get("site", {})
-    schedule = site_cfg.get("operation_schedule")
+    time_index = create_time_index(scenario, start_datetime)
 
-    # Kein Schedule definiert -> immer offen
-    if schedule is None:
-        return True
+    time_resolution_min = scenario["time_resolution_min"]
+    time_step_hours = time_resolution_min / 60.0
 
-    # "Mon", "Tue", ...
-    day_label = t.strftime("%a")
-    rule = schedule.get(day_label)
+    number_of_time_steps = len(time_index)
+    load_profile_kw = np.zeros(number_of_time_steps, dtype=float)
 
-    # Nichts für diesen Tag definiert -> geschlossen
-    if rule is None:
-        return False
-
-    rule_str = str(rule).strip()
-
-    # leer oder "closed" -> geschlossen
-    if not rule_str:
-        return False
-
-    rule_upper = rule_str.upper()
-    if rule_upper in ("CLOSED", "CLOSE", "OFF", "0"):
-        return False
-
-    # 24/7 offen an diesem Tag
-    if rule_upper in ("24/7", "24H", "24HRS"):
-        return True
-
-    # Format: "HH:MM-HH:MM"
-    try:
-        start_str, end_str = [s.strip() for s in rule_str.split("-")]
-        sh, sm = map(int, start_str.split(":"))
-        eh, em = map(int, end_str.split(":"))
-    except Exception as e:
-        raise ValueError(
-            f"Ungültige operation_schedule-Angabe für {day_label}: '{rule_str}'"
-        ) from e
-
-    start_time = time(sh, sm)
-    end_time = time(eh, em)
-    current_time = t.time()
-
-    return start_time <= current_time < end_time
-
-
-def simulate_load_profile(scenario, start_datetime=None):
-    """
-    Führt die Lastgang-Simulation über den Simulationshorizont aus.
-
-    Sehr einfache Strategie:
-      - Ladestrategie 'immediate'
-      - alle aktiven Sessions teilen sich die verfügbare Leistung
-      - Begrenzung durch grid_limit und Anzahl Ladepunkte
-    """
-    timestamps = create_time_index(scenario, start_datetime)
-    dt_min = scenario["time_resolution_min"]
-    dt_h = dt_min / 60.0
-
-    n_steps = len(timestamps)
-    load_kw = np.zeros(n_steps, dtype=float)
-
-    grid_limit_kw = scenario["site"]["grid_limit_p_avb_kw"]
+    grid_limit_p_avb_kw = scenario["site"]["grid_limit_p_avb_kw"]
     rated_power_kw = scenario["site"]["rated_power_kw"]
-    n_chargers = scenario["site"]["number_chargers"]
-    charger_eff = scenario["site"]["charger_efficiency"]
+    number_of_chargers = scenario["site"]["number_chargers"]
+    charger_efficiency = scenario["site"]["charger_efficiency"]
 
-    # Sessions pro Tag vorbereiten
-    sessions_all = []
-    if timestamps:
-        first_day = timestamps[0].replace(hour=0, minute=0, second=0, microsecond=0)
-        sim_days = scenario["basis_simulation"]
-        for d in range(sim_days):
-            day_start = first_day + timedelta(days=d)
-            sessions_all.extend(build_sessions_for_day(scenario, day_start))
+    all_charging_sessions: list[dict[str, Any]] = []
 
-       # Haupt-Loop über alle Zeitschritte
-       ## Was macht der Hautp-Loop? Ein Kommentar soll erklären.
-    for i, t in enumerate(timestamps):
+    if time_index:
+        first_day_start_datetime = time_index[0].replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        number_of_days_in_basis_simulation = scenario["basis_simulation"]
 
-        # 1) Prüfen, ob die Station zu diesem Zeitpunkt überhaupt offen ist
-        ## nicht notwendig.
-        if not is_in_operation_window(t, scenario):
-            load_kw[i] = 0.0
-            continue
+        for day_offset in range(number_of_days_in_basis_simulation):
+            day_start_datetime = first_day_start_datetime + timedelta(days=day_offset)
+            charging_sessions_for_day = build_charging_sessions_for_day(
+                scenario, day_start_datetime
+            )
+            all_charging_sessions.extend(charging_sessions_for_day)
 
-        # 2) aktive Sessions in diesem Zeitschritt
-        active = [
-            s for s in sessions_all
-            if s["arrival_time"] <= t < s["departure_time"]
-            and s["energy_required_kwh"] > 0.0
+    for time_step_index, current_timestamp in enumerate(time_index):
+
+        active_charging_sessions = [
+            session
+            for session in all_charging_sessions
+            if session["arrival_time"] <= current_timestamp < session["departure_time"]
+            and session["energy_required_kwh"] > 0.0
         ]
 
-        if not active:
-            load_kw[i] = 0.0
+        if not active_charging_sessions:
+            load_profile_kw[time_step_index] = 0.0
             continue
 
-        # maximal verfügbare Leistung am Standort
-        ## Variablenname! site_p_max = max_avail_charging_power
-        site_p_max = min(grid_limit_kw, n_chargers * rated_power_kw)
+        maximum_site_power_kw = min(
+            grid_limit_p_avb_kw,
+            number_of_chargers * rated_power_kw,
+        )
 
-        # simple „faire“ Verteilung: alle bekommen gleich viel, begrenzt durch Fahrzeugsmaximalleistung
-        ## Geb der "Lade-Strategie" direkt einen Namen. Hier wirst du verschiedene Ladestrategien implementieren.
-        n_active = len(active)
-        p_per_session = site_p_max / n_active
+        number_of_active_sessions = len(active_charging_sessions)
+        available_power_per_session_kw = maximum_site_power_kw / number_of_active_sessions
 
-        total_power = 0.0
-        for s in active:
-            p_session = min(p_per_session, s["max_pwr_vehicle_kw"])
-            # Energie, die in diesem Zeitschritt übertragen werden könnte (unter Idealannahmen)
-            e_possible = p_session * dt_h * charger_eff
+        total_power_in_time_step_kw = 0.0
 
-            if e_possible >= s["energy_required_kwh"]:
-                # Session ist fertig in diesem Schritt
-                e_delivered = s["energy_required_kwh"]
-                s["energy_required_kwh"] = 0.0
-                # Anpassung der Leistung, falls gewünscht, hier vereinfachend ignoriert
+        for charging_session in active_charging_sessions:
+            allowed_power_kw = min(
+                available_power_per_session_kw,
+                charging_session["max_charging_power_kw"],
+            )
+
+            possible_energy_in_time_step_kwh = (
+                allowed_power_kw * time_step_hours * charger_efficiency
+            )
+
+            if possible_energy_in_time_step_kwh >= charging_session["energy_required_kwh"]:
+                charging_session["energy_required_kwh"] = 0.0
             else:
-                e_delivered = e_possible
-                s["energy_required_kwh"] -= e_delivered
+                charging_session["energy_required_kwh"] -= possible_energy_in_time_step_kwh
 
-            total_power += p_session
+            total_power_in_time_step_kw += allowed_power_kw
 
-        load_kw[i] = total_power
+        load_profile_kw[time_step_index] = total_power_in_time_step_kw
 
-    return timestamps, load_kw, sessions_all
-
-## sim_model_extended erklärt wieder nicht was das sein soll. Auch gibt es keinen Grund diese Funktionen nicht in sim_model zu schreiben.
+    return time_index, load_profile_kw, all_charging_sessions
