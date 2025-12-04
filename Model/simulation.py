@@ -1,6 +1,6 @@
 import yaml
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Any
 
 
@@ -43,21 +43,44 @@ def sample_from_range(value_definition: Any) -> float:
     return float(value_definition)
 
 
-def determine_bdew_day_type(current_datetime: datetime) -> str:
+def parse_holiday_dates_from_scenario(scenario: dict) -> set[date]:
     """
-    Ordnet ein Datum einem BDEW-Tagtyp zu:
+    Liest Feiertage aus scenario['holidays']['dates'] und gibt sie als Set von date-Objekten zurück.
+    """
+    holiday_dates_strings = scenario.get("holidays", {}).get("dates", [])
+    holiday_dates: set[date] = set()
 
-      - 'working_day'     (Montag bis Freitag)
-      - 'saturday'
-      - 'sunday_holiday'  (Sonntag, Feiertage optional ergänzbar)
+    for date_string in holiday_dates_strings:
+        # Format in YAML: 'YYYY-MM-DD'
+        holiday_date = datetime.fromisoformat(date_string).date()
+        holiday_dates.add(holiday_date)
+
+    return holiday_dates
+
+
+def determine_day_type_with_holidays(current_datetime: datetime, scenario: dict) -> str:
     """
+    Ordnet ein Datum einem Tagtyp zu, unter Berücksichtigung der im Szenario
+    definierten Feiertage:
+
+      - 'sunday_holiday', wenn Datum in der Feiertagsliste oder Sonntag ist
+      - 'saturday', wenn Samstag
+      - 'working_day', sonst (Montag-Freitag ohne Feiertag)
+    """
+    current_date = current_datetime.date()
+    holiday_dates = parse_holiday_dates_from_scenario(scenario)
+
+    # Feiertag hat Vorrang und wird wie Sonntag/Ferien behandelt
+    if current_date in holiday_dates:
+        return "sunday_holiday"
+
     weekday_index = current_datetime.weekday()  # Montag = 0, Sonntag = 6
 
-    if weekday_index <= 4:
-        return "working_day"
+    if weekday_index == 6:
+        return "sunday_holiday"
     if weekday_index == 5:
         return "saturday"
-    return "sunday_holiday"
+    return "working_day"
 
 
 # ---------------------------------------------------------------------------
@@ -66,12 +89,13 @@ def determine_bdew_day_type(current_datetime: datetime) -> str:
 
 def create_time_index(scenario: dict, start_datetime: datetime | None = None) -> list[datetime]:
     """
-    Erzeugt eine Liste von Zeitstempeln über die Länge der Basis-Simulation.
+    Erzeugt eine Liste von Zeitstempeln über den im Szenario definierten
+    Simulationshorizont.
 
     Verwendet:
       - scenario["start_datetime"] oder aktuellen Tag 00:00 als Start
       - scenario["time_resolution_min"] als Zeitschritt
-      - scenario["basis_simulation"] als Anzahl der Tage
+      - scenario["simulation_horizon_days"] als Anzahl der Tage
     """
     if start_datetime is not None:
         simulation_start_datetime = start_datetime
@@ -82,9 +106,9 @@ def create_time_index(scenario: dict, start_datetime: datetime | None = None) ->
         simulation_start_datetime = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
     time_resolution_min = scenario["time_resolution_min"]
-    number_of_days_in_basis_simulation = scenario["basis_simulation"]
+    simulation_horizon_days = scenario["simulation_horizon_days"]
 
-    total_minutes_in_simulation = number_of_days_in_basis_simulation * 24 * 60
+    total_minutes_in_simulation = simulation_horizon_days * 24 * 60
     number_of_time_steps = int(total_minutes_in_simulation / time_resolution_min)
 
     time_step_delta = timedelta(minutes=time_resolution_min)
@@ -108,17 +132,6 @@ def sample_lognormal_mixture(
 ) -> np.ndarray:
     """
     Erzeugt Stichproben aus einer Mischung von Lognormalverteilungen.
-
-    Parameters
-    ----------
-    number_of_samples : int
-        Anzahl der zu erzeugenden Zufallswerte.
-    mixture_components : list[dict]
-        Komponenten mit Schlüsseln 'mu', 'sigma', 'weight' und optional 'shift_minutes'.
-    max_value : float oder None
-        Optionaler Maximalwert, auf den die Zufallswerte begrenzt werden.
-    unit_description : str
-        Nur zur Dokumentation, hat keinen Einfluss auf die Berechnung.
     """
     if number_of_samples <= 0:
         return np.array([])
@@ -170,7 +183,7 @@ def sample_arrival_times_for_day(scenario: dict, day_start_datetime: datetime) -
       - scenario["arrival_time_distribution"]["components_per_weekday"][day_type]
         (mu-/sigma-Ranges, shift_minutes, weight)
     """
-    day_type = determine_bdew_day_type(day_start_datetime)
+    day_type = determine_day_type_with_holidays(day_start_datetime, scenario)
 
     number_of_chargers = scenario["site"]["number_chargers"]
     expected_sessions_per_charger_range = scenario["site"]["expected_sessions_per_charger_per_day"]
@@ -224,10 +237,6 @@ def sample_arrival_times_for_day(scenario: dict, day_start_datetime: datetime) -
 def sample_parking_durations(scenario: dict, number_of_sessions: int) -> np.ndarray:
     """
     Generiert Parkdauern in Minuten für die übergebene Anzahl an Sessions.
-
-    Verwendet:
-      - scenario["parking_duration_distribution"]["components"]
-        mit mu-/sigma-Ranges und weights
     """
     parking_duration_distribution = scenario["parking_duration_distribution"]
     maximum_parking_duration_minutes = parking_duration_distribution["max_duration_minutes"]
@@ -259,10 +268,6 @@ def sample_parking_durations(scenario: dict, number_of_sessions: int) -> np.ndar
 def sample_soc_upon_arrival(scenario: dict, number_of_sessions: int) -> np.ndarray:
     """
     Generiert SoC-Werte (0..1) bei Ankunft für mehrere Ladesessions.
-
-    Verwendet:
-      - scenario["soc_at_arrival_distribution"]
-        mit Komponenten und mu-/sigma-Ranges
     """
     soc_at_arrival_distribution = scenario["soc_at_arrival_distribution"]
     maximum_soc_value = soc_at_arrival_distribution["max_soc"]
@@ -340,7 +345,8 @@ def build_charging_sessions_for_day(scenario: dict, day_start_datetime: datetime
 
 def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None):
     """
-    Führt die Lastgang-Simulation für die im Szenario definierte Basis-Simulation durch.
+    Führt die Lastgang-Simulation für den im Szenario definierten
+    Simulationshorizont durch.
 
     Rückgabe:
       - Liste von Zeitstempeln
@@ -366,9 +372,9 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
         first_day_start_datetime = time_index[0].replace(
             hour=0, minute=0, second=0, microsecond=0
         )
-        number_of_days_in_basis_simulation = scenario["basis_simulation"]
+        simulation_horizon_days = scenario["simulation_horizon_days"]
 
-        for day_offset in range(number_of_days_in_basis_simulation):
+        for day_offset in range(simulation_horizon_days):
             day_start_datetime = first_day_start_datetime + timedelta(days=day_offset)
             charging_sessions_for_day = build_charging_sessions_for_day(
                 scenario, day_start_datetime
