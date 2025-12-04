@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, time
 
 from typing import Any
 
+## 
 def load_scenario(path: str) -> dict[str, Any]:
     """
     Lädt eine Szenario-YAML-Datei und gibt ein Dictionary zurück.
@@ -62,7 +63,7 @@ def create_time_index(scenario, start_datetime=None):
 
     return timestamps
 
-
+## components ist eine uneindeutige Variablenbezeichnung (z.B. Set_lognormal_parameters). Der Funktionsname lässt nicht auf die Funktion der Funktion schließen...z.B. create_random_lognormal_setofints
 def sample_mixture_lognormal(n_samples, components, max_value=None, unit="generic"):
     """
     Zieht Zufallswerte aus einer Mischung von Lognormalverteilungen.
@@ -90,16 +91,18 @@ def sample_mixture_lognormal(n_samples, components, max_value=None, unit="generi
     weights = np.array([c["weight"] for c in components], dtype=float)
     weights = weights / weights.sum()
 
-    # Welcher Sample gehört zu welcher Komponente?
+    ## Welcher Sample gehört zu welcher Komponente?
     comp_idx = np.random.choice(len(components), size=n_samples, p=weights)
 
     samples = np.zeros(n_samples, dtype=float)
 
     for i, idx in enumerate(comp_idx):
+        ## wenn c ein Wert des Sets "components" ist, dann ist c =component. Nur c ist eine unverständliche Variablenbeschreibung.
         c = components[idx]
         mu = float(c["mu"])
         sigma = float(c["sigma"])
 
+        ## x ist ein denkbar schlechter Variablenname...
         x = np.random.lognormal(mean=mu, sigma=sigma)
 
         # Optionaler Shift in Minuten, nur für arrival_time_distribution relevant
@@ -113,7 +116,7 @@ def sample_mixture_lognormal(n_samples, components, max_value=None, unit="generi
 
     return samples
 
-
+## was soll dt sein?
 def get_weekday_label(dt):
     """
     Gibt Wochentagskürzel wie 'Mon', 'Tue', ... zurück.
@@ -128,6 +131,7 @@ def sample_arrivals_for_day(scenario, day_start):
     Nutzt arrival_time_distribution + weekday_weight + expected_sessions_per_charger_per_day.
     """
     arrival_cfg = scenario["arrival_time_distribution"]
+    ## Du benötigst die Funktion get_weekday_label nicht! weekday = day_start.strftime("%a"). Schreibe kompakt.
     weekday = get_weekday_label(day_start)
 
     weekday_weight = arrival_cfg["weekday_weight"][weekday]
@@ -140,7 +144,7 @@ def sample_arrivals_for_day(scenario, day_start):
 
     components_all = arrival_cfg["components_per_weekday"]
     components = components_all.get(weekday, [])
-
+    ## Warum _min? minutes? minimum? uneindeutig.
     samples_min = sample_mixture_lognormal(
         n_samples=n_today,
         components=components,
@@ -157,6 +161,7 @@ def sample_parking_durations(scenario, n_sessions):
     """
     Erzeugt Parkdauern in Minuten für n_sessions.
     """
+    ## cfg/config ist kein guter Variablenname.
     cfg = scenario["parking_duration_distribution"]
     components = cfg["components"]
     max_minutes = cfg["max_duration_minutes"]
@@ -186,7 +191,8 @@ def sample_soc_at_arrival(scenario, n_sessions):
     )
     return soc_values
 
-
+## Ergänze jedes Szenario durch ein zufällig gewähltes Auto des Fuhrparks. 
+## Damit kannst als Output nur noch das Auto angeben und die Attribute des Autos wie battery_capacity etc. entfernen.
 def build_sessions_for_day(scenario, day_start):
     """
     Baut für einen Tag eine Liste von Ladesessions (als Dictionaries).
@@ -233,6 +239,7 @@ def build_sessions_for_day(scenario, day_start):
         )
     return sessions
 
+## die Funktion ist nicht notwendig. Siehe yaml Kommentar.
 def is_in_operation_window(t: datetime, scenario: dict) -> bool:
     """
     Prüft, ob zum Zeitpunkt t am gegebenen Standort geladen werden darf.
@@ -337,9 +344,11 @@ def simulate_load_profile(scenario, start_datetime=None):
             sessions_all.extend(build_sessions_for_day(scenario, day_start))
 
        # Haupt-Loop über alle Zeitschritte
+       ## Was macht der Hautp-Loop? Ein Kommentar soll erklären.
     for i, t in enumerate(timestamps):
 
         # 1) Prüfen, ob die Station zu diesem Zeitpunkt überhaupt offen ist
+        ## nicht notwendig.
         if not is_in_operation_window(t, scenario):
             load_kw[i] = 0.0
             continue
@@ -356,9 +365,11 @@ def simulate_load_profile(scenario, start_datetime=None):
             continue
 
         # maximal verfügbare Leistung am Standort
+        ## Variablenname! site_p_max = max_avail_charging_power
         site_p_max = min(grid_limit_kw, n_chargers * rated_power_kw)
 
         # simple „faire“ Verteilung: alle bekommen gleich viel, begrenzt durch Fahrzeugsmaximalleistung
+        ## Geb der "Lade-Strategie" direkt einen Namen. Hier wirst du verschiedene Ladestrategien implementieren.
         n_active = len(active)
         p_per_session = site_p_max / n_active
 
@@ -382,3 +393,5 @@ def simulate_load_profile(scenario, start_datetime=None):
         load_kw[i] = total_power
 
     return timestamps, load_kw, sessions_all
+
+## sim_model_extended erklärt wieder nicht was das sein soll. Auch gibt es keinen Grund diese Funktionen nicht in sim_model zu schreiben.

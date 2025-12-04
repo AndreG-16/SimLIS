@@ -1,10 +1,9 @@
-name: office
 site_type: office      # Standort des Ladepunkts
 
 time_resolution_min: 360     # Zeitschritt, in der die Simulation abgebildet wird
-sim_horizon_days: 7     # Basislänge der Simulation
+basis_simulation: 7     # Basislänge der Simulation
 
-result_horizon_days: 28     # gewünschter Analysehorizont
+simulation_horizon: 33     # gewünschter Analysehorizont
 start_datetime: "2025-06-24 00:00"      # Zeitpunkt, ab dem der Lastgang anfangen soll
 
 site:

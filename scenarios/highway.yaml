@@ -1,45 +1,60 @@
-name: highway
-site_type: highway      # Standort des Ladepunkts
+site_type: office      # Standort des Ladepunkts
 
-time_resolution_min: 15     # Zeitschritt, in der die Simulation abgebildet wird
-sim_horizon_days: 7     # Länge der Simulation
+time_resolution_min: 360     # Zeitschritt, in der die Simulation abgebildet wird
+
+## der Unterschied zwischen sim_horizon_days und result_horizon_days ist nicht ersichtlich. Unterscheide zwischen ggf. wie die BDEW-Standard-Lastprofile
+## zwischen Werktag, Samstag, Sonn- & Feiertag: https://www.bdew.de/media/documents/2025-03-17_AWH_Aktualisierte_SLP_Strom_2025_Ver%C3%B6ffentlichung.pdf
+basis_simulation: 7     # Basislänge der Simulation ist eine Woche, um Variation zwischen den Wochentagen abzubilden
+
+simulation_horizon: 28     # gewünschter Analysehorizont in Tagen
+start_datetime: "2025-06-24 00:00"      # Zeitpunkt, ab dem der Lastgang anfangen soll
 
 site:
-  number_chargers: 10     # Anzahl der Ladepunkte am Standort
-  rated_power_kw: 300     # Verfügbare Leistung pro Ladepunkt
-  grid_limit_p_avb_kw: 2000     # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
-  operation_window: "00:00 - 23:59"     # Betriebszeiten des Ladepunkts
+  number_chargers: 8     # Anzahl der Ladepunkte am Standort
+  rated_power_kw: 22     # Verfügbare Leistung pro Ladepunkt
+  grid_limit_p_avb_kw: 150     # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  expected_sessions_per_charger_per_day: 3.0      # Ladungen, die schätzungsweise pro LP an einem Tag stattfinden
+    #Zwischen Werktag, Samstag und Feiertag variieren
+
+  ## ein chargepoint ist in der regel verfügbar. Spar dir die zusätzliche Komplexität.
+  operation_schedule:     # Betriebszeiten des Ladepunkts
+    Mon: "07:00-20:00"
+    Tue: "07:00-20:00"
+    Wed: "07:00-20:00"
+    Thu: "07:00-20:00"
+    Fri: "07:00-20:00"
+    Sat: "closed"
+    Sun: "closed"
+
   charger_efficiency: 0.95      # Verhältnis der aufgenommenen Leistung des Fahrzeugs zur abgegebenen Leistung des Ladepunkts
   charging_strategy: "immediate"      # Vom Betreiber festgelegte Strategie zur Bereitstellung des Stroms
 
+## hier ist der Fuhrpark abzubilden. Dieser besteht aus mehr als einem Fahrzeug. Hier macht es Sinn Fuhrparkdaten und Ladekurven als csv zu speichern und zu laden
 vehicles:
-  soc_target: 0.9     # Gewünschter Ladezustand am Ende des Ladeprozesses
+  soc_target: 1.0     # Gewünschter Ladezustand am Ende des Ladeprozesses
   battery_capacity_kwh: 60      # Batteriekapazität des Fahrzeugs
   max_pwr_vehicle_kw: 50      # Maximale Ladeleistung, die das Fahrzeug aufnehmen kann
+  ## Wie gehst du damit um, wenn die vorgegebenen Ladungen nicht gehalten werden können, weil besonders beim Office alle gleichzeitig ankommen?
 
-data:
-  arrivals_xlsx: "data/Ankunft.xlsx"
-  arrivals_sheet: "Ankunft"
-  durations_xlsx: "data/Standzeiten.xlsx"
-  durations_sheet: "Standdauer"
-  soc_xlsx: "data/SoC_Ankunft.xlsx"
-  soc_sheet: "SoC"
-
-arrival_time
+# Zeiten, an denen die Fahrer an den Ladepunkten ankommen
+arrival_time_distribution:
   type: lognormal_mixture
   time_unit: minutes
 
+## Leg hier nur die Grenzen fest und randomisiere weekday_weight und components_per_weeekday als Variable im Modell. 
+## Sonst ist das Modell zu starr -> jede Woche sieht gleich aus.
   weekday_weight:     # Anteil der Mitarbeiter zur Gesamtbelegschaft, die an den entsprechenden Tagen nicht im Home Office oder Außerhalb arbeitet
-    Mon: 0.70
-    Tue: 0.90
-    Wed: 0.95
-    Thu: 0.90
-    Fri: 0.60
-    Sat: 0.00
-    Sun: 0.00
+    Mon: [0.65, 0.75]
+    Tue: [0.85, 0,95]
+    Wed: [0.9, 1.0]
+    Thu: [0.85, 0.95]
+    Fri: [0.55, 0.65]
+    Sat: [0.00]
+    Sun: [0.00]
 
   components_per_weekday:
-     Mon:
+  ## gestalte die unterschiedlichen peaks pro Tag modular ergänzbar, sodass diese je nach Schichtbetrieb angepasst werden können.
+    Mon:
       - mu: 1.80      # Peak Morgens
         sigma: 0.25     # Streuung der Ankünfte
         shift_minutes: 360     # 06:00 Start
@@ -86,3 +101,39 @@ arrival_time
         weight: 0.40
     Sat: []
     Sun: []
+
+# Parkdauer in Minuten ab Ankunft; Verteilung ist eine Mischung aus Kurz- und Langzeitparkern
+## Lege hier nur die Grenzen fest und randomisiere parking duration und "components" im Modell.
+parking_duration_distribution:
+  type: lognormal_mixture
+  time_unit: minutes
+  max_duration_minutes: 720     # 12 Stunden
+
+  components:
+    - name: short_stay      # Mitarbeiter, die zum Beispiel teilzeit arbeiten
+      weight: 0.15      # Anteil der Mitarbeiter, die teilzeit arbeiten
+      mu: 270     # 4.5 Stunden
+      sigma: 0.2
+
+    - name: long_stay     # Langzeitparker / Vollzeitkräfte
+      weight: 0.85      # Anteil der Mitarbeiter, die vollzeit arbeiten
+      mu: 570       # 9.5 Stunden
+      sigma: 0.3
+
+# Batteriezustand bei Ankunft; Verteilung ist eine Mischung aus spontanen Laden und Laden aufgrund niedrigem Batteriezustand
+## Lege hier nur die Grenzen fest und randomisiere im Modell. Charging strategies unterscheiden sich je nach Standort. Lege die ggf. im Modell fest.
+soc_at_arrival_distribution:
+  type: lognormal_mixture
+  value_unit: fraction        # 0.0 bis 1.0
+  max_soc: 0.85               # 85 % maximaler SoC bei Ankunft
+
+  components:
+    - name: opportunistic_charging      # Laden aus Gelegenheit und nicht aus Notwendigkeit
+      weight: 0.80      # Anteil der Fahrer, die aus der Gelegenheit laden
+      mu: 0.45      # Durchschnittler SoC bei Ankunft
+      sigma: 0.2
+
+    - name: low_battery_charging      # Laden aufgrund leerer Batterie / gezielte Anfahrt
+      weight: 0.20      # Anteil der Fahrer, die aufgrund leerer Batterie laden
+      mu: 0.30
+      sigma: 0.3
