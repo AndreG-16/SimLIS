@@ -74,8 +74,8 @@ soc_at_arrival_distribution:
   components:
     - name: opportunistic_charging      # Laden aus Gelegenheit und nicht aus Notwendigkeit
       weight: 0.80      # Anteil der Fahrer, die aus der Gelegenheit laden
-      mu: 0.45      # Durchschnittler SoC bei Ankunft
-      sigma: 0.2
+      mu: [0.40, 0.50]      # Durchschnittler SoC bei Ankunft
+      sigma: [0.15, 0.25]
 
     - name: low_battery_charging      # Laden aufgrund leerer Batterie / gezielte Anfahrt
       weight: 0.20      # Anteil der Fahrer, die aufgrund leerer Batterie laden
