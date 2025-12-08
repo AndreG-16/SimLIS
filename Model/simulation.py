@@ -1,7 +1,167 @@
 import yaml
 import numpy as np
+import csv  # NEU
+from dataclasses import dataclass  # NEU
 from datetime import datetime, timedelta, date
 from typing import Any
+
+
+# ---------------------------------------------------------------------------
+# NEU: Fahrzeugprofil-Dataclass
+# ---------------------------------------------------------------------------
+
+@dataclass
+class VehicleProfile:
+    name: str
+    battery_capacity_kwh: float
+    soc_grid: np.ndarray        # SoC-Stützstellen (0..1)
+    power_grid_kw: np.ndarray   # Ladeleistung in kW zu den SoC-Stützstellen
+
+
+# ---------------------------------------------------------------------------
+# NEU: Fahrzeuge aus CSV laden
+# ---------------------------------------------------------------------------
+
+def load_vehicle_profiles_from_csv(path: str) -> list[VehicleProfile]:
+    """
+    Liest eine CSV mit Fahrzeugen und SoC-abhängigen Ladekurven und gibt
+    eine Liste von VehicleProfile-Objekten zurück.
+
+    Erwartete Struktur (vereinfacht):
+      Zeile 1: Marken (wird ignoriert)
+      Zeile 2: "Modell;ID.3;ID.4;..."
+      Zeile 3: "max. Kapazität;77;77;..."
+      Zeile 4: "SoC [%];..."
+      ab Zeile 5: "0;P_ID3;P_ID4;..." etc.
+    """
+    vehicle_profiles: list[VehicleProfile] = []
+
+    with open(path, "r", encoding="utf-8") as f:
+        reader = csv.reader(f, delimiter=";")
+
+        # 1. Zeile: Marken (ignorieren)
+        _brands_row = next(reader, None)
+
+        # 2. Zeile: Modellnamen
+        model_row = next(reader, None)
+        if model_row is None:
+            return []
+
+        model_names = model_row[1:]  # ab Spalte 1 sind die Fahrzeugmodelle
+
+        # 3. Zeile: max. Kapazitäten
+        capacity_row = next(reader, None)
+        if capacity_row is None:
+            return []
+
+        raw_capacities = capacity_row[1:]
+
+        # 4. Zeile: "SoC [%]" (Header)
+        _soc_header_row = next(reader, None)
+
+        # Kapazitäten in kWh lesen
+        capacities_kwh: list[float] = []
+        for val in raw_capacities:
+            val = val.strip()
+            if val == "":
+                capacities_kwh.append(np.nan)
+            else:
+                try:
+                    cap = float(val.replace(",", "."))
+                    # 0 oder negative Kapazität ignorieren
+                    capacities_kwh.append(cap if cap > 0 else np.nan)
+                except ValueError:
+                    capacities_kwh.append(np.nan)
+
+        num_vehicles = len(model_names)
+        soc_lists: list[list[float]] = [[] for _ in range(num_vehicles)]
+        power_lists: list[list[float]] = [[] for _ in range(num_vehicles)]
+
+        # Ab hier: Zeilen mit SoC-Werten und zugehörigen Ladeleistungen
+        for row in reader:
+            if not row:
+                continue
+
+            soc_str = row[0].strip()
+            if soc_str == "":
+                continue
+
+            try:
+                soc_val_percent = float(soc_str.replace(",", "."))
+            except ValueError:
+                continue
+
+            # SoC in 0..1 umrechnen
+            soc_val = soc_val_percent / 100.0
+
+            # Spalten 1..n: Ladeleistungen je Fahrzeug
+            for idx in range(num_vehicles):
+                if idx + 1 >= len(row):
+                    continue
+                cell = row[idx + 1].strip()
+                if cell == "":
+                    continue
+                try:
+                    power_kw = float(cell.replace(",", "."))
+                except ValueError:
+                    continue
+
+                soc_lists[idx].append(soc_val)
+                power_lists[idx].append(power_kw)
+
+        # VehicleProfile-Objekte bauen
+        for i in range(num_vehicles):
+            name = model_names[i].strip()
+            cap = capacities_kwh[i]
+
+            # Nur Fahrzeuge mit gültiger Kapazität und vorhandener Kurve
+            if np.isnan(cap) or len(soc_lists[i]) == 0:
+                continue
+
+            soc_grid = np.array(soc_lists[i], dtype=float)
+            power_grid = np.array(power_lists[i], dtype=float)
+
+            # nach SoC sortieren
+            sort_idx = np.argsort(soc_grid)
+            soc_grid = soc_grid[sort_idx]
+            power_grid = power_grid[sort_idx]
+
+            vehicle_profiles.append(
+                VehicleProfile(
+                    name=name,
+                    battery_capacity_kwh=cap,
+                    soc_grid=soc_grid,
+                    power_grid_kw=power_grid,
+                )
+            )
+
+    return vehicle_profiles
+
+
+# ---------------------------------------------------------------------------
+# NEU: fahrzeugspezifische Ladeleistung für aktuellen SoC
+# ---------------------------------------------------------------------------
+
+def vehicle_power_at_soc(session: dict[str, Any]) -> float:
+    """
+    Gibt die fahrzeugspezifische maximale Ladeleistung (kW) für den aktuellen
+    SoC zurück, basierend auf der in der Session gespeicherten Ladekurve.
+    """
+    soc_grid = session["soc_grid"]          # np.ndarray (0..1)
+    power_grid = session["power_grid_kw"]   # np.ndarray
+
+    soc_arrival = session["soc_arrival"]
+    delivered_energy = session.get("delivered_energy_kwh", 0.0)
+    capacity = session["battery_capacity_kwh"]
+
+    # aktueller SoC = SoC bei Ankunft + geladene Energie / Kapazität
+    current_soc = soc_arrival + delivered_energy / capacity
+    current_soc = min(current_soc, session["soc_target"])
+
+    # lineare Interpolation
+    power_kw = float(np.interp(current_soc, soc_grid, power_grid))
+
+    return max(power_kw, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -25,12 +185,6 @@ def sample_from_range(value_definition: Any) -> float:
     """
     Verarbeitet Werte aus der YAML, die entweder als Skalar oder als Liste
     [min, max] (bzw. [value]) angegeben sind, und gibt einen float zurück.
-
-    Beispiele
-    ---------
-    0.45        -> 0.45
-    [0.3, 0.7]  -> Zufallswert ~ U(0.3, 0.7)
-    [0.0]       -> 0.0
     """
     if isinstance(value_definition, (list, tuple)):
         if len(value_definition) == 1:
@@ -61,16 +215,11 @@ def parse_holiday_dates_from_scenario(scenario: dict) -> set[date]:
 def determine_day_type_with_holidays(current_datetime: datetime, scenario: dict) -> str:
     """
     Ordnet ein Datum einem Tagtyp zu, unter Berücksichtigung der im Szenario
-    definierten Feiertage:
-
-      - 'sunday_holiday', wenn Datum in der Feiertagsliste oder Sonntag ist
-      - 'saturday', wenn Samstag
-      - 'working_day', sonst (Montag-Freitag ohne Feiertag)
+    definierten Feiertage.
     """
     current_date = current_datetime.date()
     holiday_dates = parse_holiday_dates_from_scenario(scenario)
 
-    # Feiertag hat Vorrang und wird wie Sonntag/Ferien behandelt
     if current_date in holiday_dates:
         return "sunday_holiday"
 
@@ -91,11 +240,6 @@ def create_time_index(scenario: dict, start_datetime: datetime | None = None) ->
     """
     Erzeugt eine Liste von Zeitstempeln über den im Szenario definierten
     Simulationshorizont.
-
-    Verwendet:
-      - scenario["start_datetime"] oder aktuellen Tag 00:00 als Start
-      - scenario["time_resolution_min"] als Zeitschritt
-      - scenario["simulation_horizon_days"] als Anzahl der Tage
     """
     if start_datetime is not None:
         simulation_start_datetime = start_datetime
@@ -176,12 +320,6 @@ def sample_lognormal_mixture(
 def sample_arrival_times_for_day(scenario: dict, day_start_datetime: datetime) -> list[datetime]:
     """
     Generiert alle Ankunftszeitpunkte für einen Tag als datetime-Objekte.
-
-    Grundlage:
-      - scenario["arrival_time_distribution"]["weekday_weight"][day_type] (als Range)
-      - scenario["site"]["expected_sessions_per_charger_per_day"] (als Range)
-      - scenario["arrival_time_distribution"]["components_per_weekday"][day_type]
-        (mu-/sigma-Ranges, shift_minutes, weight)
     """
     day_type = determine_day_type_with_holidays(day_start_datetime, scenario)
 
@@ -296,9 +434,14 @@ def sample_soc_upon_arrival(scenario: dict, number_of_sessions: int) -> np.ndarr
 # Ladesessions eines Tages
 # ---------------------------------------------------------------------------
 
-def build_charging_sessions_for_day(scenario: dict, day_start_datetime: datetime) -> list[dict[str, Any]]:
+def build_charging_sessions_for_day(
+    scenario: dict,
+    day_start_datetime: datetime,
+    vehicle_profiles: list[VehicleProfile],  # NEU
+) -> list[dict[str, Any]]:
     """
     Erzeugt für einen Tag eine Liste von Ladesessions mit allen relevanten Parametern.
+    Jetzt mit zufälliger Fahrzeugwahl und fahrzeugspezifischen Ladekurven.
     """
     arrival_times_for_day = sample_arrival_times_for_day(scenario, day_start_datetime)
     number_of_sessions = len(arrival_times_for_day)
@@ -310,8 +453,6 @@ def build_charging_sessions_for_day(scenario: dict, day_start_datetime: datetime
     soc_values_at_arrival = sample_soc_upon_arrival(scenario, number_of_sessions)
 
     target_soc = scenario["vehicles"]["soc_target"]
-    battery_capacity_kwh = scenario["vehicles"]["battery_capacity_kwh"]
-    max_vehicle_charging_power_kw = scenario["vehicles"]["max_pwr_vehicle_kw"]
 
     charging_sessions_for_day: list[dict[str, Any]] = []
 
@@ -322,8 +463,16 @@ def build_charging_sessions_for_day(scenario: dict, day_start_datetime: datetime
         )
 
         soc_at_arrival = float(soc_values_at_arrival[session_index])
+
+        # NEU: zufällig ein Fahrzeug aus der Flotte wählen
+        vehicle_profile = np.random.choice(vehicle_profiles)
+        battery_capacity_kwh = float(vehicle_profile.battery_capacity_kwh)
+
         delta_soc = max(target_soc - soc_at_arrival, 0.0)
         required_energy_kwh = delta_soc * battery_capacity_kwh
+
+        # Maximalleistung als Maximum der Kurve (zusätzlich zur SoC-abhängigen Grenze)
+        max_vehicle_charging_power_kw = float(vehicle_profile.power_grid_kw.max())
 
         charging_session: dict[str, Any] = {
             "arrival_time": arrival_time,
@@ -332,7 +481,11 @@ def build_charging_sessions_for_day(scenario: dict, day_start_datetime: datetime
             "soc_target": target_soc,
             "battery_capacity_kwh": battery_capacity_kwh,
             "energy_required_kwh": required_energy_kwh,
+            "delivered_energy_kwh": 0.0,  # NEU: bisher geladene Energie zur SoC-Berechnung
             "max_charging_power_kw": max_vehicle_charging_power_kw,
+            "vehicle_name": vehicle_profile.name,
+            "soc_grid": vehicle_profile.soc_grid,
+            "power_grid_kw": vehicle_profile.power_grid_kw,
         }
         charging_sessions_for_day.append(charging_session)
 
@@ -345,14 +498,13 @@ def build_charging_sessions_for_day(scenario: dict, day_start_datetime: datetime
 
 def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None):
     """
-    Führt die Lastgang-Simulation für den im Szenario definierten
-    Simulationshorizont durch.
-
-    Rückgabe:
-      - Liste von Zeitstempeln
-      - Array mit Lastwerten in kW
-      - Liste aller Ladesessions
+    Führt die Lastgang-Simulation durch.
+    Jetzt mit fahrzeugspezifischen Batteriekapazitäten und SoC-abhängiger Ladeleistung.
     """
+    # NEU: Fahrzeugflotte aus CSV laden
+    vehicle_csv_path = scenario["vehicles"]["vehicle_curve_csv"]
+    vehicle_profiles = load_vehicle_profiles_from_csv(vehicle_csv_path)
+
     time_index = create_time_index(scenario, start_datetime)
 
     time_resolution_min = scenario["time_resolution_min"]
@@ -377,7 +529,7 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
         for day_offset in range(simulation_horizon_days):
             day_start_datetime = first_day_start_datetime + timedelta(days=day_offset)
             charging_sessions_for_day = build_charging_sessions_for_day(
-                scenario, day_start_datetime
+                scenario, day_start_datetime, vehicle_profiles  # ANGEPAST
             )
             all_charging_sessions.extend(charging_sessions_for_day)
 
@@ -405,8 +557,13 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
         total_power_in_time_step_kw = 0.0
 
         for charging_session in active_charging_sessions:
+            # NEU: SoC-abhängige Leistungsgrenze
+            vehicle_power_limit_kw = vehicle_power_at_soc(charging_session)
+
+            # Standortanteil & fahrzeugspezifische Limits
             allowed_power_kw = min(
                 available_power_per_session_kw,
+                vehicle_power_limit_kw,
                 charging_session["max_charging_power_kw"],
             )
 
@@ -414,12 +571,21 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
                 allowed_power_kw * time_step_hours * charger_efficiency
             )
 
-            if possible_energy_in_time_step_kwh >= charging_session["energy_required_kwh"]:
-                charging_session["energy_required_kwh"] = 0.0
-            else:
-                charging_session["energy_required_kwh"] -= possible_energy_in_time_step_kwh
+            energy_needed = charging_session["energy_required_kwh"]
 
-            total_power_in_time_step_kw += allowed_power_kw
+            # Tatsächlich gelieferte Energie (nicht über den Bedarf hinaus)
+            if possible_energy_in_time_step_kwh >= energy_needed:
+                energy_delivered = energy_needed
+                charging_session["energy_required_kwh"] = 0.0
+                # tatsächliche Leistung anpassen, um Energie- und Leistungsbilanz konsistent zu halten
+                actual_power_kw = energy_delivered / (time_step_hours * charger_efficiency) if time_step_hours > 0 else 0.0
+            else:
+                energy_delivered = possible_energy_in_time_step_kwh
+                charging_session["energy_required_kwh"] -= possible_energy_in_time_step_kwh
+                actual_power_kw = allowed_power_kw
+
+            charging_session["delivered_energy_kwh"] += energy_delivered
+            total_power_in_time_step_kw += actual_power_kw
 
         load_profile_kw[time_step_index] = total_power_in_time_step_kw
 

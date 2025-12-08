@@ -16,10 +16,8 @@ site:
 ## hier ist der Fuhrpark abzubilden. Dieser besteht aus mehr als einem Fahrzeug. Hier macht es Sinn Fuhrparkdaten und Ladekurven als csv zu speichern und zu laden
 vehicles:
   soc_target: 1.0     # Gewünschter Ladezustand am Ende des Ladeprozesses
-  battery_capacity_kwh: 60      # Batteriekapazität des Fahrzeugs
-  max_pwr_vehicle_kw: 50      # Maximale Ladeleistung, die das Fahrzeug aufnehmen kann
-  ## Wie gehst du damit um, wenn die vorgegebenen Ladungen nicht gehalten werden können, weil besonders beim Office alle gleichzeitig ankommen?
-
+  vehicle_curve_csv: "../data/Ladekurve_Master.csv"      # Batteriekapazität und maximale Ladeleistung nach SOC
+  
 # Zeiten, an denen die Fahrer an den Ladepunkten ankommen
 arrival_time_distribution:
   type: lognormal_mixture
@@ -53,7 +51,7 @@ arrival_time_distribution:
 parking_duration_distribution:
   type: lognormal_mixture
   time_unit: minutes
-  max_duration_minutes: 60     # 12 Stunden
+  max_duration_minutes: 180     # 3 Stunden
 
   components:
     - name: short_stay      # Mitarbeiter, die zum Beispiel teilzeit arbeiten
