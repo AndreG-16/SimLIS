@@ -16,7 +16,7 @@ site:
 ## hier ist der Fuhrpark abzubilden. Dieser besteht aus mehr als einem Fahrzeug. Hier macht es Sinn Fuhrparkdaten und Ladekurven als csv zu speichern und zu laden
 vehicles:
   soc_target: 1.0     # Gewünschter Ladezustand am Ende des Ladeprozesses
-  vehicle_curve_csv: "../data/Ladekurve_Master.csv"      # Batteriekapazität und maximale Ladeleistung nach SOC
+  vehicle_curve_csv: "../data/Ladekurven_Master.csv"      # Batteriekapazität und maximale Ladeleistung nach SOC
   
 # Zeiten, an denen die Fahrer an den Ladepunkten ankommen
 arrival_time_distribution:
