@@ -1,6 +1,6 @@
 site_type: highway      # Standort des Ladepunkts
 
-time_resolution_min: 60     # Zeitschritt, in der die Simulation abgebildet wird
+time_resolution_min: 10     # Zeitschritt, in der die Simulation abgebildet wird
 simulation_horizon_days: 23     # gewünschter Analysehorizont in Tagen
 
 start_datetime: "2025-05-19 00:00"      # Zeitpunkt, ab dem der Lastgang anfangen soll
