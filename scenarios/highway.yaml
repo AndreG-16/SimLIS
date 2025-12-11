@@ -1,26 +1,26 @@
 site_type: highway      # Standort des Ladepunkts
 
 time_resolution_min: 10     # Zeitschritt, in der die Simulation abgebildet wird
-simulation_horizon_days: 23     # gewünschter Analysehorizont in Tagen
+simulation_horizon_days: 2     # gewünschter Analysehorizont in Tagen
 
 start_datetime: "2025-05-19 00:00"      # Zeitpunkt, ab dem der Lastgang anfangen soll
 
 site:
-  number_chargers: 5     # Anzahl der Ladepunkte am Standort
+  number_chargers: 10     # Anzahl der Ladepunkte am Standort
   rated_power_kw: 300    # Verfügbare Leistung pro Ladepunkt
   grid_limit_p_avb_kw: 5000     # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
   expected_sessions_per_charger_per_day: [5.0, 14.0]      # Ladungen, die schätzungsweise pro LP an einem Tag stattfinden
   charger_efficiency: 0.95      # Verhältnis der aufgenommenen Leistung des Fahrzeugs zur abgegebenen Leistung des Ladepunkts
   charging_strategy: "immediate"      # Vom Betreiber festgelegte Strategie zur Bereitstellung des Stroms
 
-## hier ist der Fuhrpark abzubilden. Dieser besteht aus mehr als einem Fahrzeug. Hier macht es Sinn Fuhrparkdaten und Ladekurven als csv zu speichern und zu laden
+# Fuhrparkbeschreibung – Ladekurven + Kapazitäten kommen aus CSV
 vehicles:
   soc_target: 1.0     # Gewünschter Ladezustand am Ende des Ladeprozesses
-  vehicle_curve_csv: "../data/Ladekurven_Master.csv"      # Batteriekapazität und maximale Ladeleistung nach SOC
+  vehicle_curve_csv: "../data/Ladekurven_Master.csv"      # Batteriekapazität und Ladekurve nach SOC
 
 # Zeiten, an denen die Fahrer an den Ladepunkten ankommen
 arrival_time_distribution:
-  type: mixture  #NEU (vorher: lognormal_mixture)
+  type: mixture  #NEU
   time_unit: minutes
 
   weekday_weight:
@@ -84,7 +84,7 @@ parking_duration_distribution:
   min_duration_minutes: 10      # Untergrenze Mindeststanddauer bei 10 Minuten 
 
   components:
-    - name: short_stay      # typischer HPC-Stop (20–40 Minuten)  #NEU-Kommentar optional
+    - name: short_stay      # typischer HPC-Stop (20–40 Minuten)
       distribution: normal  #NEU
       weight: 0.85      # Anteil Kurzparker
       mu: [20, 30]      # mittlere Parkdauer in Minuten  #NEU
