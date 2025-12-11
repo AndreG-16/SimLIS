@@ -23,6 +23,7 @@ arrival_time_distribution:
   type: mixture  #NEU
   time_unit: minutes
 
+  # Skalierung der Anzahl der Sessions je nach Tagtyp
   weekday_weight:
     working_day: [0.55, 0.95]
     saturday: [0.40, 0.90]

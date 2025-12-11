@@ -66,7 +66,7 @@ arrival_time_distribution:
 parking_duration_distribution:
   type: mixture
   time_unit: minutes
-  max_duration_minutes: 600      # max. 10 Stunden (langer Bürotag)
+  max_duration_minutes: 720      # max. 12 Stunden (langer Bürotag)
   min_duration_minutes: 30       # Mindestparkdauer 30 Minuten
 
   components:
