@@ -1,26 +1,137 @@
-name: retail
-site_type: retail
+site_type: retail      # Standort des Ladepunkts
 
-time_resolution_min: 15
-sim_horizon_days: 7
+time_resolution_min: 10          # Zeitschritt, in der die Simulation abgebildet wird
+simulation_horizon_days: 2       # gewünschter Analysehorizont in Tagen
+
+start_datetime: "2025-05-23 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen soll
 
 site:
-  number_chargers: 8
-  rated_power_kw: 50
-  grid_limit_p_avb_kw: 300
-  operation_window: "6:00 - 20:00"
-  charger_efficiency: 0.95
-  charging_strategy: "immediate"
+  number_chargers: 12                      # Anzahl der Ladepunkte am Standort
+  rated_power_kw: 22                       # Verfügbare Leistung pro Ladepunkt
+  grid_limit_p_avb_kw: 400                 # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  expected_sessions_per_charger_per_day: [2.0, 6.0]   # erwartete Ladevorgänge pro LP und Tag
+  charger_efficiency: 0.95                 # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
+  charging_strategy: "immediate"           # Strombereitstellungsstrategie 
 
+# Fuhrparkbeschreibung – Ladekurven + Kapazitäten kommen aus CSV
 vehicles:
-  soc_target: 0.8
-  battery_capacity_kwh: 60
-  max_pwr_vehicle_kw: 50
+  soc_target: 0.9                          # Gewünschter Ladezustand am Ende des Ladeprozesses
+  vehicle_curve_csv: "../data/Ladekurven_Master.csv"   # Batteriekapazität und Ladekurve nach SOC
 
-data:
-  arrivals_xlsx: "data/Ankunft.xlsx"
-  arrivals_sheet: "Ankunft"
-  durations_xlsx: "data/Standzeiten.xlsx"
-  durations_sheet: "Standdauer"
-  soc_xlsx: "data/SoC_Ankunft.xlsx"
-  soc_sheet: "SoC"
+# Ankunftszeiten an den Ladepunkten
+arrival_time_distribution:
+  type: mixture
+  time_unit: minutes
+
+  # Skalierung der Ladevorgänge je nach Tagtyp
+  weekday_weight:
+    working_day: [0.6, 1.0]        # mittlerer bis hoher Betrieb an Werktagen
+    saturday: [1.0, 1.5]           # hoher Betrieb am Samstag (Haupteinkaufstag)
+    sunday_holiday: [0.0, 0.1]     # kein bzw. vernachlässigbarer Betrieb an Sonn- und Feiertagen
+
+  components_per_weekday:
+    # Retail: Hauptpeaks mittags und am späten Nachmittag/Abend
+    working_day:
+      - name: midday_shopping_peak      # Einkäufe zur Mittagszeit
+        distribution: normal
+        mu: [11.0, 13.5]                # Peak in Stunden seit Mitternacht
+        sigma: [0.5, 1.0]               # Streuung in Stunden
+        shift_minutes: 0                # Stunden → Minuten (mu * 60 + shift_minutes)
+        weight: 0.4                     # Gewichtung innerhalb working_day
+
+      - name: after_work_peak           # Einkäufe nach der Arbeit
+        distribution: normal
+        mu: [16.0, 19.0]
+        sigma: [0.5, 1.2]
+        shift_minutes: 0
+        weight: 0.6
+
+    # Retail: Samstag mit ausgedehntem Einkauf über den Tag verteilt
+    saturday:
+      - name: saturday_late_morning
+        distribution: normal
+        mu: [10.0, 12.0]                # Einkäufe am späten Vormittag
+        sigma: [0.8, 1.3]
+        shift_minutes: 0
+        weight: 0.5
+
+      - name: saturday_afternoon
+        distribution: normal
+        mu: [13.0, 16.0]                # Einkäufe am Nachmittag
+        sigma: [0.8, 1.5]
+        shift_minutes: 0
+        weight: 0.5
+
+    # Retail: Sonntag/Feiertag in DE typischerweise geschlossen
+    sunday_holiday:
+      - name: sunday_special_events     # seltene verkaufsoffene Sonntage / Sonderöffnungen
+        distribution: normal
+        mu: [11.0, 15.0]
+        sigma: [1.0, 2.0]
+        shift_minutes: 0
+        weight: 1.0                     # Gewicht ist relativ; absolute Menge kommt aus weekday_weight.sunday_holiday
+
+# Parkdauer in Minuten ab Ankunft; Verteilung ist eine Mischung aus Kurz- und Langzeitparkern
+# Retail: viele Kurz- und Mittelaufenthalte, wenige sehr lange Aufenthalte
+parking_duration_distribution:
+  type: mixture
+  time_unit: minutes
+  max_duration_minutes: 240      # Obergrenze maximale Ladedauer (z.B. 4 Stunden)
+  min_duration_minutes: 20       # Untergrenze minimale Ladedauer
+
+  components:
+    - name: quick_stop           # kurzer Einkauf / Abholung / Drogerie
+      distribution: normal
+      weight: 0.3
+      mu: [20, 40]               # typische Parkdauer 20–40 Minuten
+      sigma: [5, 10]
+
+    - name: regular_shopping     # typischer Einkaufsaufenthalt
+      distribution: normal
+      weight: 0.5
+      mu: [60, 120]              # typische Parkdauer 1–2 Stunden
+      sigma: [15, 30]
+
+    - name: long_stay            # längere Aufenthalte (z.B. Essen, Kino, großer Einkauf)
+      distribution: normal
+      weight: 0.2
+      mu: [120, 200]             # typische Parkdauer 2–3+ Stunden
+      sigma: [20, 40]
+
+# Batteriezustand bei Ankunft; Verteilung ist eine Mischung aus opportunistischem Laden und gezieltem Laden
+# Retail: vor allem "Ich lade, wenn ich ohnehin einkaufen bin", vereinzelt low-SOC-Laden
+soc_at_arrival_distribution:
+  type: mixture
+  value_unit: fraction        # 0.0 bis 1.0
+  max_soc: 0.95               # maximales SoC bei Ankunft
+
+  components:
+    - name: opportunistic_high_soc      # opportunistisches Laden mit eher hohem SoC
+      distribution: normal
+      weight: 0.6
+      mu: [0.6, 0.8]                    # typischer SoC bei Ankunft
+      sigma: [0.08, 0.12]
+
+    - name: medium_soc_commuters        # Kunden, die Einkaufen mit Alltagswegen kombinieren
+      distribution: normal
+      weight: 0.25
+      mu: [0.4, 0.6]
+      sigma: [0.08, 0.12]
+
+    - name: low_battery_customers       # gezieltes Laden aufgrund niedrigen SoC
+      distribution: beta
+      weight: 0.15
+      alpha: [2.0, 3.0]                 # formt Peak im niedrigen SoC-Bereich (ca. 0.1–0.3)
+      beta: [5.0, 7.0]
+
+# Feiertage im Jahr 2025 → werden wie Sonntage behandelt
+holidays:
+  dates:
+    - "2025-01-01"
+    - "2025-04-18"
+    - "2025-04-21"
+    - "2025-05-01"
+    - "2025-05-29"
+    - "2025-10-03"
+    - "2025-12-25"
+    - "2025-12-26"

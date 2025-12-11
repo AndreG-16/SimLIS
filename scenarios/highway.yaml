@@ -1,122 +1,123 @@
 site_type: highway      # Standort des Ladepunkts
 
-time_resolution_min: 10     # Zeitschritt, in der die Simulation abgebildet wird
-simulation_horizon_days: 2     # gewünschter Analysehorizont in Tagen
+time_resolution_min: 10         # Zeitschritt, in der die Simulation berechnet wird
+simulation_horizon_days: 20     # gewünschter Analysehorizont in Tagen
 
-start_datetime: "2025-05-19 00:00"      # Zeitpunkt, ab dem der Lastgang anfangen soll
+start_datetime: "2025-05-22 00:00"      # Zeitpunkt, ab dem der Lastgang anfangen soll
 
 site:
-  number_chargers: 10     # Anzahl der Ladepunkte am Standort
-  rated_power_kw: 300    # Verfügbare Leistung pro Ladepunkt
-  grid_limit_p_avb_kw: 5000     # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
-  expected_sessions_per_charger_per_day: [5.0, 14.0]      # Ladungen, die schätzungsweise pro LP an einem Tag stattfinden
-  charger_efficiency: 0.95      # Verhältnis der aufgenommenen Leistung des Fahrzeugs zur abgegebenen Leistung des Ladepunkts
-  charging_strategy: "immediate"      # Vom Betreiber festgelegte Strategie zur Bereitstellung des Stroms
+  number_chargers: 10                                     # Anzahl der Ladepunkte am Standort
+  rated_power_kw: 300                                     # Verfügbare Leistung pro Ladepunkt
+  grid_limit_p_avb_kw: 5000                               # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  expected_sessions_per_charger_per_day: [5.0, 14.0]      # erwartete Ladevorgänge pro LP und Tag
+  charger_efficiency: 0.95                                # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
+  charging_strategy: "immediate"                          # Strombereitstellungsstrategie 
 
 # Fuhrparkbeschreibung – Ladekurven + Kapazitäten kommen aus CSV
 vehicles:
-  soc_target: 1.0     # Gewünschter Ladezustand am Ende des Ladeprozesses
+  soc_target: 1.0                                         # Gewünschter Ladezustand am Ende des Ladeprozesses
   vehicle_curve_csv: "../data/Ladekurven_Master.csv"      # Batteriekapazität und Ladekurve nach SOC
 
-# Zeiten, an denen die Fahrer an den Ladepunkten ankommen
+# Ankunftszeiten an den Ladepunkten
 arrival_time_distribution:
-  type: mixture  #NEU
+  type: mixture
   time_unit: minutes
 
-  # Skalierung der Anzahl der Sessions je nach Tagtyp
+  # Skalierung der Ladevorgänge je nach Tagtyp
   weekday_weight:
-    working_day: [0.55, 0.95]
-    saturday: [0.40, 0.90]
-    sunday_holiday: [0.7, 0.9]
+    working_day: [0.55, 0.95]         # mittlerer bis hoher Betrieb durch Pendler und Lieferungen
+    saturday: [0.40, 0.70]            # mittlerer Betrieb durch Tagesausflüge
+    sunday_holiday: [0.4, 0.80]       # mittlerer Betrieb durch Tages- und Wochenendausflüge
 
   components_per_weekday:
-    ## Highway: zwei Peaks – mittags und am frühen Abend  #NEU
+    # Highway: zwei Peaks – mittags und am frühen Abend
     working_day:
-      - name: midday_peak  #NEU
-        distribution: normal  #NEU
-        mu: [11.0, 14.0]      #NEU  # Stunden seit Mitternacht (≈ 12–14 Uhr)
-        sigma: [0.5, 2.2]     #NEU  # Streuung in Stunden
-        shift_minutes: 0      #NEU  # Stunden → Minuten (mu * 60 + 0)
-        weight: 0.5           #NEU
+      - name: midday_peak       # Ladungen zur Mittagspause 
+        distribution: normal  
+        mu: [11.0, 14.0]        # Peak in Stunden 12.0 = 12 Uhr
+        sigma: [0.5, 2.5]       # Streuung in Stunden
+        shift_minutes: 0        # Stunden → Minuten (mu * 60 + 0)
+        weight: 0.5             # Gewichtung innerhalb working_day
 
-      - name: evening_peak   #NEU
-        distribution: normal  #NEU
-        mu: [17.0, 19.0]      #NEU  # ≈ 17–19 Uhr
-        sigma: [0.5, 2.2]     #NEU
-        shift_minutes: 0      #NEU
-        weight: 0.5           #NEU
+      - name: evening_peak   
+        distribution: normal  
+        mu: [17.0, 19.0]      
+        sigma: [0.5, 2.2]     
+        shift_minutes: 0      
+        weight: 0.5          
 
     saturday:
-      - name: midday_peak    #NEU
-        distribution: normal  #NEU
-        mu: [11.0, 15.0]      #NEU  # samstags oft etwas später unterwegs
-        sigma: [1.0, 2.5]     #NEU
-        shift_minutes: 0      #NEU
-        weight: 0.6           #NEU
+      - name: midday_peak   
+        distribution: normal  
+        mu: [11.0, 15.0]   
+        sigma: [1.0, 2.5]
+        shift_minutes: 0 
+        weight: 0.6      
 
-      - name: evening_peak   #NEU
-        distribution: normal  #NEU
-        mu: [17.0, 19.0]      #NEU
-        sigma: [0.0, 2.5]     #NEU
-        shift_minutes: 0      #NEU
-        weight: 0.4           #NEU
+      - name: evening_peak
+        distribution: normal 
+        mu: [17.0, 19.0]    
+        sigma: [0.0, 2.5]    
+        shift_minutes: 0      
+        weight: 0.4          
 
     sunday_holiday:
-      - name: midday_peak  #NEU
-        distribution: normal  #NEU
-        mu: [11.0, 16.0]      #NEU  # Nachmittagspeak
-        sigma: [0.5, 2.5]     #NEU
-        shift_minutes: 0      #NEU
-        weight: 0.7           #NEU
+      - name: midday_peak  
+        distribution: normal 
+        mu: [11.0, 16.0]    
+        sigma: [0.5, 2.5]   
+        shift_minutes: 0     
+        weight: 0.7         
 
-      - name: evening_peak    #NEU
-        distribution: normal  #NEU
-        mu: [17.0, 19.0]      #NEU
-        sigma: [0.5, 2.5]     #NEU
-        shift_minutes: 0      #NEU
-        weight: 0.3           #NEU
+      - name: evening_peak   
+        distribution: normal  
+        mu: [17.0, 19.0]      
+        sigma: [0.5, 2.5]   
+        shift_minutes: 0      
+        weight: 0.3        
 
 # Parkdauer in Minuten ab Ankunft; Verteilung ist eine Mischung aus Kurz- und Langzeitparkern
-## Lege hier nur die Grenzen fest und randomisiere parking duration und "components" im Modell.
+# Highway: deutlich mehr Kurzparker, die auf nötigste beschränkt sind (Essen, Tanken, WC-Pause)
 parking_duration_distribution:
-  type: mixture  #NEU (vorher: lognormal_mixture)
+  type: mixture
   time_unit: minutes
-  max_duration_minutes: 180     # 3 Stunden
-  min_duration_minutes: 10      # Untergrenze Mindeststanddauer bei 10 Minuten 
+  max_duration_minutes: 180     # Obergrenze maximale Ladedauer
+  min_duration_minutes: 10      # Untergrenze minimale Ladedauer
 
   components:
-    - name: short_stay      # typischer HPC-Stop (20–40 Minuten)
-      distribution: normal  #NEU
-      weight: 0.85      # Anteil Kurzparker
-      mu: [20, 30]      # mittlere Parkdauer in Minuten  #NEU
-      sigma: [5, 10]    # Streuung in Minuten  #NEU
+    - name: short_stay          # typischer HPC-Stop (20–40 Minuten)
+      distribution: normal
+      weight: 0.85              # Anteil Kurzparker
+      mu: [20, 30]              # mittlere Parkdauer in Minuten
+      sigma: [5, 10]            # Streuung in Minuten 
 
-    - name: long_stay     # seltene längere Stopps
-      distribution: normal  #NEU
-      weight: 0.15      # Anteil Langzeitparker
-      mu: [40, 80]       # längere Stopps in Minuten  #NEU
-      sigma: [10, 15]    #NEU
+    - name: long_stay
+      distribution: normal 
+      weight: 0.15              # Anteil Langzeitparker
+      mu: [40, 80]              # längere Stopps in Minuten
+      sigma: [10, 15]    
 
 # Batteriezustand bei Ankunft; Verteilung ist eine Mischung aus spontanen Laden und Laden aufgrund niedrigem Batteriezustand
-## Highway: deutlich mehr "low battery"-Charging, weniger opportunistisch
+# Highway: deutlich mehr "low battery"-Charging, weniger opportunistisch
 soc_at_arrival_distribution:
-  type: mixture  #NEU (vorher: lognormal_mixture)
-  value_unit: fraction        # 0.0 bis 1.0
-  max_soc: 0.70               #NEU (vorher: 0.85 – an der Autobahn meist niedriger SoC bei Ankunft)
+  type: mixture
+  value_unit: fraction                   # 0.0 bis 1.0
+  max_soc: 0.70                          # maximales SoC bei Ankunft
 
   components:
-    - name: low_battery_charging      # Laden aufgrund leerer Batterie / gezielte Anfahrt
-      distribution: beta  #NEU
-      weight: 0.70      #NEU (Hauptanteil: gezieltes Laden bei niedrigem SoC)
-      alpha: [2.0, 3.0]  #NEU  # formt Peak bei ca. 0.10–0.20
-      beta: [5.0, 7.0]   #NEU
+    - name: low_battery_charging        # Laden aufgrund leerer Batterie / gezielte Anfahrt
+      distribution: beta
+      weight: 0.70
+      alpha: [2.0, 3.0]                 # formt Peak bei ca. 0.10–0.20
+      beta: [5.0, 7.0]
 
     - name: opportunistic_charging      # Laden aus Gelegenheit
-      distribution: normal  #NEU
-      weight: 0.30      #NEU
-      mu: [0.45, 0.60]      # durchschnittlicher SoC bei Opportunisten  #NEU
-      sigma: [0.08, 0.12]   #NEU
+      distribution: normal
+      weight: 0.30
+      mu: [0.45, 0.60]
+      sigma: [0.08, 0.12]
 
+# Feiertage im Jahr 2025 → werden wie Sonntage behandelt
 holidays:
   dates:
     - "2025-01-01"

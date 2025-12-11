@@ -1,47 +1,47 @@
 site_type: office      # Standort des Ladepunkts
 
-time_resolution_min: 10          # Zeitschritt der Simulation in Minuten
-simulation_horizon_days: 5       # Analysehorizont in Tagen
+time_resolution_min: 10          # Zeitschritt, in der die Simulation berechnet wird
+simulation_horizon_days: 7       # gewünschter Analysehorizont in Tagen
 
-start_datetime: "2025-05-19 00:00"    # Startzeitpunkt des Lastgangs
+start_datetime: "2025-05-22 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen soll
 
 site:
-  number_chargers: 10                    # Anzahl der Ladepunkte am Standort
-  rated_power_kw: 22                     # Verfügbare Leistung pro Ladepunkt (typisch AC-Office)
-  grid_limit_p_avb_kw: 400               # Maximale Anschlussleistung durch Netzbetreiber
-  expected_sessions_per_charger_per_day: [0.3, 0.8]     # erwartete Ladevorgänge pro LP und Tag
-  charger_efficiency: 0.95               # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
-  charging_strategy: "immediate"         # Strombereitstellungsstrategie
+  number_chargers: 10                                     # Anzahl der Ladepunkte am Standort
+  rated_power_kw: 22                                      # Verfügbare Leistung pro Ladepunkt
+  grid_limit_p_avb_kw: 400                                # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  expected_sessions_per_charger_per_day: [0.3, 0.8]       # erwartete Ladevorgänge pro LP und Tag
+  charger_efficiency: 0.95                                # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
+  charging_strategy: "immediate"                          # Strombereitstellungsstrategie 
 
 # Fuhrparkbeschreibung – Ladekurven + Kapazitäten kommen aus CSV
 vehicles:
-  soc_target: 0.9                         # Gewünschter SoC am Ende des Ladevorgangs (Office meist nicht 100 % nötig)
-  vehicle_curve_csv: "../data/Ladekurven_Master.csv"   # Batteriekapazität und Ladekurve nach SOC
+  soc_target: 0.9                                         # Gewünschter Ladezustand am Ende des Ladeprozesses
+  vehicle_curve_csv: "../data/Ladekurven_Master.csv"      # Batteriekapazität und Ladekurve nach SOC
 
 # Ankunftszeiten an den Ladepunkten
 arrival_time_distribution:
   type: mixture
   time_unit: minutes
 
-  # Skalierung der Anzahl der Sessions je nach Tagtyp
+  # Skalierung der Ladevorgänge je nach Tagtyp
   weekday_weight:
-    working_day: [0.8, 1.1]        # Hoher Betrieb an Arbeitstagen
-    saturday: [0.05, 0.15]         # Sehr geringer Betrieb Samstag
-    sunday_holiday: [0.00, 0.02]   # Kein Betrieb an Sonn-/Feiertagen
+    working_day: [0.8, 1.1]           # hoher Betrieb an Arbeitstagen
+    saturday: [0.05, 0.15]            # sehr geringer Betrieb am Samstag
+    sunday_holiday: [0.00, 0.02]      # kein bzw. vernachlässigbarer Betrieb an Sonn- und Feiertagen
 
   components_per_weekday:
-    ## Office: Hauptpeak morgens, kleinerer Peak um die Mittagszeit
+    # Office: Hauptpeak morgens, kleinerer Peak um die Mittagszeit
     working_day:
-      - name: morning_peak      # Pendler haben einen höheren Energiebedarf
+      - name: morning_peak      # typische Ankunftszeit der Mitarbeiter
         distribution: normal
-        mu: [7.5, 9.0]        # Stunden seit Mitternacht (Pendler 7:30–9:00 Uhr)
-        sigma: [0.5, 1.0]     # Streuung in Stunden
-        shift_minutes: 0      # Stunden → Minuten: mu * 60 + shift
-        weight: 0.7
+        mu: [7.5, 9.0]          # Peak in Stunden seit Mitternacht (z.B. 7.5 = 7:30 Uhr)
+        sigma: [0.5, 1.0]       # Streuung in Stunden
+        shift_minutes: 0        # Stunden → Minuten (mu * 60 + shift_minutes)
+        weight: 0.7             # Gewichtung innerhalb working_day
 
-      - name: midday_peak
+      - name: midday_peak       # Ankünfte von Teilzeitkräften, später kommenden Mitarbeitern oder externen Besuchern
         distribution: normal
-        mu: [11.5, 13.0]      # Mittag/Frühnachmittag (z.B. Meetings, externe Besucher)
+        mu: [11.5, 13.0]
         sigma: [0.5, 1.0]
         shift_minutes: 0
         weight: 0.3
@@ -49,64 +49,66 @@ arrival_time_distribution:
     saturday:
       - name: saturday_peak
         distribution: normal
-        mu: [10.0, 12.0]      # Falls Homeoffice/Support am Samstag
+        mu: [10.0, 12.0]        # Ankünfte bei Support- oder Sonderbetrieb am Samstag
         sigma: [1.0, 2.0]
         shift_minutes: 0
         weight: 1.0
 
     sunday_holiday:
-      - name: sunday_peak
+      - name: sunday_peak       # Ankünfte bei seltenem Supportbetrieb am Sonntag/Feiertag
         distribution: normal
         mu: [11.0, 14.0]
         sigma: [1.0, 2.5]
         shift_minutes: 0
         weight: 1.0
 
-# Parkdauer in Minuten ab Ankunft; Mischung aus Langzeitparkern (Mitarbeiter) und Kurzzeitern (Besucher)
+# Parkdauer in Minuten ab Ankunft; Verteilung ist eine Mischung aus Kurz- und Langzeitparkern
 parking_duration_distribution:
   type: mixture
   time_unit: minutes
-  max_duration_minutes: 720      # max. 12 Stunden (langer Bürotag)
-  min_duration_minutes: 30       # Mindestparkdauer 30 Minuten
+  max_duration_minutes: 720      # Obergrenze maximale Ladedauer (z.B. 12 Stunden)
+  min_duration_minutes: 30       # Untergrenze minimale Ladedauer
 
   components:
-    - name: long_stay      # Vollzeitmitarbeiter
+    - name: long_stay            # Vollzeitmitarbeiter
       distribution: normal
       weight: 0.7
-      mu: [360, 540]                 # 6–9 Stunden
-      sigma: [60, 90]                # Streuung 1–1,5 Stunden
+      mu: [360, 540]             # typische Parkdauer 6–9 Stunden
+      sigma: [60, 90]            # Streuung 1–1,5 Stunden
 
-    - name: medium_stay     # Teilzeitmitarbeiter / längere Meetings 
+    - name: medium_stay          # Teilzeitmitarbeiter / längere Meetings 
       distribution: normal
       weight: 0.2
-      mu: [120, 240]                 # 2–4 Stunden
+      mu: [120, 240]             # typische Parkdauer 2–4 Stunden
       sigma: [30, 60]
 
-    - name: short_stay      # Besucher / kurze Termine
+    - name: short_stay           # Besucher / kurze Termine
       distribution: normal
       weight: 0.1
-      mu: [30, 90]                   # 0,5–1,5 Stunden
+      mu: [30, 90]               # typische Parkdauer 0,5–1,5 Stunden
       sigma: [10, 20]
 
-# SoC bei Ankunft – Mischung aus „gezieltem Laden“ und „opportunistischem Laden“ im Büro
+# Batteriezustand bei Ankunft; Verteilung ist eine Mischung aus gezieltem Laden und opportunistischem Laden
+# Office: Mischung aus Pendlern (mittlerer SoC) und Mitarbeitern, die „wenn möglich“ laden (höherer SoC)
 soc_at_arrival_distribution:
   type: mixture
   value_unit: fraction       # 0.0 bis 1.0
-  max_soc: 0.90              # im Office auch höhere SoC-Werte zulässig
+  max_soc: 0.90              # maximales SoC bei Ankunft
 
   components:
-    - name: low_battery_charging        # Pendler laden regelmäßig, eher mittlerer SoC
+    - name: low_battery_charging        # Pendler mit eher mittlerem SoC, die gezielt nachladen
       distribution: beta
       weight: 0.4
-      alpha: [2.5, 4.0]              # Peak ungefähr bei 0.3–0.5
+      alpha: [2.5, 4.0]                 # formt Peak ungefähr bei 0.3–0.5
       beta: [3.0, 5.0]
 
-    - name: opportunistic_charging    # „Wenn ich sowieso da bin, hänge ich an die Säule“
+    - name: opportunistic_charging      # „Wenn ich sowieso im Büro bin, lade ich mit“
       distribution: normal
       weight: 0.6
-      mu: [0.6, 0.8]                 # eher höherer SoC
+      mu: [0.6, 0.8]                    # eher höherer SoC bei Ankunft
       sigma: [0.07, 0.12]
 
+# Feiertage im Jahr 2025 → werden wie Sonntage behandelt
 holidays:
   dates:
     - "2025-01-01"
