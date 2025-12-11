@@ -464,6 +464,7 @@ def sample_parking_durations(scenario: dict, number_of_sessions: int) -> np.ndar
     """
     parking_duration_distribution = scenario["parking_duration_distribution"]
     maximum_parking_duration_minutes = parking_duration_distribution["max_duration_minutes"]
+    minimum_parking_duration_minutes = parking_duration_distribution.get("min_duration_minutes", 10.0)
 
     component_templates = parking_duration_distribution["components"]
     realized_mixture_components = realize_mixture_components(
@@ -476,6 +477,12 @@ def sample_parking_durations(scenario: dict, number_of_sessions: int) -> np.ndar
         mixture_components=realized_mixture_components,
         max_value=maximum_parking_duration_minutes,
         unit_description="minutes",
+    )
+    # korrigiert alle gesampelten Werte auf den Bereich zwischen Minimum und Maximum
+    parking_durations_minutes = np.clip(
+        parking_durations_minutes,
+        minimum_parking_duration_minutes,
+        maximum_parking_duration_minutes,
     )
 
     return parking_durations_minutes
@@ -548,6 +555,9 @@ def build_charging_sessions_for_day(
 
         delta_soc = max(target_soc - soc_at_arrival, 0.0)
         required_energy_kwh = delta_soc * battery_capacity_kwh
+
+        if required_energy_kwh <= 0.0:          #NEU Fahrzeuge ohne Ladebedarf überspringen
+            continue
 
         # Maximalleistung als Maximum der Kurve (zusätzlich zur SoC-abhängigen Grenze)
         max_vehicle_charging_power_kw = float(vehicle_profile.power_grid_kw.max())  #NEU

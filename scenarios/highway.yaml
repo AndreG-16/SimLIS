@@ -1,7 +1,7 @@
 site_type: highway      # Standort des Ladepunkts
 
 time_resolution_min: 60     # Zeitschritt, in der die Simulation abgebildet wird
-simulation_horizon_days: 2     # gewünschter Analysehorizont in Tagen
+simulation_horizon_days: 23     # gewünschter Analysehorizont in Tagen
 
 start_datetime: "2025-05-19 00:00"      # Zeitpunkt, ab dem der Lastgang anfangen soll
 
@@ -33,45 +33,45 @@ arrival_time_distribution:
     working_day:
       - name: midday_peak  #NEU
         distribution: normal  #NEU
-        mu: [12.0, 14.0]      #NEU  # Stunden seit Mitternacht (≈ 12–14 Uhr)
-        sigma: [0.5, 3.2]     #NEU  # Streuung in Stunden
+        mu: [11.0, 14.0]      #NEU  # Stunden seit Mitternacht (≈ 12–14 Uhr)
+        sigma: [0.5, 2.2]     #NEU  # Streuung in Stunden
         shift_minutes: 0      #NEU  # Stunden → Minuten (mu * 60 + 0)
         weight: 0.5           #NEU
 
       - name: evening_peak   #NEU
         distribution: normal  #NEU
         mu: [17.0, 19.0]      #NEU  # ≈ 17–19 Uhr
-        sigma: [0.5, 3.2]     #NEU
+        sigma: [0.5, 2.2]     #NEU
         shift_minutes: 0      #NEU
         weight: 0.5           #NEU
 
     saturday:
       - name: midday_peak    #NEU
         distribution: normal  #NEU
-        mu: [13.0, 15.0]      #NEU  # samstags oft etwas später unterwegs
-        sigma: [1.0, 3.5]     #NEU
+        mu: [11.0, 15.0]      #NEU  # samstags oft etwas später unterwegs
+        sigma: [1.0, 2.5]     #NEU
         shift_minutes: 0      #NEU
         weight: 0.6           #NEU
 
       - name: evening_peak   #NEU
         distribution: normal  #NEU
         mu: [17.0, 19.0]      #NEU
-        sigma: [1.0, 3.5]     #NEU
+        sigma: [0.0, 2.5]     #NEU
         shift_minutes: 0      #NEU
         weight: 0.4           #NEU
 
     sunday_holiday:
-      - name: afternoon_peak  #NEU
+      - name: midday_peak  #NEU
         distribution: normal  #NEU
-        mu: [14.0, 16.0]      #NEU  # Nachmittagspeak
-        sigma: [1.0, 3.5]     #NEU
+        mu: [11.0, 16.0]      #NEU  # Nachmittagspeak
+        sigma: [0.5, 2.5]     #NEU
         shift_minutes: 0      #NEU
         weight: 0.7           #NEU
 
       - name: evening_peak    #NEU
         distribution: normal  #NEU
         mu: [17.0, 19.0]      #NEU
-        sigma: [1.0, 3.5]     #NEU
+        sigma: [0.5, 2.5]     #NEU
         shift_minutes: 0      #NEU
         weight: 0.3           #NEU
 
@@ -81,6 +81,7 @@ parking_duration_distribution:
   type: mixture  #NEU (vorher: lognormal_mixture)
   time_unit: minutes
   max_duration_minutes: 180     # 3 Stunden
+  min_duration_minutes: 10      # Untergrenze Mindeststanddauer bei 10 Minuten 
 
   components:
     - name: short_stay      # typischer HPC-Stop (20–40 Minuten)  #NEU-Kommentar optional
