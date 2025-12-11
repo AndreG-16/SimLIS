@@ -1,4 +1,4 @@
-site_type: office      # Standort des Ladepunkts
+site_type: highway      # Standort des Ladepunkts
 
 time_resolution_min: 60     # Zeitschritt, in der die Simulation abgebildet wird
 simulation_horizon_days: 2     # gewünschter Analysehorizont in Tagen
@@ -17,70 +17,103 @@ site:
 vehicles:
   soc_target: 1.0     # Gewünschter Ladezustand am Ende des Ladeprozesses
   vehicle_curve_csv: "../data/Ladekurven_Master.csv"      # Batteriekapazität und maximale Ladeleistung nach SOC
-  
+
 # Zeiten, an denen die Fahrer an den Ladepunkten ankommen
 arrival_time_distribution:
-  type: lognormal_mixture
+  type: mixture  #NEU (vorher: lognormal_mixture)
   time_unit: minutes
 
-  weekday_weight:     # Anteil der Mitarbeiter zur Gesamtbelegschaft, die an den entsprechenden Tagen nicht im Home Office oder Außerhalb arbeitet
-    working_day: [0.55, 0.95]     # Minimale und maximale Belegung an Werktagen
+  weekday_weight:
+    working_day: [0.55, 0.95]
     saturday: [0.40, 0.90]
     sunday_holiday: [0.7, 0.9]
 
   components_per_weekday:
-  ## gestalte die unterschiedlichen peaks pro Tag modular ergänzbar, sodass diese je nach Schichtbetrieb angepasst werden können.
+    ## Highway: zwei Peaks – mittags und am frühen Abend  #NEU
     working_day:
-      - mu: [1.60, 3.80]      # Peak Morgens
-        sigma: [0.25, 0.30]     # Streuung der Ankünfte
-        shift_minutes: 360     # 06:00 Start
-        weight: 1.0      # Anteil der Belegschaft, die Morgens anfängt zu arbeiten
+      - name: midday_peak  #NEU
+        distribution: normal  #NEU
+        mu: [12.0, 14.0]      #NEU  # Stunden seit Mitternacht (≈ 12–14 Uhr)
+        sigma: [0.8, 1.2]     #NEU  # Streuung in Stunden
+        shift_minutes: 0      #NEU  # Stunden → Minuten (mu * 60 + 0)
+        weight: 0.5           #NEU
+
+      - name: evening_peak   #NEU
+        distribution: normal  #NEU
+        mu: [17.0, 19.0]      #NEU  # ≈ 17–19 Uhr
+        sigma: [0.8, 1.2]     #NEU
+        shift_minutes: 0      #NEU
+        weight: 0.5           #NEU
+
     saturday:
-      - mu: [3.60, 6.80]      # Peak Morgens
-        sigma: [0.30, 0.50]     # Streuung der Ankünfte
-        shift_minutes: 360     # 06:00 Start
-        weight: 1.0      # Anteil der Belegschaft, die Morgens anfängt zu arbeiten
+      - name: midday_peak    #NEU
+        distribution: normal  #NEU
+        mu: [13.0, 15.0]      #NEU  # samstags oft etwas später unterwegs
+        sigma: [1.0, 1.5]     #NEU
+        shift_minutes: 0      #NEU
+        weight: 0.6           #NEU
+
+      - name: evening_peak   #NEU
+        distribution: normal  #NEU
+        mu: [17.0, 19.0]      #NEU
+        sigma: [1.0, 1.5]     #NEU
+        shift_minutes: 0      #NEU
+        weight: 0.4           #NEU
+
     sunday_holiday:
-      - mu: [5.60, 6.80]      # Peak Morgens
-        sigma: [0.30, 0.50]     # Streuung der Ankünfte
-        shift_minutes: 360     # 06:00 Start
-        weight: 1.0      # Anteil der Belegschaft, die Morgens anfängt zu arbeiten
+      - name: afternoon_peak  #NEU
+        distribution: normal  #NEU
+        mu: [14.0, 16.0]      #NEU  # Nachmittagspeak
+        sigma: [1.0, 1.5]     #NEU
+        shift_minutes: 0      #NEU
+        weight: 0.7           #NEU
+
+      - name: evening_peak    #NEU
+        distribution: normal  #NEU
+        mu: [17.0, 19.0]      #NEU
+        sigma: [1.0, 1.5]     #NEU
+        shift_minutes: 0      #NEU
+        weight: 0.3           #NEU
 
 # Parkdauer in Minuten ab Ankunft; Verteilung ist eine Mischung aus Kurz- und Langzeitparkern
 ## Lege hier nur die Grenzen fest und randomisiere parking duration und "components" im Modell.
 parking_duration_distribution:
-  type: lognormal_mixture
+  type: mixture  #NEU (vorher: lognormal_mixture)
   time_unit: minutes
   max_duration_minutes: 180     # 3 Stunden
 
   components:
-    - name: short_stay      # Mitarbeiter, die zum Beispiel teilzeit arbeiten
-      weight: 0.85      # Anteil der Mitarbeiter, die teilzeit arbeiten
-      mu: [50, 100]     # 4.5 Stunden
-      sigma: [0.15, 0.25]
+    - name: short_stay      # typischer HPC-Stop (20–40 Minuten)  #NEU-Kommentar optional
+      distribution: normal  #NEU
+      weight: 0.85      # Anteil Kurzparker
+      mu: [20, 30]      # mittlere Parkdauer in Minuten  #NEU
+      sigma: [5, 10]    # Streuung in Minuten  #NEU
 
-    - name: long_stay     # Langzeitparker / Vollzeitkräfte
-      weight: 0.15      # Anteil der Mitarbeiter, die vollzeit arbeiten
-      mu: [100, 200]       # 9.5 Stunden
-      sigma: [0.25, 0.35]
+    - name: long_stay     # seltene längere Stopps
+      distribution: normal  #NEU
+      weight: 0.15      # Anteil Langzeitparker
+      mu: [40, 80]       # längere Stopps in Minuten  #NEU
+      sigma: [10, 15]    #NEU
 
 # Batteriezustand bei Ankunft; Verteilung ist eine Mischung aus spontanen Laden und Laden aufgrund niedrigem Batteriezustand
-## Lege hier nur die Grenzen fest und randomisiere im Modell. Charging strategies unterscheiden sich je nach Standort. Lege die ggf. im Modell fest.
+## Highway: deutlich mehr "low battery"-Charging, weniger opportunistisch
 soc_at_arrival_distribution:
-  type: lognormal_mixture
+  type: mixture  #NEU (vorher: lognormal_mixture)
   value_unit: fraction        # 0.0 bis 1.0
-  max_soc: 0.85               # 85 % maximaler SoC bei Ankunft
+  max_soc: 0.70               #NEU (vorher: 0.85 – an der Autobahn meist niedriger SoC bei Ankunft)
 
   components:
-    - name: opportunistic_charging      # Laden aus Gelegenheit und nicht aus Notwendigkeit
-      weight: 0.80      # Anteil der Fahrer, die aus der Gelegenheit laden
-      mu: [0.40, 0.50]      # Durchschnittler SoC bei Ankunft
-      sigma: [0.15, 0.25]
-
     - name: low_battery_charging      # Laden aufgrund leerer Batterie / gezielte Anfahrt
-      weight: 0.20      # Anteil der Fahrer, die aufgrund leerer Batterie laden
-      mu: [0.25, 0.35]
-      sigma: [0.25, 0.35]
+      distribution: beta  #NEU
+      weight: 0.70      #NEU (Hauptanteil: gezieltes Laden bei niedrigem SoC)
+      alpha: [2.0, 3.0]  #NEU  # formt Peak bei ca. 0.10–0.20
+      beta: [5.0, 7.0]   #NEU
+
+    - name: opportunistic_charging      # Laden aus Gelegenheit
+      distribution: normal  #NEU
+      weight: 0.30      #NEU
+      mu: [0.45, 0.60]      # durchschnittlicher SoC bei Opportunisten  #NEU
+      sigma: [0.08, 0.12]   #NEU
 
 holidays:
   dates:
