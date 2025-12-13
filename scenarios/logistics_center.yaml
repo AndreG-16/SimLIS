@@ -1,4 +1,4 @@
-site_type: industrial_site      # Standort des Ladepunkts
+site_type: logistics_center      # Standort des Ladepunkts
 
 time_resolution_min: 10         # Zeitschritt, in der die Simulation abgebildet wird
 simulation_horizon_days: 14     # gewünschter Analysehorizont in Tagen
