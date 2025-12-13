@@ -1,26 +1,139 @@
-name: logistics_center
-site_type: logistics_center
+site_type: industrial_site      # Standort des Ladepunkts
 
-time_resolution_min: 15
-sim_horizon_days: 7
+time_resolution_min: 10         # Zeitschritt, in der die Simulation abgebildet wird
+simulation_horizon_days: 14     # gewünschter Analysehorizont in Tagen
+
+start_datetime: "2025-05-22 00:00"      # Zeitpunkt, ab dem der Lastgang anfangen soll
 
 site:
-  number_chargers: 20
-  rated_power_kw: 150
-  grid_limit_p_avb_kw: 1000
-  operation_window: "4:00 - 20:00"
-  charger_efficiency: 0.95
-  charging_strategy: "immediate"
+  number_chargers: 5           # Anzahl der Ladepunkte am Standort
+  rated_power_kw: 100            # Verfügbare Leistung pro Ladepunkt
+  grid_limit_p_avb_kw: 600      # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  expected_sessions_per_charger_per_day: [1.0, 4.0]    # erwartete Ladevorgänge pro LP und Tag
+  charger_efficiency: 0.95      # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
+  charging_strategy: "immediate"      # Strombereitstellungsstrategie 
 
+# Fuhrparkbeschreibung – Ladekurven + Kapazitäten kommen aus CSV
 vehicles:
-  soc_target: 0.9
-  battery_capacity_kwh: 60
-  max_pwr_vehicle_kw: 50
+  soc_target: 1.0               # Gewünschter Ladezustand am Ende des Ladeprozesses
+  vehicle_curve_csv: "../data/Ladekurven_Master.csv"      # Batteriekapazität und Ladekurve nach SOC
 
-data:
-  arrivals_xlsx: "data/Ankunft.xlsx"
-  arrivals_sheet: "Ankunft"
-  durations_xlsx: "data/Standzeiten.xlsx"
-  durations_sheet: "Standdauer"
-  soc_xlsx: "data/SoC_Ankunft.xlsx"
-  soc_sheet: "SoC"
+# Ankunftszeiten an den Ladepunkten
+arrival_time_distribution:
+  type: mixture
+  time_unit: minutes
+
+  # Skalierung der Ladevorgänge je nach Tagtyp
+  weekday_weight:
+    working_day: [0.8, 1.5]     # hoher Betrieb an Arbeitstagen (Schichtbetrieb)
+    saturday: [0.4, 0.8]        # reduzierter Betrieb am Samstag
+    sunday_holiday: [0.2, 0.4]  # geringer Betrieb an Sonn- und Feiertagen (z.B. Not-/Teilbetrieb)
+
+  components_per_weekday:
+    # Industrial Site: Schicht-/Wellenanfahrten – morgens, mittags, abends
+    # f(x)= Σ wi * N(x | μi, σi)   mit μ in Stunden, σ in Stunden, und shift_minutes als Peak-Zeitpunkt
+    working_day:
+      - name: morning_shift_peak      # Schichtbeginn morgens
+        distribution: normal
+        mu: 7.00                      # Mittelwert in Stunden (um shift_minutes zentriert)
+        sigma: 0.40                   # Streuung in Stunden (0.40h ≈ 24 min)
+        shift_minutes: 0              
+        weight: 0.21                  # Gewichtung innerhalb working_day
+
+      - name: midday_shift_peak       # Schichtwechsel / Mittag (breiter, z.B. Pausen/wechselnde Startzeiten)
+        distribution: normal
+        mu: 13.00
+        sigma: 2.80                   # Streuung in Stunden (2.8h ≈ 168 min)
+        shift_minutes: 0              
+        weight: 0.575
+
+      - name: evening_shift_peak      # Schichtbeginn abends/nachts
+        distribution: normal
+        mu: 23.00
+        sigma: 1.00                   # Streuung in Stunden (1h = 60 min)
+        shift_minutes: 0
+        weight: 0.22
+
+    # Samstag: typischerweise weniger Schichten / verkürzte Produktion
+    saturday:
+      - name: saturday_midday_peak
+        distribution: normal
+        mu: 13.00
+        sigma: 3.0
+        shift_minutes: 0            
+        weight: 0.7
+
+      - name: saturday_night_peak
+        distribution: normal
+        mu: 01.00
+        sigma: 2.00
+        shift_minutes: 0            
+        weight: 0.3
+
+    # Sonntag/Feiertag: Notbetrieb / Wartung / Security / einzelne Lieferfenster
+    sunday_holiday:
+      - name: sunday_maintenance_window
+        distribution: normal
+        mu: 11.00
+        sigma: 3.50
+        shift_minutes: 0            
+        weight: 1.0
+
+# Parkdauer in Minuten ab Ankunft; Verteilung ist eine Mischung aus Kurz- und Langzeitparkern
+# Industrial Site: Langparker über Nacht, Kurzparker bei Schichtwechsel
+parking_duration_distribution:
+  type: mixture
+  time_unit: minutes
+  max_duration_minutes: 600      # Obergrenze maximale Ladedauer
+  min_duration_minutes: 20       # Untergrenze minimale Ladedauer
+
+  components:
+    - name: long_stay                    # Nachtladungen (lange Standzeit)
+      distribution: normal
+      weight: 0.5
+      mu: [420, 600]                     # typische Parkdauer 7–10 Stunden
+      sigma: [60, 120]                   # Streuung 1–2 Stunden
+
+    - name: short_stay                   # kürzere Parkzeit bei Schichtwechsel
+      distribution: normal
+      weight: 0.5
+      mu: [60, 180]                      # typische Parkdauer 1 - 3 Stunden
+      sigma: [30, 60]
+
+# Batteriezustand bei Ankunft; Verteilung ist eine Mischung aus gezieltem Laden und opportunistischem Laden
+# Industrial Site: Pendler/Schichtarbeiter (mittlerer SoC) + einzelne Fahrzeuge mit niedrigem SoC (z.B. Flotten/Transporter)
+soc_at_arrival_distribution:
+  type: mixture
+  value_unit: fraction      # 0.0 bis 1.0
+  max_soc: 0.80             # maximales SoC bei Ankunft
+
+  components:
+    - name: long_distance               # LKW
+      distribution: normal
+      weight: 0.6
+      mu: [0.1, 0.5]                 
+      sigma: [0.05, 0.15]
+
+    - name: regional_transport          # Transporter
+      distribution: beta
+      weight: 0.25
+      alpha: [2.0, 3.0]                 # Peak eher niedrig (ca. 0.1–0.3)
+      beta: [5.0, 8.0]
+
+    - name: last_mile                   # Transporter
+      distribution: beta
+      weight: 0.15
+      mu: [0.6, 0.8]
+      sigma: [0.07, 0.12]
+
+# Feiertage im Jahr 2025 → werden wie Sonntage behandelt
+holidays:
+  dates:
+    - "2025-01-01"
+    - "2025-04-18"
+    - "2025-04-21"
+    - "2025-05-01"
+    - "2025-05-29"
+    - "2025-10-03"
+    - "2025-12-25"
+    - "2025-12-26"

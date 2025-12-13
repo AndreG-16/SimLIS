@@ -93,7 +93,7 @@ parking_duration_distribution:
 soc_at_arrival_distribution:
   type: mixture
   value_unit: fraction       # 0.0 bis 1.0
-  max_soc: 0.90              # maximales SoC bei Ankunft
+  max_soc: 0.80              # maximales SoC bei Ankunft
 
   components:
     - name: low_battery_charging        # Pendler mit eher mittlerem SoC, die gezielt nachladen
