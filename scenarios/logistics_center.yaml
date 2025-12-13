@@ -30,8 +30,7 @@ arrival_time_distribution:
     sunday_holiday: [0.2, 0.4]  # geringer Betrieb an Sonn- und Feiertagen (z.B. Not-/Teilbetrieb)
 
   components_per_weekday:
-    # Industrial Site: Schicht-/Wellenanfahrten – morgens, mittags, abends
-    # f(x)= Σ wi * N(x | μi, σi)   mit μ in Stunden, σ in Stunden, und shift_minutes als Peak-Zeitpunkt
+    # Logistic Center: zeitfensterbasierte Ankünfte (Slots/Touren) – Peaks um 07:00, 13:00 und 23:00
     working_day:
       - name: morning_shift_peak      # Schichtbeginn morgens
         distribution: normal
@@ -80,7 +79,7 @@ arrival_time_distribution:
         weight: 1.0
 
 # Parkdauer in Minuten ab Ankunft; Verteilung ist eine Mischung aus Kurz- und Langzeitparkern
-# Industrial Site: Langparker über Nacht, Kurzparker bei Schichtwechsel
+# Logistic Center: Langparker über Nacht, Kurzparker bei Schichtwechsel, Beladen und Entladen
 parking_duration_distribution:
   type: mixture
   time_unit: minutes
@@ -101,26 +100,20 @@ parking_duration_distribution:
       sigma: [30, 60]
 
 # Batteriezustand bei Ankunft; Verteilung ist eine Mischung aus gezieltem Laden und opportunistischem Laden
-# Industrial Site: Pendler/Schichtarbeiter (mittlerer SoC) + einzelne Fahrzeuge mit niedrigem SoC (z.B. Flotten/Transporter)
+# Logistic Center: stärker bedarfsgetrieben (niedriger bis mittlerer SoC), opportunistisches Laden seltener
 soc_at_arrival_distribution:
   type: mixture
   value_unit: fraction      # 0.0 bis 1.0
   max_soc: 0.80             # maximales SoC bei Ankunft
 
   components:
-    - name: long_distance               # LKW
+    - name: low_battery_charging               # LKW
       distribution: normal
       weight: 0.6
       mu: [0.1, 0.5]                 
       sigma: [0.05, 0.15]
 
-    - name: regional_transport          # Transporter
-      distribution: beta
-      weight: 0.25
-      alpha: [2.0, 3.0]                 # Peak eher niedrig (ca. 0.1–0.3)
-      beta: [5.0, 8.0]
-
-    - name: last_mile                   # Transporter
+    - name: opportunistic_charging                   # Transporter / Last-Mile
       distribution: beta
       weight: 0.15
       mu: [0.6, 0.8]
