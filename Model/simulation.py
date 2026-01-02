@@ -14,6 +14,7 @@ from typing import Any
 class VehicleProfile:
     name: str
     battery_capacity_kwh: float
+    vehicle_class: str               #NEU: z.B. "PKW", "Transporter"
     soc_grid: np.ndarray        # SoC-Stützstellen (0..1)
     power_grid_kw: np.ndarray   # Ladeleistung in kW zu den SoC-Stützstellen
 
@@ -31,8 +32,9 @@ def load_vehicle_profiles_from_csv(path: str) -> list[VehicleProfile]:
       Zeile 1: Marken (wird ignoriert)
       Zeile 2: "Modell;ID.3;ID.4;..."
       Zeile 3: "max. Kapazität;77;77;..."
-      Zeile 4: "SoC [%];..."
-      ab Zeile 5: "0;P_ID3;P_ID4;..." etc.
+      Zeile 4: Fahrzeugklasse  #NEU
+      Zeile 5: "SoC [%];..."
+      ab Zeile 6: "0;P_ID3;P_ID4;..." etc.
     """
     vehicle_profiles: list[VehicleProfile] = []
 
@@ -54,7 +56,13 @@ def load_vehicle_profiles_from_csv(path: str) -> list[VehicleProfile]:
             return []
         raw_capacities = capacity_row[1:]
 
-        # 4. Zeile: "SoC [%]" (Header)
+        # 4. Zeile: Fahrzeugklasse  #NEU
+        class_row = next(reader, None)
+        if class_row is None:
+            return []
+        vehicle_classes = [c.strip() if c.strip() != "" else "PKW" for c in class_row[1:]]
+
+        # 5. Zeile "SoC [%]" (Header)
         _soc_header_row = next(reader, None)
 
         # Kapazitäten in kWh lesen
@@ -123,10 +131,14 @@ def load_vehicle_profiles_from_csv(path: str) -> list[VehicleProfile]:
             soc_grid = soc_grid[sort_idx]
             power_grid = power_grid[sort_idx]
 
+            # Fahrzeugklasse (fallback "PKW", falls CSV-Zeile kürzer ist)  #NEU
+            vclass = vehicle_classes[i].strip() if i < len(vehicle_classes) else "PKW"  #NEU
+
             vehicle_profiles.append(
                 VehicleProfile(
                     name=name,
                     battery_capacity_kwh=cap,
+                    vehicle_class=vclass,             #NEU
                     soc_grid=soc_grid,
                     power_grid_kw=power_grid,
                 )
@@ -401,6 +413,51 @@ def realize_mixture_components(
 
 
 # ---------------------------------------------------------------------------
+# Fahrzeugwahl nach Standortgewichtung (PKW/Transporter/...)  #NEU
+# ---------------------------------------------------------------------------
+
+def choose_vehicle_profile(
+    vehicle_profiles: list[VehicleProfile],
+    scenario: dict[str, Any],
+) -> VehicleProfile:
+    """
+    Wählt ein Fahrzeugprofil aus der geladenen Flotte aus.
+    Optional kann pro Standort in der YAML ein fleet_mix gesetzt werden, z.B.:
+
+      vehicles:
+        fleet_mix:
+          PKW: 0.3
+          Transporter: 0.7
+
+    Falls fleet_mix fehlt oder ungültig ist, wird gleichverteilt gewählt.  #NEU
+    """
+    fleet_mix = scenario.get("vehicles", {}).get("fleet_mix", None)  #NEU
+
+    # Fallback: gleichverteilte Auswahl  #NEU
+    if not fleet_mix:
+        return np.random.choice(vehicle_profiles)
+
+    # nur Fahrzeuge berücksichtigen, deren Klasse im fleet_mix vorkommt  #NEU
+    selectable_profiles = [
+        vp for vp in vehicle_profiles if vp.vehicle_class in fleet_mix
+    ]
+    if not selectable_profiles:
+        return np.random.choice(vehicle_profiles)
+
+    weights = np.array(
+        [float(fleet_mix[vp.vehicle_class]) for vp in selectable_profiles],
+        dtype=float,
+    )
+
+    # Fallback bei nicht-positiven Summen  #NEU
+    if weights.sum() <= 0.0:
+        return np.random.choice(selectable_profiles)
+
+    probs = weights / weights.sum()
+    return np.random.choice(selectable_profiles, p=probs)
+
+
+# ---------------------------------------------------------------------------
 # Ankunftszeiten
 # ---------------------------------------------------------------------------
 
@@ -512,6 +569,9 @@ def sample_soc_upon_arrival(scenario: dict, number_of_sessions: int) -> np.ndarr
         unit_description="soc_fraction",
     )
 
+    # NEU: negative SoC-Werte vermeiden (bei Normalverteilungen möglich)
+    soc_values = np.maximum(soc_values, 0.0)  #NEU
+
     return soc_values
 
 
@@ -549,8 +609,8 @@ def build_charging_sessions_for_day(
 
         soc_at_arrival = float(soc_values_at_arrival[session_index])
 
-        # NEU: zufällig ein Fahrzeug aus der Flotte wählen
-        vehicle_profile = np.random.choice(vehicle_profiles)  #NEU
+        # NEU: Fahrzeugwahl nach fleet_mix (PKW/Transporter/...)  #NEU
+        vehicle_profile = choose_vehicle_profile(vehicle_profiles, scenario)  #NEU
         battery_capacity_kwh = float(vehicle_profile.battery_capacity_kwh)  #NEU
 
         delta_soc = max(target_soc - soc_at_arrival, 0.0)
@@ -572,6 +632,7 @@ def build_charging_sessions_for_day(
             "delivered_energy_kwh": 0.0,  #NEU: bisher geladene Energie zur SoC-Berechnung
             "max_charging_power_kw": max_vehicle_charging_power_kw,
             "vehicle_name": vehicle_profile.name,       #NEU
+            "vehicle_class": vehicle_profile.vehicle_class,  #NEU (für Auswertung/Debug)
             "soc_grid": vehicle_profile.soc_grid,       #NEU
             "power_grid_kw": vehicle_profile.power_grid_kw,  #NEU
         }

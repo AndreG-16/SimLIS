@@ -1,7 +1,7 @@
 site_type: logistics_center      # Standort des Ladepunkts
 
 time_resolution_min: 10         # Zeitschritt, in der die Simulation abgebildet wird
-simulation_horizon_days: 14     # gewünschter Analysehorizont in Tagen
+simulation_horizon_days: 2     # gewünschter Analysehorizont in Tagen
 
 start_datetime: "2025-05-22 00:00"      # Zeitpunkt, ab dem der Lastgang anfangen soll
 
@@ -17,6 +17,9 @@ site:
 vehicles:
   soc_target: 1.0               # Gewünschter Ladezustand am Ende des Ladeprozesses
   vehicle_curve_csv: "../data/Ladekurven_Master.csv"      # Batteriekapazität und Ladekurve nach SOC
+  fleet_mix:                                              # Gewichtung der Fahrzeugtypen - PKW & Transporter
+    PKW: 0.05
+    Transporter: 0.95
 
 # Ankunftszeiten an den Ladepunkten
 arrival_time_distribution:
@@ -49,7 +52,7 @@ arrival_time_distribution:
       - name: evening_shift_peak      # Schichtbeginn abends/nachts
         distribution: normal
         mu: 23.00
-        sigma: 1.00                   # Streuung in Stunden (1h = 60 min)
+        sigma: 2.00                   # Streuung in Stunden (2h = 120 min)
         shift_minutes: 0
         weight: 0.22
 
@@ -89,13 +92,13 @@ parking_duration_distribution:
   components:
     - name: long_stay                    # Nachtladungen (lange Standzeit)
       distribution: normal
-      weight: 0.5
+      weight: 0.6
       mu: [420, 600]                     # typische Parkdauer 7–10 Stunden
       sigma: [60, 120]                   # Streuung 1–2 Stunden
 
     - name: short_stay                   # kürzere Parkzeit bei Schichtwechsel
       distribution: normal
-      weight: 0.5
+      weight: 0.4
       mu: [60, 180]                      # typische Parkdauer 1 - 3 Stunden
       sigma: [30, 60]
 
@@ -114,7 +117,7 @@ soc_at_arrival_distribution:
       sigma: [0.05, 0.15]
 
     - name: opportunistic_charging                   # Transporter / Last-Mile
-      distribution: beta
+      distribution: normal
       weight: 0.15
       mu: [0.6, 0.8]
       sigma: [0.07, 0.12]
