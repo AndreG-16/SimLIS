@@ -606,24 +606,32 @@ def build_charging_sessions_for_day(
 
     for session_index in range(number_of_sessions):
         arrival_time = arrival_times_for_day[session_index]
-        departure_time = arrival_time + timedelta(
+
+        raw_departure_time = arrival_time + timedelta(
             minutes=float(parking_durations_minutes[session_index])
         )
 
+        # Schalter aus YAML: ermöglicht tageübergreifenden Sessions
+        allow_cross_day = scenario["site"].get("allow_cross_day_charging", True)
+
+        if allow_cross_day:
+            departure_time = raw_departure_time
+        else:
+            end_of_day = day_start_datetime + timedelta(days=1)
+            departure_time = min(raw_departure_time, end_of_day)
+
         soc_at_arrival = float(soc_values_at_arrival[session_index])
 
-        # NEU: Fahrzeugwahl nach fleet_mix (PKW/Transporter/...)  #NEU
-        vehicle_profile = choose_vehicle_profile(vehicle_profiles, scenario)  #NEU
-        battery_capacity_kwh = float(vehicle_profile.battery_capacity_kwh)  #NEU
+        vehicle_profile = choose_vehicle_profile(vehicle_profiles, scenario)
+        battery_capacity_kwh = float(vehicle_profile.battery_capacity_kwh)
 
         delta_soc = max(target_soc - soc_at_arrival, 0.0)
         required_energy_kwh = delta_soc * battery_capacity_kwh
 
-        if required_energy_kwh <= 0.0:          #NEU Fahrzeuge ohne Ladebedarf überspringen
+        if required_energy_kwh <= 0.0:
             continue
 
-        # Maximalleistung als Maximum der Kurve (zusätzlich zur SoC-abhängigen Grenze)
-        max_vehicle_charging_power_kw = float(vehicle_profile.power_grid_kw.max())  #NEU
+        max_vehicle_charging_power_kw = float(vehicle_profile.power_grid_kw.max())
 
         charging_session: dict[str, Any] = {
             "arrival_time": arrival_time,
@@ -632,12 +640,12 @@ def build_charging_sessions_for_day(
             "soc_target": target_soc,
             "battery_capacity_kwh": battery_capacity_kwh,
             "energy_required_kwh": required_energy_kwh,
-            "delivered_energy_kwh": 0.0,  #NEU: bisher geladene Energie zur SoC-Berechnung
+            "delivered_energy_kwh": 0.0,
             "max_charging_power_kw": max_vehicle_charging_power_kw,
-            "vehicle_name": vehicle_profile.name,       #NEU
-            "vehicle_class": vehicle_profile.vehicle_class,  #NEU (für Auswertung/Debug)
-            "soc_grid": vehicle_profile.soc_grid,       #NEU
-            "power_grid_kw": vehicle_profile.power_grid_kw,  #NEU
+            "vehicle_name": vehicle_profile.name,
+            "vehicle_class": vehicle_profile.vehicle_class,
+            "soc_grid": vehicle_profile.soc_grid,
+            "power_grid_kw": vehicle_profile.power_grid_kw,
         }
         charging_sessions_for_day.append(charging_session)
 

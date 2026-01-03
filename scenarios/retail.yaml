@@ -12,6 +12,7 @@ site:
   expected_sessions_per_charger_per_day: [2.0, 6.0]   # erwartete Ladevorgänge pro LP und Tag
   charger_efficiency: 0.95                 # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
   charging_strategy: "immediate"           # Strombereitstellungsstrategie 
+  allow_cross_day_charging: false           # Ermöglicht keine Ladungen über Mitternacht hinaus
 
 # Fuhrparkbeschreibung – Ladekurven + Kapazitäten kommen aus CSV
 vehicles:

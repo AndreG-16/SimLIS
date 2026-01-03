@@ -6,12 +6,13 @@ simulation_horizon_days: 2     # gewünschter Analysehorizont in Tagen
 start_datetime: "2025-05-22 00:00"      # Zeitpunkt, ab dem der Lastgang anfangen soll
 
 site:
-  number_chargers: 5           # Anzahl der Ladepunkte am Standort
-  rated_power_kw: 100            # Verfügbare Leistung pro Ladepunkt
-  grid_limit_p_avb_kw: 600      # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
-  expected_sessions_per_charger_per_day: [1.0, 4.0]    # erwartete Ladevorgänge pro LP und Tag
-  charger_efficiency: 0.95      # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
-  charging_strategy: "immediate"      # Strombereitstellungsstrategie 
+  number_chargers: 5                                       # Anzahl der Ladepunkte am Standort
+  rated_power_kw: 100                                     # Verfügbare Leistung pro Ladepunkt
+  grid_limit_p_avb_kw: 600                                # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  expected_sessions_per_charger_per_day: [1.0, 4.0]       # erwartete Ladevorgänge pro LP und Tag
+  charger_efficiency: 0.95                                # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
+  charging_strategy: "immediate"                          # Strombereitstellungsstrategie 
+  allow_cross_day_charging: true                          # Ermöglicht Ladungen über Mitternacht hinaus
 
 # Fuhrparkbeschreibung – Ladekurven + Kapazitäten kommen aus CSV
 vehicles:
