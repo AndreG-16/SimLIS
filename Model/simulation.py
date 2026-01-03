@@ -28,57 +28,62 @@ def load_vehicle_profiles_from_csv(path: str) -> list[VehicleProfile]:
     Liest eine CSV mit Fahrzeugen und SoC-abhängigen Ladekurven und gibt
     eine Liste von VehicleProfile-Objekten zurück.
 
-    Erwartete Struktur (vereinfacht, Spaltentrenner ';'):
-      Zeile 1: Marken (wird ignoriert)
-      Zeile 2: "Modell;ID.3;ID.4;..."
-      Zeile 3: "max. Kapazität;77;77;..."
-      Zeile 4: Fahrzeugklasse  #NEU
-      Zeile 5: "SoC [%];..."
-      ab Zeile 6: "0;P_ID3;P_ID4;..." etc.
+    Erwartete Struktur (Spaltentrenner ';'):
+      Zeile 1: Hersteller (wird ignoriert)
+      Zeile 2: Modellnamen
+      Zeile 3: Fahrzeugklasse  #NEU
+      Zeile 4: max. Kapazität (kWh)
+      Zeile 5: "SoC [%]" (Header)
+      ab Zeile 6: SoC-Werte in % + Ladeleistungen je Fahrzeug
     """
     vehicle_profiles: list[VehicleProfile] = []
 
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8-sig") as f:  # BOM-sicher
         reader = csv.reader(f, delimiter=";")
 
-        # 1. Zeile: Marken (ignorieren)
+        # 1. Zeile: Hersteller (ignorieren)
         _brands_row = next(reader, None)
 
         # 2. Zeile: Modellnamen
         model_row = next(reader, None)
-        if model_row is None:
+        if not model_row or len(model_row) < 2:
             return []
-        model_names = model_row[1:]  # ab Spalte 1 sind die Fahrzeugmodelle
+        model_names = [m.strip() for m in model_row[1:]]
 
-        # 3. Zeile: max. Kapazitäten
-        capacity_row = next(reader, None)
-        if capacity_row is None:
-            return []
-        raw_capacities = capacity_row[1:]
-
-        # 4. Zeile: Fahrzeugklasse  #NEU
+        # 3. Zeile: Fahrzeugklasse  #NEU
         class_row = next(reader, None)
-        if class_row is None:
+        if not class_row or len(class_row) < 2:
             return []
         vehicle_classes = [c.strip() if c.strip() != "" else "PKW" for c in class_row[1:]]
 
-        # 5. Zeile "SoC [%]" (Header)
+        # 4. Zeile: max. Kapazitäten
+        capacity_row = next(reader, None)
+        if not capacity_row or len(capacity_row) < 2:
+            return []
+        raw_capacities = capacity_row[1:]
+
+        # 5. Zeile: "SoC [%]" (Header)
         _soc_header_row = next(reader, None)
 
         # Kapazitäten in kWh lesen
         capacities_kwh: list[float] = []
         for val in raw_capacities:
-            val = val.strip()
+            val = (val or "").strip()
             if val == "":
                 capacities_kwh.append(np.nan)
-            else:
-                try:
-                    cap = float(val.replace(",", "."))
-                    capacities_kwh.append(cap if cap > 0 else np.nan)
-                except ValueError:
-                    capacities_kwh.append(np.nan)
+                continue
+            try:
+                cap = float(val.replace(",", "."))
+                capacities_kwh.append(cap if cap > 0 else np.nan)
+            except ValueError:
+                capacities_kwh.append(np.nan)
 
-        num_vehicles = len(model_names)
+        # Konsistenz: Anzahl Spalten vereinheitlichen  #NEU
+        num_vehicles = min(len(model_names), len(vehicle_classes), len(capacities_kwh))  #NEU
+        model_names = model_names[:num_vehicles]  #NEU
+        vehicle_classes = vehicle_classes[:num_vehicles]  #NEU
+        capacities_kwh = capacities_kwh[:num_vehicles]  #NEU
+
         soc_lists: list[list[float]] = [[] for _ in range(num_vehicles)]
         power_lists: list[list[float]] = [[] for _ in range(num_vehicles)]
 
@@ -87,7 +92,7 @@ def load_vehicle_profiles_from_csv(path: str) -> list[VehicleProfile]:
             if not row:
                 continue
 
-            soc_str = row[0].strip()
+            soc_str = (row[0] or "").strip()
             if soc_str == "":
                 continue
 
@@ -103,7 +108,7 @@ def load_vehicle_profiles_from_csv(path: str) -> list[VehicleProfile]:
             for idx in range(num_vehicles):
                 if idx + 1 >= len(row):
                     continue
-                cell = row[idx + 1].strip()
+                cell = (row[idx + 1] or "").strip()
                 if cell == "":
                     continue
                 try:
@@ -116,7 +121,8 @@ def load_vehicle_profiles_from_csv(path: str) -> list[VehicleProfile]:
 
         # VehicleProfile-Objekte bauen
         for i in range(num_vehicles):
-            name = model_names[i].strip()
+            name = model_names[i]
+            vclass = vehicle_classes[i]  #NEU
             cap = capacities_kwh[i]
 
             # Nur Fahrzeuge mit gültiger Kapazität und vorhandener Kurve
@@ -131,14 +137,11 @@ def load_vehicle_profiles_from_csv(path: str) -> list[VehicleProfile]:
             soc_grid = soc_grid[sort_idx]
             power_grid = power_grid[sort_idx]
 
-            # Fahrzeugklasse (fallback "PKW", falls CSV-Zeile kürzer ist)  #NEU
-            vclass = vehicle_classes[i].strip() if i < len(vehicle_classes) else "PKW"  #NEU
-
             vehicle_profiles.append(
                 VehicleProfile(
                     name=name,
-                    battery_capacity_kwh=cap,
-                    vehicle_class=vclass,             #NEU
+                    battery_capacity_kwh=float(cap),
+                    vehicle_class=vclass,      #NEU
                     soc_grid=soc_grid,
                     power_grid_kw=power_grid,
                 )
