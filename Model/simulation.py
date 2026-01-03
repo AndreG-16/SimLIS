@@ -652,18 +652,14 @@ def build_charging_sessions_for_day(
     return charging_sessions_for_day
 
 
-# ---------------------------------------------------------------------------
-# Hauptsimulation: Lastprofil
-# ---------------------------------------------------------------------------
-
 def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None):
     """
     Führt die Lastgang-Simulation durch.
     Jetzt mit fahrzeugspezifischen Batteriekapazitäten und SoC-abhängiger Ladeleistung.
     """
     # NEU: Fahrzeugflotte aus CSV laden
-    vehicle_csv_path = scenario["vehicles"]["vehicle_curve_csv"]  #NEU
-    vehicle_profiles = load_vehicle_profiles_from_csv(vehicle_csv_path)  #NEU
+    vehicle_csv_path = scenario["vehicles"]["vehicle_curve_csv"]  # NEU
+    vehicle_profiles = load_vehicle_profiles_from_csv(vehicle_csv_path)  # NEU
 
     time_index = create_time_index(scenario, start_datetime)
 
@@ -679,10 +675,11 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
     charger_efficiency = scenario["site"]["charger_efficiency"]
 
     # DEBUG / Analyse: Anzahl gleichzeitig ladender Sessions pro Zeitschritt
-    charging_count_series = []
+    charging_count_series: list[int] = []
 
     all_charging_sessions: list[dict[str, Any]] = []
 
+    # 1) Sessions für gesamten Horizont erzeugen
     if time_index:
         first_day_start_datetime = time_index[0].replace(
             hour=0, minute=0, second=0, microsecond=0
@@ -692,75 +689,75 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
         for day_offset in range(simulation_horizon_days):
             day_start_datetime = first_day_start_datetime + timedelta(days=day_offset)
             charging_sessions_for_day = build_charging_sessions_for_day(
-                scenario, day_start_datetime, vehicle_profiles  #NEU
+                scenario, day_start_datetime, vehicle_profiles  # NEU
             )
             all_charging_sessions.extend(charging_sessions_for_day)
 
+    # 2) Zeitschrittweise Simulation (Lastprofil)
+    for time_step_index, current_timestamp in enumerate(time_index):
 
-        for time_step_index, current_timestamp in enumerate(time_index):
+        present_sessions = [
+            session
+            for session in all_charging_sessions
+            if session["arrival_time"] <= current_timestamp < session["departure_time"]
+            and session["energy_required_kwh"] > 0.0
+        ]
 
-            present_sessions = [
-                session
-                for session in all_charging_sessions
-                if session["arrival_time"] <= current_timestamp < session["departure_time"]
-                and session["energy_required_kwh"] > 0.0
-            ]
+        if not present_sessions:
+            load_profile_kw[time_step_index] = 0.0
+            charging_count_series.append(0)
+            continue
 
-            if not present_sessions:
-                load_profile_kw[time_step_index] = 0.0
-                charging_count_series.append(0)  # wichtig
-                continue
+        # VARIANTE A: maximal number_of_chargers Sessions laden gleichzeitig
+        present_sessions.sort(key=lambda s: (s["departure_time"], s["arrival_time"]))
+        charging_sessions = present_sessions[:number_of_chargers]
+        charging_count_series.append(len(charging_sessions))
 
-            present_sessions.sort(key=lambda s: (s["departure_time"], s["arrival_time"]))
-            charging_sessions = present_sessions[:number_of_chargers]
+        number_of_charging_sessions = len(charging_sessions)
+        if number_of_charging_sessions == 0:
+            load_profile_kw[time_step_index] = 0.0
+            continue
 
-            charging_count_series.append(len(charging_sessions))  # wichtig
+        maximum_site_power_kw = min(
+            grid_limit_p_avb_kw,
+            number_of_charging_sessions * rated_power_kw,
+        )
 
-            number_of_charging_sessions = len(charging_sessions)
-            if number_of_charging_sessions == 0:
-                load_profile_kw[time_step_index] = 0.0
-                continue
+        available_power_per_session_kw = maximum_site_power_kw / number_of_charging_sessions
 
-            maximum_site_power_kw = min(
-                grid_limit_p_avb_kw,
-                number_of_charging_sessions * rated_power_kw,
+        total_power_in_time_step_kw = 0.0
+
+        for charging_session in charging_sessions:
+            vehicle_power_limit_kw = vehicle_power_at_soc(charging_session)
+
+            allowed_power_kw = min(
+                available_power_per_session_kw,
+                rated_power_kw,
+                vehicle_power_limit_kw,
+                charging_session["max_charging_power_kw"],
             )
 
-            available_power_per_session_kw = maximum_site_power_kw / number_of_charging_sessions
+            possible_energy_in_time_step_kwh = (
+                allowed_power_kw * time_step_hours * charger_efficiency
+            )
 
-            total_power_in_time_step_kw = 0.0
+            energy_needed = charging_session["energy_required_kwh"]
 
-            for charging_session in charging_sessions:
-                vehicle_power_limit_kw = vehicle_power_at_soc(charging_session)
-
-                allowed_power_kw = min(
-                    available_power_per_session_kw,
-                    rated_power_kw,
-                    vehicle_power_limit_kw,
-                    charging_session["max_charging_power_kw"],
+            if possible_energy_in_time_step_kwh >= energy_needed:
+                energy_delivered = energy_needed
+                charging_session["energy_required_kwh"] = 0.0
+                actual_power_kw = (
+                    energy_delivered / (time_step_hours * charger_efficiency)
+                    if time_step_hours > 0
+                    else 0.0
                 )
+            else:
+                energy_delivered = possible_energy_in_time_step_kwh
+                charging_session["energy_required_kwh"] -= possible_energy_in_time_step_kwh
+                actual_power_kw = allowed_power_kw
 
-                possible_energy_in_time_step_kwh = (
-                    allowed_power_kw * time_step_hours * charger_efficiency
-                )
-
-                energy_needed = charging_session["energy_required_kwh"]
-
-                if possible_energy_in_time_step_kwh >= energy_needed:
-                    energy_delivered = energy_needed
-                    charging_session["energy_required_kwh"] = 0.0
-                    actual_power_kw = (
-                        energy_delivered / (time_step_hours * charger_efficiency)
-                        if time_step_hours > 0
-                        else 0.0
-                    )
-                else:
-                    energy_delivered = possible_energy_in_time_step_kwh
-                    charging_session["energy_required_kwh"] -= possible_energy_in_time_step_kwh
-                    actual_power_kw = allowed_power_kw
-
-                charging_session["delivered_energy_kwh"] += energy_delivered
-                total_power_in_time_step_kw += actual_power_kw
+            charging_session["delivered_energy_kwh"] += energy_delivered
+            total_power_in_time_step_kw += actual_power_kw
 
         load_profile_kw[time_step_index] = total_power_in_time_step_kw
 
