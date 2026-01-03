@@ -670,6 +670,9 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
     number_of_chargers = scenario["site"]["number_chargers"]
     charger_efficiency = scenario["site"]["charger_efficiency"]
 
+    # DEBUG / Analyse: Anzahl gleichzeitig ladender Sessions pro Zeitschritt
+    charging_count_series = []
+
     all_charging_sessions: list[dict[str, Any]] = []
 
     if time_index:
@@ -762,4 +765,4 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
 
         load_profile_kw[time_step_index] = total_power_in_time_step_kw
 
-        return time_index, load_profile_kw, all_charging_sessions
+        return time_index, load_profile_kw, all_charging_sessions, charging_count_series
