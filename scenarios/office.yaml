@@ -1,7 +1,7 @@
 site_type: office      # Standort des Ladepunkts
 
 time_resolution_min: 10          # Zeitschritt, in der die Simulation berechnet wird
-simulation_horizon_days: 3       # gewünschter Analysehorizont in Tagen
+simulation_horizon_days: 8       # gewünschter Analysehorizont in Tagen
 
 start_datetime: "2026-01-01 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen soll
 holidays:
@@ -115,14 +115,7 @@ soc_at_arrival_distribution:
       mu: [0.6, 0.8]                    # eher höherer SoC bei Ankunft
       sigma: [0.07, 0.12]
 
-# Feiertage im Jahr 2025 → werden wie Sonntage behandelt
+# zusätzliche Feiertage / betriebsfreie Tage werden wie Sonntage behandelt ("2026-01-01")
 holidays:
   dates:
-    - "2025-01-01"
-    - "2025-04-18"
-    - "2025-04-21"
-    - "2025-05-01"
-    - "2025-05-29"
-    - "2025-10-03"
-    - "2025-12-25"
-    - "2025-12-26"
+    - 

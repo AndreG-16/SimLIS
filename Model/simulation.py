@@ -255,18 +255,29 @@ def parse_holiday_dates_from_scenario(
         horizon_days = int(scenario.get("simulation_horizon_days", 1))
         simulation_end_datetime = simulation_start_datetime + timedelta(days=horizon_days)
 
-        years = list(range(simulation_start_datetime.year, simulation_end_datetime.year + 1))
+        years = list(
+            range(simulation_start_datetime.year, simulation_end_datetime.year + 1)
+        )
 
-        hol = holidays_lib.country_holidays(country, subdiv=subdivision, years=years)
+        hol = holidays_lib.country_holidays(
+            country,
+            subdiv=subdivision,
+            years=years,
+        )
         holiday_dates |= set(hol.keys())
 
     # -----------------------------------------------------------------------
     # A) Manuelle Liste (Zusatz / Overrides / Sondertage)  #NEU
+    #     → nur auswerten, wenn tatsächlich eine Liste von Strings vorliegt
     # -----------------------------------------------------------------------
     dates_list = holidays_cfg.get("dates", None)
-    if dates_list:
+
+    if isinstance(dates_list, list):
         for date_string in dates_list:
-            holiday_dates.add(datetime.fromisoformat(date_string).date())
+            if isinstance(date_string, str):
+                holiday_dates.add(
+                    datetime.fromisoformat(date_string).date()
+                )
 
     return holiday_dates
 
