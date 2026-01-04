@@ -1,7 +1,7 @@
 site_type: logistics_center      # Standort des Ladepunkts
 
 time_resolution_min: 10         # Zeitschritt, in der die Simulation abgebildet wird
-simulation_horizon_days: 2     # gewünschter Analysehorizont in Tagen
+simulation_horizon_days: 8     # gewünschter Analysehorizont in Tagen
 
 start_datetime: "2025-05-22 00:00"      # Zeitpunkt, ab dem der Lastgang anfangen soll
 

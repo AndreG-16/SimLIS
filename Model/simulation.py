@@ -1,7 +1,8 @@
 import yaml
 import numpy as np
-import csv  #NEU
-from dataclasses import dataclass  #NEU
+import csv      # NEU
+import holidays   # NEU
+from dataclasses import dataclass
 from datetime import datetime, timedelta, date
 from typing import Any
 
@@ -207,31 +208,82 @@ def sample_from_range(value_definition: Any) -> float:
     return float(value_definition)
 
 
-def parse_holiday_dates_from_scenario(scenario: dict) -> set[date]:
+# ---------------------------------------------------------------------------
+# Feiertage: Automatische Erzeugung per Bundesland + manuelle Ergänzungen  #NEU
+# ---------------------------------------------------------------------------
+
+def parse_holiday_dates_from_scenario(
+    scenario: dict,
+    simulation_start_datetime: datetime,
+) -> set[date]:
     """
-    Liest Feiertage aus scenario['holidays']['dates'] und gibt sie als Set von date-Objekten zurück.
+    Erzeugt Feiertage als Set[date] aus der YAML.
+
+    Unterstützte Varianten (kombinierbar!):
+      A) Manuelle Liste:
+         holidays:
+           dates: ["2025-01-01", "2025-12-25", ...]
+
+      B) Automatisch nach Land + Bundesland:
+         holidays:
+           country: "DE"
+           subdivision: "BY"   # Bundesland (BW,BY,BE,BB,HB,HH,HE,MV,NI,NW,RP,SL,SN,ST,SH,TH)
+
+    WICHTIG:
+      - KEINE Jahresangabe nötig.
+      - Das/die Jahr(e) werden aus start_datetime + simulation_horizon_days abgeleitet.
+      - Falls A und B angegeben sind, werden beide genutzt (Union / Zusammenführung).
+        => Automatisch generierte Feiertage + manuell ergänzte Sondertage.
     """
-    holiday_dates_strings = scenario.get("holidays", {}).get("dates", [])
+    holidays_cfg = scenario.get("holidays", {}) or {}
     holiday_dates: set[date] = set()
 
-    for date_string in holiday_dates_strings:
-        holiday_date = datetime.fromisoformat(date_string).date()
-        holiday_dates.add(holiday_date)
+    # -----------------------------------------------------------------------
+    # B) Automatisch über "holidays" Paket (wenn country gesetzt ist)  #NEU
+    # -----------------------------------------------------------------------
+    country = holidays_cfg.get("country", None)
+    subdivision = holidays_cfg.get("subdivision", None)
+
+    if country:
+        try:
+            import holidays as holidays_lib  # pip install holidays
+        except ImportError as e:
+            raise ImportError(
+                "Für automatische Feiertage bitte das Paket 'holidays' installieren: pip install holidays"
+            ) from e
+
+        horizon_days = int(scenario.get("simulation_horizon_days", 1))
+        simulation_end_datetime = simulation_start_datetime + timedelta(days=horizon_days)
+
+        years = list(range(simulation_start_datetime.year, simulation_end_datetime.year + 1))
+
+        hol = holidays_lib.country_holidays(country, subdiv=subdivision, years=years)
+        holiday_dates |= set(hol.keys())
+
+    # -----------------------------------------------------------------------
+    # A) Manuelle Liste (Zusatz / Overrides / Sondertage)  #NEU
+    # -----------------------------------------------------------------------
+    dates_list = holidays_cfg.get("dates", None)
+    if dates_list:
+        for date_string in dates_list:
+            holiday_dates.add(datetime.fromisoformat(date_string).date())
 
     return holiday_dates
 
 
-def determine_day_type_with_holidays(current_datetime: datetime, scenario: dict) -> str:
+def determine_day_type_with_holidays(
+    current_datetime: datetime,
+    holiday_dates: set[date],
+) -> str:
     """
-    Ordnet ein Datum einem Tagtyp zu, unter Berücksichtigung der im Szenario
-    definierten Feiertage:
+    Ordnet ein Datum einem Tagtyp zu, unter Berücksichtigung einer vorab
+    berechneten Feiertagsliste:
 
       - 'sunday_holiday', wenn Datum in der Feiertagsliste oder Sonntag ist
       - 'saturday', wenn Samstag
       - 'working_day', sonst (Montag-Freitag ohne Feiertag)
     """
     current_date = current_datetime.date()
-    holiday_dates = parse_holiday_dates_from_scenario(scenario)
 
     if current_date in holiday_dates:
         return "sunday_holiday"
@@ -243,6 +295,7 @@ def determine_day_type_with_holidays(current_datetime: datetime, scenario: dict)
     if weekday_index == 5:
         return "saturday"
     return "working_day"
+
 
 
 # ---------------------------------------------------------------------------
@@ -464,11 +517,15 @@ def choose_vehicle_profile(
 # Ankunftszeiten
 # ---------------------------------------------------------------------------
 
-def sample_arrival_times_for_day(scenario: dict, day_start_datetime: datetime) -> list[datetime]:
+def sample_arrival_times_for_day(
+    scenario: dict,
+    day_start_datetime: datetime,
+    holiday_dates: set[date],  #NEU
+) -> list[datetime]:
     """
     Generiert alle Ankunftszeitpunkte für einen Tag als datetime-Objekte.
     """
-    day_type = determine_day_type_with_holidays(day_start_datetime, scenario)
+    day_type = determine_day_type_with_holidays(day_start_datetime, holiday_dates)  #NEU
 
     number_of_chargers = scenario["site"]["number_chargers"]
     expected_sessions_per_charger_range = scenario["site"]["expected_sessions_per_charger_per_day"]
@@ -586,12 +643,13 @@ def build_charging_sessions_for_day(
     scenario: dict,
     day_start_datetime: datetime,
     vehicle_profiles: list[VehicleProfile],  #NEU
+    holiday_dates: set[date],                #NEU
 ) -> list[dict[str, Any]]:
     """
     Erzeugt für einen Tag eine Liste von Ladesessions mit allen relevanten Parametern.
     Jetzt mit zufälliger Fahrzeugwahl und fahrzeugspezifischen Ladekurven.
     """
-    arrival_times_for_day = sample_arrival_times_for_day(scenario, day_start_datetime)
+    arrival_times_for_day = sample_arrival_times_for_day(scenario, day_start_datetime, holiday_dates)  #NEU
     number_of_sessions = len(arrival_times_for_day)
 
     if number_of_sessions == 0:
@@ -652,17 +710,59 @@ def build_charging_sessions_for_day(
     return charging_sessions_for_day
 
 
+# -----------------------------------------------------------------------
+# Hauptsimulation / Orchestrierung der Lastgangberechnung
+# -----------------------------------------------------------------------
+
 def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None):
     """
     Führt die Lastgang-Simulation durch.
     Jetzt mit fahrzeugspezifischen Batteriekapazitäten und SoC-abhängiger Ladeleistung.
-    """
-    # NEU: Fahrzeugflotte aus CSV laden
-    vehicle_csv_path = scenario["vehicles"]["vehicle_curve_csv"]  # NEU
-    vehicle_profiles = load_vehicle_profiles_from_csv(vehicle_csv_path)  # NEU
 
+    Ablauf (high-level):
+      1) Zeitindex erzeugen (start_datetime aus Argument oder YAML)
+      2) Feiertage 1x aus YAML-Konfiguration ableiten (DE + Bundesland), Jahr(e) aus Startdatum + Horizont
+      3) Fahrzeugflotte inkl. SoC-abhängiger Ladekurven aus CSV laden
+      4) Für jeden Tag: Sessions (Ankunft, Parkdauer, SoC, Fahrzeugprofil) erzeugen
+      5) Zeitschrittweise: gleichzeitig ladende Sessions auswählen und Leistung / Energie verteilen
+      6) Rückgabe: Zeitstempel, Lastgang, Sessions, Anzahl gleichzeitiger Ladevorgänge
+    """
+
+    # -------------------------------------------------------------------
+    # 1) Zeitindex erzeugen (Simulationszeitachse)
+    # -------------------------------------------------------------------
     time_index = create_time_index(scenario, start_datetime)
 
+    # -------------------------------------------------------------------
+    # 2) Feiertage 1x ableiten (Bundesland, Jahr(e) aus Start + Horizont)
+    # -------------------------------------------------------------------
+    if time_index:
+        simulation_start_datetime = time_index[0]
+    else:
+        # Fallback (sollte bei sinnvoller Config praktisch nicht passieren)
+        if start_datetime is not None:
+            simulation_start_datetime = start_datetime
+        elif "start_datetime" in scenario:
+            simulation_start_datetime = datetime.fromisoformat(scenario["start_datetime"])
+        else:
+            simulation_start_datetime = datetime.now().replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+
+    holiday_dates = parse_holiday_dates_from_scenario(
+        scenario=scenario,
+        simulation_start_datetime=simulation_start_datetime,
+    )
+
+    # -------------------------------------------------------------------
+    # 3) Fahrzeugflotte inkl. Ladekurven aus CSV laden
+    # -------------------------------------------------------------------
+    vehicle_csv_path = scenario["vehicles"]["vehicle_curve_csv"]
+    vehicle_profiles = load_vehicle_profiles_from_csv(vehicle_csv_path)
+
+    # -------------------------------------------------------------------
+    # Initialisierung: Simulationsparameter & Ergebniscontainer
+    # -------------------------------------------------------------------
     time_resolution_min = scenario["time_resolution_min"]
     time_step_hours = time_resolution_min / 60.0
 
@@ -674,12 +774,12 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
     number_of_chargers = scenario["site"]["number_chargers"]
     charger_efficiency = scenario["site"]["charger_efficiency"]
 
-    # DEBUG / Analyse: Anzahl gleichzeitig ladender Sessions pro Zeitschritt
     charging_count_series: list[int] = []
-
     all_charging_sessions: list[dict[str, Any]] = []
 
-    # 1) Sessions für gesamten Horizont erzeugen
+    # -------------------------------------------------------------------
+    # 4) Tagesweise Ladesessions für den gesamten Horizont erzeugen
+    # -------------------------------------------------------------------
     if time_index:
         first_day_start_datetime = time_index[0].replace(
             hour=0, minute=0, second=0, microsecond=0
@@ -689,11 +789,16 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
         for day_offset in range(simulation_horizon_days):
             day_start_datetime = first_day_start_datetime + timedelta(days=day_offset)
             charging_sessions_for_day = build_charging_sessions_for_day(
-                scenario, day_start_datetime, vehicle_profiles  # NEU
+                scenario,
+                day_start_datetime,
+                vehicle_profiles,
+                holiday_dates,
             )
             all_charging_sessions.extend(charging_sessions_for_day)
 
-    # 2) Zeitschrittweise Simulation (Lastprofil)
+    # -------------------------------------------------------------------
+    # 5) Zeitschrittweise Simulation: Leistungs- und Energiezuweisung
+    # -------------------------------------------------------------------
     for time_step_index, current_timestamp in enumerate(time_index):
 
         present_sessions = [
@@ -708,22 +813,16 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
             charging_count_series.append(0)
             continue
 
-        # VARIANTE A: maximal number_of_chargers Sessions laden gleichzeitig
+        # maximal number_of_chargers gleichzeitig
         present_sessions.sort(key=lambda s: (s["departure_time"], s["arrival_time"]))
         charging_sessions = present_sessions[:number_of_chargers]
         charging_count_series.append(len(charging_sessions))
 
-        number_of_charging_sessions = len(charging_sessions)
-        if number_of_charging_sessions == 0:
-            load_profile_kw[time_step_index] = 0.0
-            continue
-
         maximum_site_power_kw = min(
             grid_limit_p_avb_kw,
-            number_of_charging_sessions * rated_power_kw,
+            len(charging_sessions) * rated_power_kw,
         )
-
-        available_power_per_session_kw = maximum_site_power_kw / number_of_charging_sessions
+        available_power_per_session_kw = maximum_site_power_kw / len(charging_sessions)
 
         total_power_in_time_step_kw = 0.0
 
@@ -737,23 +836,16 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
                 charging_session["max_charging_power_kw"],
             )
 
-            possible_energy_in_time_step_kwh = (
-                allowed_power_kw * time_step_hours * charger_efficiency
-            )
-
+            possible_energy_kwh = allowed_power_kw * time_step_hours * charger_efficiency
             energy_needed = charging_session["energy_required_kwh"]
 
-            if possible_energy_in_time_step_kwh >= energy_needed:
+            if possible_energy_kwh >= energy_needed:
                 energy_delivered = energy_needed
                 charging_session["energy_required_kwh"] = 0.0
-                actual_power_kw = (
-                    energy_delivered / (time_step_hours * charger_efficiency)
-                    if time_step_hours > 0
-                    else 0.0
-                )
+                actual_power_kw = energy_delivered / (time_step_hours * charger_efficiency)
             else:
-                energy_delivered = possible_energy_in_time_step_kwh
-                charging_session["energy_required_kwh"] -= possible_energy_in_time_step_kwh
+                energy_delivered = possible_energy_kwh
+                charging_session["energy_required_kwh"] -= possible_energy_kwh
                 actual_power_kw = allowed_power_kw
 
             charging_session["delivered_energy_kwh"] += energy_delivered
@@ -761,4 +853,7 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
 
         load_profile_kw[time_step_index] = total_power_in_time_step_kw
 
+    # -------------------------------------------------------------------
+    # 6) Rückgabe der Simulationsergebnisse
+    # -------------------------------------------------------------------
     return time_index, load_profile_kw, all_charging_sessions, charging_count_series

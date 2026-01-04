@@ -3,7 +3,10 @@ site_type: office      # Standort des Ladepunkts
 time_resolution_min: 10          # Zeitschritt, in der die Simulation berechnet wird
 simulation_horizon_days: 3       # gewünschter Analysehorizont in Tagen
 
-start_datetime: "2025-05-22 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen soll
+start_datetime: "2026-01-01 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen soll
+holidays:
+  country: "DE"
+  subdivision: "BY"     # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
 
 site:
   number_chargers: 4                                     # Anzahl der Ladepunkte am Standort
