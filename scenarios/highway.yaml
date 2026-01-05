@@ -1,9 +1,15 @@
 site_type: highway      # Standort des Ladepunkts
 
 time_resolution_min: 10         # Zeitschritt, in der die Simulation berechnet wird
-simulation_horizon_days: 20     # gewünschter Analysehorizont in Tagen
+simulation_horizon_days: 10
++     # gewünschter Analysehorizont in Tagen
 
-start_datetime: "2025-05-22 00:00"      # Zeitpunkt, ab dem der Lastgang anfangen soll
+start_datetime: "2026-01-01 00:00"      # Zeitpunkt, ab dem der Lastgang anfangen soll
+holidays:
+  country: "DE"
+  subdivision: "BY"     # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
+  dates:                # zusätzliche bekannte betriebsfreie Tage manuell eingeben ("2026-01-01")
+    - 
 
 site:
   number_chargers: 10                                     # Anzahl der Ladepunkte am Standort
@@ -35,15 +41,16 @@ arrival_time_distribution:
 
   components_per_weekday:
     # Highway: zwei Peaks – mittags und am frühen Abend
+    # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
     working_day:
-      - name: midday_peak       # Ladungen zur Mittagspause 
+      - name: peak_1       # Ladungen zur Mittagspause 
         distribution: normal  
         mu: [11.0, 14.0]        # Peak in Stunden 12.0 = 12 Uhr
         sigma: [0.5, 2.5]       # Streuung in Stunden
         shift_minutes: 0        # Stunden → Minuten (mu * 60 + 0)
         weight: 0.5             # Gewichtung innerhalb working_day
 
-      - name: evening_peak   
+      - name: peak_2   
         distribution: normal  
         mu: [17.0, 19.0]      
         sigma: [0.5, 2.2]     
@@ -51,14 +58,14 @@ arrival_time_distribution:
         weight: 0.5          
 
     saturday:
-      - name: midday_peak   
+      - name: peak_3   
         distribution: normal  
         mu: [11.0, 15.0]   
         sigma: [1.0, 2.5]
         shift_minutes: 0 
         weight: 0.6      
 
-      - name: evening_peak
+      - name: peak_4
         distribution: normal 
         mu: [17.0, 19.0]    
         sigma: [0.0, 2.5]    
@@ -66,14 +73,14 @@ arrival_time_distribution:
         weight: 0.4          
 
     sunday_holiday:
-      - name: midday_peak  
+      - name: peak_5  
         distribution: normal 
         mu: [11.0, 16.0]    
         sigma: [0.5, 2.5]   
         shift_minutes: 0     
         weight: 0.7         
 
-      - name: evening_peak   
+      - name: peak_6   
         distribution: normal  
         mu: [17.0, 19.0]      
         sigma: [0.5, 2.5]   
@@ -89,6 +96,7 @@ parking_duration_distribution:
   min_duration_minutes: 10      # Untergrenze minimale Ladedauer
 
   components:
+  # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
     - name: short_stay          # typischer HPC-Stop (20–40 Minuten)
       distribution: normal
       weight: 0.85              # Anteil Kurzparker
@@ -109,6 +117,7 @@ soc_at_arrival_distribution:
   max_soc: 0.80                          # maximales SoC bei Ankunft
 
   components:
+  # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
     - name: low_battery_charging        # Laden aufgrund leerer Batterie / gezielte Anfahrt
       distribution: beta
       weight: 0.70
@@ -120,15 +129,3 @@ soc_at_arrival_distribution:
       weight: 0.30
       mu: [0.45, 0.60]
       sigma: [0.08, 0.12]
-
-# Feiertage im Jahr 2025 → werden wie Sonntage behandelt
-holidays:
-  dates:
-    - "2025-01-01"
-    - "2025-04-18"
-    - "2025-04-21"
-    - "2025-05-01"
-    - "2025-05-29"
-    - "2025-10-03"
-    - "2025-12-25"
-    - "2025-12-26"

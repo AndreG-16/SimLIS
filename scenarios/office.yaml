@@ -7,6 +7,8 @@ start_datetime: "2026-01-01 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen 
 holidays:
   country: "DE"
   subdivision: "BY"     # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
+  dates:                # zusätzliche bekannte betriebsfreie Tage manuell eingeben ("2026-01-01")
+    - 
 
 site:
   number_chargers: 4                                     # Anzahl der Ladepunkte am Standort
@@ -37,16 +39,16 @@ arrival_time_distribution:
     sunday_holiday: [0.00, 0.02]      # kein bzw. vernachlässigbarer Betrieb an Sonn- und Feiertagen
 
   components_per_weekday:
-    # Office: Hauptpeak morgens, kleinerer Peak um die Mittagszeit
+    # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
     working_day:
-      - name: morning_peak      # typische Ankunftszeit der Mitarbeiter
+      - name: peak_1      # typische Ankunftszeit der Mitarbeiter am Morgen
         distribution: normal
         mu: [7.5, 9.0]          # Peak in Stunden seit Mitternacht (z.B. 7.5 = 7:30 Uhr)
         sigma: [0.5, 1.0]       # Streuung in Stunden
         shift_minutes: 0        # Stunden → Minuten (mu * 60 + shift_minutes)
         weight: 0.7             # Gewichtung innerhalb working_day
 
-      - name: midday_peak       # Ankünfte von Teilzeitkräften, später kommenden Mitarbeitern oder externen Besuchern
+      - name: peak_2       # typische Ankunftszeit von Teilzeitkräften, später kommenden Mitarbeitern oder externen Besuchern
         distribution: normal
         mu: [11.5, 13.0]
         sigma: [0.5, 1.0]
@@ -54,15 +56,15 @@ arrival_time_distribution:
         weight: 0.3
 
     saturday:
-      - name: saturday_peak
+      - name: peak_3        # irreguläre Ankunftszeiten an einem Samstag durch Support- oder Sonderbetrieb
         distribution: normal
-        mu: [10.0, 12.0]        # Ankünfte bei Support- oder Sonderbetrieb am Samstag
+        mu: [10.0, 12.0]
         sigma: [1.0, 2.0]
         shift_minutes: 0
         weight: 1.0
 
     sunday_holiday:
-      - name: sunday_peak       # Ankünfte bei seltenem Supportbetrieb am Sonntag/Feiertag
+      - name: peak_4       # Ankünfte bei seltenem Supportbetrieb am Sonntag/Feiertag
         distribution: normal
         mu: [11.0, 14.0]
         sigma: [1.0, 2.5]
@@ -77,22 +79,23 @@ parking_duration_distribution:
   min_duration_minutes: 30       # Untergrenze minimale Ladedauer
 
   components:
+  # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
     - name: long_stay            # Vollzeitmitarbeiter
       distribution: normal
       weight: 0.7
-      mu: [360, 540]             # typische Parkdauer 6–9 Stunden
-      sigma: [60, 90]            # Streuung 1–1,5 Stunden
+      mu: [360, 540]             # typische Parkdauer in Minuten
+      sigma: [60, 90]            # Streuung in Minuten
 
     - name: medium_stay          # Teilzeitmitarbeiter / längere Meetings 
       distribution: normal
       weight: 0.2
-      mu: [120, 240]             # typische Parkdauer 2–4 Stunden
+      mu: [120, 240]             
       sigma: [30, 60]
 
     - name: short_stay           # Besucher / kurze Termine
       distribution: normal
       weight: 0.1
-      mu: [30, 90]               # typische Parkdauer 0,5–1,5 Stunden
+      mu: [30, 90]               
       sigma: [10, 20]
 
 # Batteriezustand bei Ankunft; Verteilung ist eine Mischung aus gezieltem Laden und opportunistischem Laden
@@ -103,6 +106,7 @@ soc_at_arrival_distribution:
   max_soc: 0.80              # maximales SoC bei Ankunft
 
   components:
+  # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
     - name: low_battery_charging        # Pendler mit eher mittlerem SoC, die gezielt nachladen
       distribution: beta
       weight: 0.4
@@ -113,9 +117,4 @@ soc_at_arrival_distribution:
       distribution: normal
       weight: 0.6
       mu: [0.6, 0.8]                    # eher höherer SoC bei Ankunft
-      sigma: [0.07, 0.12]
-
-# zusätzliche Feiertage / betriebsfreie Tage werden wie Sonntage behandelt ("2026-01-01")
-holidays:
-  dates:
-    - 
+      sigma: [0.07, 0.12] 

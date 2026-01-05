@@ -1,9 +1,14 @@
 site_type: retail      # Standort des Ladepunkts
 
 time_resolution_min: 10          # Zeitschritt, in der die Simulation abgebildet wird
-simulation_horizon_days: 2       # gewünschter Analysehorizont in Tagen
+simulation_horizon_days: 10       # gewünschter Analysehorizont in Tagen
 
-start_datetime: "2025-05-23 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen soll
+start_datetime: "2026-01-01 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen soll
+holidays:
+  country: "DE"
+  subdivision: "BY"     # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
+  dates:                # zusätzliche bekannte betriebsfreie Tage manuell eingeben ("2026-01-01")
+    - 
 
 site:
   number_chargers: 12                      # Anzahl der Ladepunkte am Standort
@@ -35,15 +40,16 @@ arrival_time_distribution:
 
   components_per_weekday:
     # Retail: Hauptpeaks mittags und am späten Nachmittag/Abend
+    # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
     working_day:
-      - name: midday_shopping_peak      # Einkäufe zur Mittagszeit
+      - name: peak_1                    # Einkäufe zur Mittagszeit
         distribution: normal
         mu: [11.0, 13.5]                # Peak in Stunden seit Mitternacht
         sigma: [0.5, 1.0]               # Streuung in Stunden
-        shift_minutes: 0                # Stunden → Minuten (mu * 60 + shift_minutes)
+        shift_minutes: 0                
         weight: 0.4                     # Gewichtung innerhalb working_day
 
-      - name: after_work_peak           # Einkäufe nach der Arbeit
+      - name: peak_2                    # Einkäufe nach der Arbeit
         distribution: normal
         mu: [16.0, 19.0]
         sigma: [0.5, 1.2]
@@ -52,28 +58,28 @@ arrival_time_distribution:
 
     # Retail: Samstag mit ausgedehntem Einkauf über den Tag verteilt
     saturday:
-      - name: saturday_late_morning
+      - name: peak_3                    # Einkäufe am späten Vormittag
         distribution: normal
-        mu: [10.0, 12.0]                # Einkäufe am späten Vormittag
+        mu: [10.0, 12.0]                
         sigma: [0.8, 1.3]
         shift_minutes: 0
         weight: 0.5
 
-      - name: saturday_afternoon
+      - name: peak_4                    # Einkäufe am Nachmittag
         distribution: normal
-        mu: [13.0, 16.0]                # Einkäufe am Nachmittag
+        mu: [13.0, 16.0]                
         sigma: [0.8, 1.5]
         shift_minutes: 0
         weight: 0.5
 
     # Retail: Sonntag/Feiertag in DE typischerweise geschlossen
     sunday_holiday:
-      - name: sunday_special_events     # seltene verkaufsoffene Sonntage / Sonderöffnungen
+      - name: peak_5                   # seltene verkaufsoffene Sonntage / Sonderöffnungen
         distribution: normal
         mu: [11.0, 15.0]
         sigma: [1.0, 2.0]
         shift_minutes: 0
-        weight: 1.0                     # Gewicht ist relativ; absolute Menge kommt aus weekday_weight.sunday_holiday
+        weight: 1.0                     
 
 # Parkdauer in Minuten ab Ankunft; Verteilung ist eine Mischung aus Kurz- und Langzeitparkern
 # Retail: viele Kurz- und Mittelaufenthalte, wenige sehr lange Aufenthalte
@@ -84,13 +90,14 @@ parking_duration_distribution:
   min_duration_minutes: 20       # Untergrenze minimale Ladedauer
 
   components:
-    - name: quick_stop           # kurzer Einkauf / Abholung / Drogerie
+  # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
+    - name: short_stay           # kurzer Einkauf / Abholung / Drogerie
       distribution: normal
       weight: 0.3
       mu: [20, 40]               # typische Parkdauer 20–40 Minuten
       sigma: [5, 10]
 
-    - name: regular_shopping     # typischer Einkaufsaufenthalt
+    - name: regular_stay     # typischer Einkaufsaufenthalt
       distribution: normal
       weight: 0.5
       mu: [60, 120]              # typische Parkdauer 1–2 Stunden
@@ -110,32 +117,16 @@ soc_at_arrival_distribution:
   max_soc: 0.8               # maximales SoC bei Ankunft
 
   components:
-    - name: opportunistic_high_soc      # opportunistisches Laden mit eher hohem SoC
-      distribution: normal
-      weight: 0.6
-      mu: [0.6, 0.8]                    # typischer SoC bei Ankunft
-      sigma: [0.08, 0.12]
-
-    - name: medium_soc_commuters        # Kunden, die Einkaufen mit Alltagswegen kombinieren
-      distribution: normal
-      weight: 0.25
-      mu: [0.4, 0.6]
-      sigma: [0.08, 0.12]
-
-    - name: low_battery_customers       # gezieltes Laden aufgrund niedrigen SoC
+  # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
+    - name: low_battery_charging       # gezieltes Laden aufgrund niedrigen SoC
       distribution: beta
       weight: 0.15
       alpha: [2.0, 3.0]                 # formt Peak im niedrigen SoC-Bereich (ca. 0.1–0.3)
       beta: [5.0, 7.0]
 
-# Feiertage im Jahr 2025 → werden wie Sonntage behandelt
-holidays:
-  dates:
-    - "2025-01-01"
-    - "2025-04-18"
-    - "2025-04-21"
-    - "2025-05-01"
-    - "2025-05-29"
-    - "2025-10-03"
-    - "2025-12-25"
-    - "2025-12-26"
+    - name: opportunistic_charging      # opportunistisches Laden mit eher hohem SoC
+      distribution: normal
+      weight: 0.6
+      mu: [0.6, 0.8]                    # typischer SoC bei Ankunft
+      sigma: [0.08, 0.12]
+
