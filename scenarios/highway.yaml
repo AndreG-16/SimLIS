@@ -1,6 +1,6 @@
 site_type: highway      # Standort des Ladepunkts
 
-time_resolution_min: 10         # Zeitschritt, in der die Simulation berechnet wird
+time_resolution_min: 15         # Zeitschritt, in der die Simulation berechnet wird
 simulation_horizon_days: 10
 +     # gewünschter Analysehorizont in Tagen
 

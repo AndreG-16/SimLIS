@@ -1,11 +1,36 @@
 import yaml
 import numpy as np
-import csv      # NEU
-import holidays   # NEU
+from pathlib import Path
+import csv  # NEU: CSV-Parsing (Fahrzeugkurven + Markt/Erzeugungssignal)
+import holidays  # NEU: Feiertagslogik (optional)
 from dataclasses import dataclass
 from datetime import datetime, timedelta, date
 from typing import Any
 
+
+# =============================================================================
+# 0) Projekt-/Pfad-Utilities (NEU)
+# =============================================================================
+
+def resolve_path_relative_to_scenario(scenario: dict[str, Any], p: str) -> str:
+    """
+    Löst Dateipfade robust auf:
+      - Absolute Pfade bleiben unverändert
+      - Relative Pfade werden relativ zum YAML-Ordner (scenario["_scenario_dir"]) interpretiert
+
+    Ziel: Portables Projekt für verschiedene Nutzer/Computer.
+    """
+    pp = Path(p).expanduser()
+    if pp.is_absolute():
+        return str(pp)
+
+    base = Path(scenario.get("_scenario_dir", "."))
+    return str((base / pp).resolve())
+
+
+# =============================================================================
+# 1) Fahrzeuge & fahrzeugspezifische Ladekurven
+# =============================================================================
 
 # ---------------------------------------------------------------------------
 # Fahrzeugprofil-Dataclass  #NEU
@@ -15,9 +40,9 @@ from typing import Any
 class VehicleProfile:
     name: str
     battery_capacity_kwh: float
-    vehicle_class: str               #NEU: z.B. "PKW", "Transporter"
-    soc_grid: np.ndarray        # SoC-Stützstellen (0..1)
-    power_grid_kw: np.ndarray   # Ladeleistung in kW zu den SoC-Stützstellen
+    vehicle_class: str            # NEU: z.B. "PKW", "Transporter"
+    soc_grid: np.ndarray          # SoC-Stützstellen (0..1)
+    power_grid_kw: np.ndarray     # Ladeleistung in kW zu den SoC-Stützstellen
 
 
 # ---------------------------------------------------------------------------
@@ -32,7 +57,7 @@ def load_vehicle_profiles_from_csv(path: str) -> list[VehicleProfile]:
     Erwartete Struktur (Spaltentrenner ';'):
       Zeile 1: Hersteller (wird ignoriert)
       Zeile 2: Modellnamen
-      Zeile 3: Fahrzeugklasse  #NEU
+      Zeile 3: Fahrzeugklasse
       Zeile 4: max. Kapazität (kWh)
       Zeile 5: "SoC [%]" (Header)
       ab Zeile 6: SoC-Werte in % + Ladeleistungen je Fahrzeug
@@ -51,7 +76,7 @@ def load_vehicle_profiles_from_csv(path: str) -> list[VehicleProfile]:
             return []
         model_names = [m.strip() for m in model_row[1:]]
 
-        # 3. Zeile: Fahrzeugklasse  #NEU
+        # 3. Zeile: Fahrzeugklasse
         class_row = next(reader, None)
         if not class_row or len(class_row) < 2:
             return []
@@ -79,11 +104,11 @@ def load_vehicle_profiles_from_csv(path: str) -> list[VehicleProfile]:
             except ValueError:
                 capacities_kwh.append(np.nan)
 
-        # Konsistenz: Anzahl Spalten vereinheitlichen  #NEU
-        num_vehicles = min(len(model_names), len(vehicle_classes), len(capacities_kwh))  #NEU
-        model_names = model_names[:num_vehicles]  #NEU
-        vehicle_classes = vehicle_classes[:num_vehicles]  #NEU
-        capacities_kwh = capacities_kwh[:num_vehicles]  #NEU
+        # Konsistenz: Anzahl Spalten vereinheitlichen
+        num_vehicles = min(len(model_names), len(vehicle_classes), len(capacities_kwh))
+        model_names = model_names[:num_vehicles]
+        vehicle_classes = vehicle_classes[:num_vehicles]
+        capacities_kwh = capacities_kwh[:num_vehicles]
 
         soc_lists: list[list[float]] = [[] for _ in range(num_vehicles)]
         power_lists: list[list[float]] = [[] for _ in range(num_vehicles)]
@@ -102,7 +127,6 @@ def load_vehicle_profiles_from_csv(path: str) -> list[VehicleProfile]:
             except ValueError:
                 continue
 
-            # SoC in 0..1 umrechnen
             soc_val = soc_val_percent / 100.0
 
             # Spalten 1..n: Ladeleistungen je Fahrzeug
@@ -123,10 +147,9 @@ def load_vehicle_profiles_from_csv(path: str) -> list[VehicleProfile]:
         # VehicleProfile-Objekte bauen
         for i in range(num_vehicles):
             name = model_names[i]
-            vclass = vehicle_classes[i]  #NEU
+            vclass = vehicle_classes[i]
             cap = capacities_kwh[i]
 
-            # Nur Fahrzeuge mit gültiger Kapazität und vorhandener Kurve
             if np.isnan(cap) or len(soc_lists[i]) == 0:
                 continue
 
@@ -142,7 +165,7 @@ def load_vehicle_profiles_from_csv(path: str) -> list[VehicleProfile]:
                 VehicleProfile(
                     name=name,
                     battery_capacity_kwh=float(cap),
-                    vehicle_class=vclass,      #NEU
+                    vehicle_class=vclass,
                     soc_grid=soc_grid,
                     power_grid_kw=power_grid,
                 )
@@ -152,7 +175,7 @@ def load_vehicle_profiles_from_csv(path: str) -> list[VehicleProfile]:
 
 
 # ---------------------------------------------------------------------------
-# fahrzeugspezifische Ladeleistung für aktuellen SoC  #NEU
+# fahrzeugspezifische Ladeleistung für aktuellen SoC
 # ---------------------------------------------------------------------------
 
 def vehicle_power_at_soc(session: dict[str, Any]) -> float:
@@ -167,7 +190,6 @@ def vehicle_power_at_soc(session: dict[str, Any]) -> float:
     delivered_energy = session.get("delivered_energy_kwh", 0.0)
     capacity = session["battery_capacity_kwh"]
 
-    # aktueller SoC = SoC bei Ankunft + geladene Energie / Kapazität
     current_soc = soc_arrival + delivered_energy / capacity
     current_soc = min(current_soc, session["soc_target"])
 
@@ -175,22 +197,25 @@ def vehicle_power_at_soc(session: dict[str, Any]) -> float:
     return max(power_kw, 0.0)
 
 
-# ---------------------------------------------------------------------------
-# Szenario laden  (bestehend)
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 2) Szenario laden (YAML) + Pfadkontext (NEU)
+# =============================================================================
 
 def load_scenario(path: str) -> dict[str, Any]:
     """
     Liest eine YAML-Szenariodatei ein und gibt sie als Dictionary zurück.
+    Merkt sich zusätzlich den YAML-Ordner für portable relative Pfade.
     """
     with open(path, "r", encoding="utf-8") as file:
         scenario = yaml.safe_load(file)
+
+    scenario["_scenario_dir"] = str(Path(path).resolve().parent)  # NEU
     return scenario
 
 
-# ---------------------------------------------------------------------------
-# Hilfsfunktionen: Range-Verarbeitung und Tagtyp  (bestehend)
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 3) Hilfsfunktionen: Ranges, Feiertage, Zeitindex
+# =============================================================================
 
 def sample_from_range(value_definition: Any) -> float:
     """
@@ -209,7 +234,7 @@ def sample_from_range(value_definition: Any) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Feiertage: Automatische Erzeugung per Bundesland + manuelle Ergänzungen  #NEU
+# Feiertage: Automatische Erzeugung per Bundesland + manuelle Ergänzungen
 # ---------------------------------------------------------------------------
 
 def parse_holiday_dates_from_scenario(
@@ -219,34 +244,25 @@ def parse_holiday_dates_from_scenario(
     """
     Erzeugt Feiertage als Set[date] aus der YAML.
 
-    Unterstützte Varianten (kombinierbar!):
+    Unterstützte Varianten (kombinierbar):
       A) Manuelle Liste:
          holidays:
            dates: ["2025-01-01", "2025-12-25", ...]
-
       B) Automatisch nach Land + Bundesland:
          holidays:
            country: "DE"
-           subdivision: "BY"   # Bundesland (BW,BY,BE,BB,HB,HH,HE,MV,NI,NW,RP,SL,SN,ST,SH,TH)
-
-    WICHTIG:
-      - KEINE Jahresangabe nötig.
-      - Das/die Jahr(e) werden aus start_datetime + simulation_horizon_days abgeleitet.
-      - Falls A und B angegeben sind, werden beide genutzt (Union / Zusammenführung).
-        => Automatisch generierte Feiertage + manuell ergänzte Sondertage.
+           subdivision: "BY"
     """
     holidays_cfg = scenario.get("holidays", {}) or {}
     holiday_dates: set[date] = set()
 
-    # -----------------------------------------------------------------------
-    # B) Automatisch über "holidays" Paket (wenn country gesetzt ist)  #NEU
-    # -----------------------------------------------------------------------
+    # B) Automatisch (wenn country gesetzt ist)
     country = holidays_cfg.get("country", None)
     subdivision = holidays_cfg.get("subdivision", None)
 
     if country:
         try:
-            import holidays as holidays_lib  # pip install holidays
+            import holidays as holidays_lib
         except ImportError as e:
             raise ImportError(
                 "Für automatische Feiertage bitte das Paket 'holidays' installieren: pip install holidays"
@@ -255,29 +271,17 @@ def parse_holiday_dates_from_scenario(
         horizon_days = int(scenario.get("simulation_horizon_days", 1))
         simulation_end_datetime = simulation_start_datetime + timedelta(days=horizon_days)
 
-        years = list(
-            range(simulation_start_datetime.year, simulation_end_datetime.year + 1)
-        )
+        years = list(range(simulation_start_datetime.year, simulation_end_datetime.year + 1))
 
-        hol = holidays_lib.country_holidays(
-            country,
-            subdiv=subdivision,
-            years=years,
-        )
+        hol = holidays_lib.country_holidays(country, subdiv=subdivision, years=years)
         holiday_dates |= set(hol.keys())
 
-    # -----------------------------------------------------------------------
-    # A) Manuelle Liste (Zusatz / Overrides / Sondertage)  #NEU
-    #     → nur auswerten, wenn tatsächlich eine Liste von Strings vorliegt
-    # -----------------------------------------------------------------------
+    # A) Manuelle Liste
     dates_list = holidays_cfg.get("dates", None)
-
     if isinstance(dates_list, list):
         for date_string in dates_list:
-            if isinstance(date_string, str):
-                holiday_dates.add(
-                    datetime.fromisoformat(date_string).date()
-                )
+            if isinstance(date_string, str) and date_string.strip():
+                holiday_dates.add(datetime.fromisoformat(date_string).date())
 
     return holiday_dates
 
@@ -287,31 +291,23 @@ def determine_day_type_with_holidays(
     holiday_dates: set[date],
 ) -> str:
     """
-    Ordnet ein Datum einem Tagtyp zu, unter Berücksichtigung einer vorab
-    berechneten Feiertagsliste:
-
-      - 'sunday_holiday', wenn Datum in der Feiertagsliste oder Sonntag ist
-      - 'saturday', wenn Samstag
-      - 'working_day', sonst (Montag-Freitag ohne Feiertag)
+    Tagtyp inkl. Feiertage:
+      - 'sunday_holiday' (Feiertag oder Sonntag)
+      - 'saturday'
+      - 'working_day'
     """
     current_date = current_datetime.date()
 
     if current_date in holiday_dates:
         return "sunday_holiday"
 
-    weekday_index = current_datetime.weekday()  # Montag = 0, Sonntag = 6
-
+    weekday_index = current_datetime.weekday()  # Mo=0 ... So=6
     if weekday_index == 6:
         return "sunday_holiday"
     if weekday_index == 5:
         return "saturday"
     return "working_day"
 
-
-
-# ---------------------------------------------------------------------------
-# Zeitindex  (bestehend)
-# ---------------------------------------------------------------------------
 
 def create_time_index(scenario: dict, start_datetime: datetime | None = None) -> list[datetime]:
     """
@@ -341,9 +337,9 @@ def create_time_index(scenario: dict, start_datetime: datetime | None = None) ->
     return time_index
 
 
-# ---------------------------------------------------------------------------
-# Allgemeine Mischungsverteilung (lognormal, normal, beta, uniform)  #NEU
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 4) Zufallsverteilungen / Mischungen (bestehend)
+# =============================================================================
 
 def sample_mixture(
     number_of_samples: int,
@@ -354,25 +350,14 @@ def sample_mixture(
     """
     Erzeugt Stichproben aus einer Mischung von Verteilungen.
     Unterstützte Verteilungen pro Komponente:
-      - distribution: "lognormal" (default, falls nicht angegeben)
-          Parameter: mu, sigma
-      - distribution: "normal"
-          Parameter: mu, sigma
-      - distribution: "beta"
-          Parameter: alpha, beta
-      - distribution: "uniform"
-          Parameter: low, high
-
+      - lognormal, normal, beta, uniform
     Optional:
       - shift_minutes: wird nach dem Sampling addiert (z.B. Arrival Times).
     """
     if number_of_samples <= 0:
         return np.array([])
 
-    component_weights = np.array(
-        [component["weight"] for component in mixture_components],
-        dtype=float,
-    )
+    component_weights = np.array([component["weight"] for component in mixture_components], dtype=float)
     component_weights = component_weights / component_weights.sum()
 
     chosen_component_indices = np.random.choice(
@@ -438,10 +423,6 @@ def sample_lognormal_mixture(
     )
 
 
-# ---------------------------------------------------------------------------
-# Hilfsfunktion: Komponenten aus YAML "realisieren" (Ranges → konkrete Werte)  #NEU
-# ---------------------------------------------------------------------------
-
 def realize_mixture_components(
     component_templates: list[dict[str, Any]],
     allow_shift: bool = False,
@@ -479,9 +460,9 @@ def realize_mixture_components(
     return realized_mixture_components
 
 
-# ---------------------------------------------------------------------------
-# Fahrzeugwahl nach Standortgewichtung (PKW/Transporter/...)  #NEU
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 5) Fahrzeugwahl nach Standortgewichtung
+# =============================================================================
 
 def choose_vehicle_profile(
     vehicle_profiles: list[VehicleProfile],
@@ -489,34 +470,20 @@ def choose_vehicle_profile(
 ) -> VehicleProfile:
     """
     Wählt ein Fahrzeugprofil aus der geladenen Flotte aus.
-    Optional kann pro Standort in der YAML ein fleet_mix gesetzt werden, z.B.:
+    Optional kann pro Standort in der YAML ein fleet_mix gesetzt werden.
 
-      vehicles:
-        fleet_mix:
-          PKW: 0.3
-          Transporter: 0.7
-
-    Falls fleet_mix fehlt oder ungültig ist, wird gleichverteilt gewählt.  #NEU
+    Falls fleet_mix fehlt oder ungültig ist, wird gleichverteilt gewählt.
     """
-    fleet_mix = scenario.get("vehicles", {}).get("fleet_mix", None)  #NEU
+    fleet_mix = scenario.get("vehicles", {}).get("fleet_mix", None)
 
-    # Fallback: gleichverteilte Auswahl  #NEU
     if not fleet_mix:
         return np.random.choice(vehicle_profiles)
 
-    # nur Fahrzeuge berücksichtigen, deren Klasse im fleet_mix vorkommt  #NEU
-    selectable_profiles = [
-        vp for vp in vehicle_profiles if vp.vehicle_class in fleet_mix
-    ]
+    selectable_profiles = [vp for vp in vehicle_profiles if vp.vehicle_class in fleet_mix]
     if not selectable_profiles:
         return np.random.choice(vehicle_profiles)
 
-    weights = np.array(
-        [float(fleet_mix[vp.vehicle_class]) for vp in selectable_profiles],
-        dtype=float,
-    )
-
-    # Fallback bei nicht-positiven Summen  #NEU
+    weights = np.array([float(fleet_mix[vp.vehicle_class]) for vp in selectable_profiles], dtype=float)
     if weights.sum() <= 0.0:
         return np.random.choice(selectable_profiles)
 
@@ -524,19 +491,19 @@ def choose_vehicle_profile(
     return np.random.choice(selectable_profiles, p=probs)
 
 
-# ---------------------------------------------------------------------------
-# Ankunftszeiten
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 6) Session-Generierung (Ankunft, Parkdauer, SoC, Tages-Sessions)
+# =============================================================================
 
 def sample_arrival_times_for_day(
     scenario: dict,
     day_start_datetime: datetime,
-    holiday_dates: set[date],  #NEU
+    holiday_dates: set[date],
 ) -> list[datetime]:
     """
     Generiert alle Ankunftszeitpunkte für einen Tag als datetime-Objekte.
     """
-    day_type = determine_day_type_with_holidays(day_start_datetime, holiday_dates)  #NEU
+    day_type = determine_day_type_with_holidays(day_start_datetime, holiday_dates)
 
     number_of_chargers = scenario["site"]["number_chargers"]
     expected_sessions_per_charger_range = scenario["site"]["expected_sessions_per_charger_per_day"]
@@ -545,20 +512,12 @@ def sample_arrival_times_for_day(
     weekday_weight_range = scenario["arrival_time_distribution"]["weekday_weight"][day_type]
     weekday_weight = sample_from_range(weekday_weight_range)
 
-    number_of_sessions_today = int(
-        number_of_chargers * expected_sessions_per_charger * weekday_weight
-    )
-
+    number_of_sessions_today = int(number_of_chargers * expected_sessions_per_charger * weekday_weight)
     if number_of_sessions_today <= 0:
         return []
 
     component_templates_for_day_type = scenario["arrival_time_distribution"]["components_per_weekday"][day_type]
-
-    realized_mixture_components = realize_mixture_components(
-        component_templates_for_day_type,
-        allow_shift=True,
-    )
-
+    realized_mixture_components = realize_mixture_components(component_templates_for_day_type, allow_shift=True)
     if not realized_mixture_components:
         return []
 
@@ -569,7 +528,6 @@ def sample_arrival_times_for_day(
         unit_description="minutes",
     )
 
-    # >>> NEU: auf [0, 24h) begrenzen, damit keine Overflows entstehen
     sampled_minutes_after_midnight = np.maximum(sampled_minutes_after_midnight, 0.0)
     sampled_minutes_after_midnight = np.minimum(sampled_minutes_after_midnight, 24.0 * 60.0 - 1.0)
 
@@ -582,10 +540,6 @@ def sample_arrival_times_for_day(
     return arrival_times_for_day
 
 
-# ---------------------------------------------------------------------------
-# Parkdauer
-# ---------------------------------------------------------------------------
-
 def sample_parking_durations(scenario: dict, number_of_sessions: int) -> np.ndarray:
     """
     Generiert Parkdauern in Minuten für die übergebene Anzahl an Sessions.
@@ -595,10 +549,7 @@ def sample_parking_durations(scenario: dict, number_of_sessions: int) -> np.ndar
     minimum_parking_duration_minutes = parking_duration_distribution.get("min_duration_minutes", 10.0)
 
     component_templates = parking_duration_distribution["components"]
-    realized_mixture_components = realize_mixture_components(
-        component_templates,
-        allow_shift=False,
-    )
+    realized_mixture_components = realize_mixture_components(component_templates, allow_shift=False)
 
     parking_durations_minutes = sample_mixture(
         number_of_samples=number_of_sessions,
@@ -606,7 +557,7 @@ def sample_parking_durations(scenario: dict, number_of_sessions: int) -> np.ndar
         max_value=maximum_parking_duration_minutes,
         unit_description="minutes",
     )
-    # korrigiert alle gesampelten Werte auf den Bereich zwischen Minimum und Maximum
+
     parking_durations_minutes = np.clip(
         parking_durations_minutes,
         minimum_parking_duration_minutes,
@@ -616,10 +567,6 @@ def sample_parking_durations(scenario: dict, number_of_sessions: int) -> np.ndar
     return parking_durations_minutes
 
 
-# ---------------------------------------------------------------------------
-# SoC bei Ankunft
-# ---------------------------------------------------------------------------
-
 def sample_soc_upon_arrival(scenario: dict, number_of_sessions: int) -> np.ndarray:
     """
     Generiert SoC-Werte (0..1) bei Ankunft für mehrere Ladesessions.
@@ -628,10 +575,7 @@ def sample_soc_upon_arrival(scenario: dict, number_of_sessions: int) -> np.ndarr
     maximum_soc_value = soc_at_arrival_distribution["max_soc"]
 
     component_templates = soc_at_arrival_distribution["components"]
-    realized_mixture_components = realize_mixture_components(
-        component_templates,
-        allow_shift=False,
-    )
+    realized_mixture_components = realize_mixture_components(component_templates, allow_shift=False)
 
     soc_values = sample_mixture(
         number_of_samples=number_of_sessions,
@@ -640,49 +584,36 @@ def sample_soc_upon_arrival(scenario: dict, number_of_sessions: int) -> np.ndarr
         unit_description="soc_fraction",
     )
 
-    # NEU: negative SoC-Werte vermeiden (bei Normalverteilungen möglich)
-    soc_values = np.maximum(soc_values, 0.0)  #NEU
-
+    soc_values = np.maximum(soc_values, 0.0)
     return soc_values
 
-
-# ---------------------------------------------------------------------------
-# Ladesessions eines Tages
-# ---------------------------------------------------------------------------
 
 def build_charging_sessions_for_day(
     scenario: dict,
     day_start_datetime: datetime,
-    vehicle_profiles: list[VehicleProfile],  #NEU
-    holiday_dates: set[date],                #NEU
+    vehicle_profiles: list[VehicleProfile],
+    holiday_dates: set[date],
 ) -> list[dict[str, Any]]:
     """
     Erzeugt für einen Tag eine Liste von Ladesessions mit allen relevanten Parametern.
     Jetzt mit zufälliger Fahrzeugwahl und fahrzeugspezifischen Ladekurven.
     """
-    arrival_times_for_day = sample_arrival_times_for_day(scenario, day_start_datetime, holiday_dates)  #NEU
+    arrival_times_for_day = sample_arrival_times_for_day(scenario, day_start_datetime, holiday_dates)
     number_of_sessions = len(arrival_times_for_day)
-
     if number_of_sessions == 0:
         return []
 
     parking_durations_minutes = sample_parking_durations(scenario, number_of_sessions)
     soc_values_at_arrival = sample_soc_upon_arrival(scenario, number_of_sessions)
-
     target_soc = scenario["vehicles"]["soc_target"]
 
     charging_sessions_for_day: list[dict[str, Any]] = []
 
     for session_index in range(number_of_sessions):
         arrival_time = arrival_times_for_day[session_index]
+        raw_departure_time = arrival_time + timedelta(minutes=float(parking_durations_minutes[session_index]))
 
-        raw_departure_time = arrival_time + timedelta(
-            minutes=float(parking_durations_minutes[session_index])
-        )
-
-        # Schalter aus YAML: ermöglicht tageübergreifenden Sessions
         allow_cross_day = scenario["site"].get("allow_cross_day_charging", True)
-
         if allow_cross_day:
             departure_time = raw_departure_time
         else:
@@ -696,7 +627,6 @@ def build_charging_sessions_for_day(
 
         delta_soc = max(target_soc - soc_at_arrival, 0.0)
         required_energy_kwh = delta_soc * battery_capacity_kwh
-
         if required_energy_kwh <= 0.0:
             continue
 
@@ -721,22 +651,120 @@ def build_charging_sessions_for_day(
     return charging_sessions_for_day
 
 
-# -----------------------------------------------------------------------
-# Hauptsimulation / Orchestrierung der Lastgangberechnung
-# -----------------------------------------------------------------------
+# =============================================================================
+# 7) Lademanagement-Strategien (NEU: market / generation)
+# =============================================================================
+
+CSV_DT_FORMAT = "%d.%m.%Y %H:%M"
+
+
+def read_strategy_series_from_csv_first_col_time(
+    csv_path: str,
+    value_col_index: int,
+    delimiter: str = ";",
+) -> dict[datetime, float]:
+    """
+    Liest ein externes Strategie-Signal (Preis oder Erzeugung) aus CSV:
+
+    Annahmen (bewusst robust für unterschiedliche Header):
+      - Zeitstempel steht IMMER in der 1. Spalte (Index 0)
+      - Signalwert steht in der Spalte value_col_index (1-basiert)
+      - Header-Bezeichnungen können variieren (werden automatisch übersprungen)
+
+    Erwartetes Zeitformat der 1. Spalte:
+      "01.12.2025 00:15"  (Format: %d.%m.%Y %H:%M)
+    """
+    data: dict[datetime, float] = {}
+
+    with open(csv_path, "r", encoding="utf-8-sig") as f:
+        reader = csv.reader(f, delimiter=delimiter)
+
+        for row in reader:
+            if not row or len(row) <= value_col_index:
+                continue
+
+            t_raw = (row[0] or "").strip()
+            v_raw = (row[value_col_index] or "").strip()
+            if not t_raw or not v_raw or v_raw == "-":
+                continue
+
+            # Header/sonstige Zeilen ohne Datum automatisch überspringen
+            try:
+                ts = datetime.strptime(t_raw, CSV_DT_FORMAT)
+            except ValueError:
+                continue
+
+            # deutsches Komma + optionale Tausenderpunkte
+            val = float(v_raw.replace(".", "").replace(",", "."))
+            data[ts] = val
+
+    if not data:
+        raise ValueError(f"Keine gültigen Datenzeilen im Strategie-CSV gefunden: {csv_path}")
+
+    return data
+
+
+def floor_to_resolution(dt: datetime, resolution_min: int) -> datetime:
+    """Rundet einen Zeitpunkt auf den Start des aktuellen Zeitslots (z.B. 15-min) ab."""
+    discard = dt.minute % resolution_min
+    return dt.replace(minute=dt.minute - discard, second=0, microsecond=0)
+
+
+def lookup_signal(strategy_map: dict[datetime, float], ts: datetime, resolution_min: int) -> float | None:
+    """Findet den Signalwert für den (abgerundeten) Zeitslot."""
+    return strategy_map.get(floor_to_resolution(ts, resolution_min), None)
+
+
+def compute_multiplier_from_signal(
+    signal_value: float,
+    q_low: float,
+    q_high: float,
+    min_mult: float,
+    max_mult: float,
+    mode: str,      # "market" oder "generation"
+    gamma: float = 1.0,
+) -> float:
+    """
+    Mappt ein Signal (Preis oder Erzeugung) auf einen Multiplikator für die
+    maximal verfügbare Standortleistung.
+
+    - market: niedriger Preis => hoher Multiplikator (invertiert)
+    - generation: hohe Erzeugung => hoher Multiplikator
+    """
+    if q_high <= q_low:
+        return max_mult
+
+    x = (signal_value - q_low) / (q_high - q_low)
+    x = float(np.clip(x, 0.0, 1.0))
+
+    if mode == "market":
+        x = 1.0 - x
+    elif mode == "generation":
+        pass
+    else:
+        return max_mult
+
+    x = x ** gamma
+    return float(min_mult + (max_mult - min_mult) * x)
+
+
+# =============================================================================
+# 8) Hauptsimulation / Orchestrierung der Lastgangberechnung
+# =============================================================================
 
 def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None):
     """
     Führt die Lastgang-Simulation durch.
-    Jetzt mit fahrzeugspezifischen Batteriekapazitäten und SoC-abhängiger Ladeleistung.
 
-    Ablauf (high-level):
-      1) Zeitindex erzeugen (start_datetime aus Argument oder YAML)
-      2) Feiertage 1x aus YAML-Konfiguration ableiten (DE + Bundesland), Jahr(e) aus Startdatum + Horizont
-      3) Fahrzeugflotte inkl. SoC-abhängiger Ladekurven aus CSV laden
-      4) Für jeden Tag: Sessions (Ankunft, Parkdauer, SoC, Fahrzeugprofil) erzeugen
-      5) Zeitschrittweise: gleichzeitig ladende Sessions auswählen und Leistung / Energie verteilen
-      6) Rückgabe: Zeitstempel, Lastgang, Sessions, Anzahl gleichzeitiger Ladevorgänge
+    Unterstützte Lademanagementstrategien:
+      - immediate  : lädt (unter Restriktionen) sofort nach Ankunft
+      - market     : skaliert Standortleistung hoch, wenn Preis niedrig ist
+      - generation : skaliert Standortleistung hoch, wenn Erzeugung hoch ist
+
+    Hinweis:
+      Das Strategie-Signal kommt aus einer CSV (z.B. Day-Ahead), dabei gilt:
+        - Zeitstempel steht in der 1. Spalte
+        - Signalwert-Spalte wird über YAML 'site.strategy_value_col' gewählt
     """
 
     # -------------------------------------------------------------------
@@ -750,15 +778,12 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
     if time_index:
         simulation_start_datetime = time_index[0]
     else:
-        # Fallback (sollte bei sinnvoller Config praktisch nicht passieren)
         if start_datetime is not None:
             simulation_start_datetime = start_datetime
         elif "start_datetime" in scenario:
             simulation_start_datetime = datetime.fromisoformat(scenario["start_datetime"])
         else:
-            simulation_start_datetime = datetime.now().replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
+            simulation_start_datetime = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
     holiday_dates = parse_holiday_dates_from_scenario(
         scenario=scenario,
@@ -767,12 +792,67 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
 
     # -------------------------------------------------------------------
     # 3) Fahrzeugflotte inkl. Ladekurven aus CSV laden
+    #      (Pfad wird relativ zur YAML aufgelöst)
     # -------------------------------------------------------------------
-    vehicle_csv_path = scenario["vehicles"]["vehicle_curve_csv"]
+    vehicle_csv_path = resolve_path_relative_to_scenario(scenario, scenario["vehicles"]["vehicle_curve_csv"])
     vehicle_profiles = load_vehicle_profiles_from_csv(vehicle_csv_path)
 
     # -------------------------------------------------------------------
-    # Initialisierung: Simulationsparameter & Ergebniscontainer
+    # 4) Strategie-Initialisierung (NEU)
+    # -------------------------------------------------------------------
+    site_cfg = scenario.get("site", {}) or {}
+    charging_strategy = (site_cfg.get("charging_strategy") or "immediate").lower()
+
+    # Strategie-Defaults (bewusst im Code, damit YAML schlank bleibt)
+    STRATEGY_RESOLUTION_MIN = 15
+    STRATEGY_MIN_MULTIPLIER = 0.20
+    STRATEGY_MAX_MULTIPLIER = 1.00
+    STRATEGY_Q_LOW = 0.20
+    STRATEGY_Q_HIGH = 0.80
+    STRATEGY_GAMMA = 1.0
+
+    strategy_map: dict[datetime, float] | None = None
+    q_low_val: float | None = None
+    q_high_val: float | None = None
+
+    # -------------------------------------------------------------------
+    # 4a) Nur bei market/generation: Signal-CSV laden und Quantile bestimmen
+    # -------------------------------------------------------------------
+    if charging_strategy in ("market", "generation"):
+        strategy_csv = site_cfg.get("strategy_csv", None)
+        if not strategy_csv:
+            raise ValueError(
+                "Für charging_strategy 'market' oder 'generation' muss in der YAML 'site.strategy_csv' gesetzt sein."
+            )
+
+        # Spaltenindex kommt aus YAML (1-basiert; 3 = dritte Spalte)
+        col_1_based = site_cfg.get("strategy_value_col", None)
+        if col_1_based is None or not isinstance(col_1_based, int) or col_1_based < 2:
+            raise ValueError(
+                "Bitte 'site.strategy_value_col' in der YAML als ganze Zahl >= 2 setzen "
+                "(1-basiert: 1=Zeitspalte, 3=dritte Spalte=Signal)."
+            )
+
+        # 1-basiert (YAML) -> 0-basiert (Python)
+        value_col_index = int(col_1_based) - 1
+
+        # Pfad relativ zur Szenario-YAML auflösen
+        strategy_csv_path = resolve_path_relative_to_scenario(scenario, strategy_csv)
+
+        # Strategie-Signal einlesen (Zeitstempel immer in Spalte 1)
+        strategy_map = read_strategy_series_from_csv_first_col_time(
+            csv_path=strategy_csv_path,
+            value_col_index=value_col_index,
+            delimiter=";",
+        )
+
+        # Quantile des Signals für Normalisierung (robust gegenüber Ausreißern)
+        values = np.array(list(strategy_map.values()), dtype=float)
+        q_low_val = float(np.quantile(values, STRATEGY_Q_LOW))
+        q_high_val = float(np.quantile(values, STRATEGY_Q_HIGH))
+
+    # -------------------------------------------------------------------
+    # 5) Initialisierung: Simulationsparameter & Ergebniscontainer
     # -------------------------------------------------------------------
     time_resolution_min = scenario["time_resolution_min"]
     time_step_hours = time_resolution_min / 60.0
@@ -789,12 +869,10 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
     all_charging_sessions: list[dict[str, Any]] = []
 
     # -------------------------------------------------------------------
-    # 4) Tagesweise Ladesessions für den gesamten Horizont erzeugen
+    # 6) Tagesweise Ladesessions für den gesamten Horizont erzeugen
     # -------------------------------------------------------------------
     if time_index:
-        first_day_start_datetime = time_index[0].replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
+        first_day_start_datetime = time_index[0].replace(hour=0, minute=0, second=0, microsecond=0)
         simulation_horizon_days = scenario["simulation_horizon_days"]
 
         for day_offset in range(simulation_horizon_days):
@@ -808,7 +886,7 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
             all_charging_sessions.extend(charging_sessions_for_day)
 
     # -------------------------------------------------------------------
-    # 5) Zeitschrittweise Simulation: Leistungs- und Energiezuweisung
+    # 7) Zeitschrittweise Simulation: Sessions auswählen & Leistung/Energie zuweisen
     # -------------------------------------------------------------------
     for time_step_index, current_timestamp in enumerate(time_index):
 
@@ -829,14 +907,36 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
         charging_sessions = present_sessions[:number_of_chargers]
         charging_count_series.append(len(charging_sessions))
 
-        maximum_site_power_kw = min(
+        # -------------------------------------------------------------------
+        # 7a) Standortleistung (immediate) + optionaler Strategie-Multiplikator
+        # -------------------------------------------------------------------
+        base_maximum_site_power_kw = min(
             grid_limit_p_avb_kw,
             len(charging_sessions) * rated_power_kw,
         )
+
+        multiplier = 1.0
+        if strategy_map is not None and q_low_val is not None and q_high_val is not None:
+            sig = lookup_signal(strategy_map, current_timestamp, STRATEGY_RESOLUTION_MIN)
+            if sig is not None:
+                multiplier = compute_multiplier_from_signal(
+                    signal_value=sig,
+                    q_low=q_low_val,
+                    q_high=q_high_val,
+                    min_mult=STRATEGY_MIN_MULTIPLIER,
+                    max_mult=STRATEGY_MAX_MULTIPLIER,
+                    mode=charging_strategy,
+                    gamma=STRATEGY_GAMMA,
+                )
+
+        maximum_site_power_kw = base_maximum_site_power_kw * multiplier
         available_power_per_session_kw = maximum_site_power_kw / len(charging_sessions)
 
         total_power_in_time_step_kw = 0.0
 
+        # -------------------------------------------------------------------
+        # 7b) Pro Session: fahrzeugspezifische Leistung + Energiebedarf beachten
+        # -------------------------------------------------------------------
         for charging_session in charging_sessions:
             vehicle_power_limit_kw = vehicle_power_at_soc(charging_session)
 
@@ -865,6 +965,6 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
         load_profile_kw[time_step_index] = total_power_in_time_step_kw
 
     # -------------------------------------------------------------------
-    # 6) Rückgabe der Simulationsergebnisse
+    # 8) Rückgabe der Simulationsergebnisse
     # -------------------------------------------------------------------
     return time_index, load_profile_kw, all_charging_sessions, charging_count_series

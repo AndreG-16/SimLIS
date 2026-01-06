@@ -1,6 +1,6 @@
 site_type: retail      # Standort des Ladepunkts
 
-time_resolution_min: 10          # Zeitschritt, in der die Simulation abgebildet wird
+time_resolution_min: 15          # Zeitschritt, in der die Simulation abgebildet wird
 simulation_horizon_days: 10       # gewünschter Analysehorizont in Tagen
 
 start_datetime: "2026-01-01 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen soll

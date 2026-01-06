@@ -1,6 +1,6 @@
 site_type: office      # Standort des Ladepunkts
 
-time_resolution_min: 10          # Zeitschritt, in der die Simulation berechnet wird
+time_resolution_min: 15          # Zeitschritt, in der die Simulation berechnet wird
 simulation_horizon_days: 8       # gewünschter Analysehorizont in Tagen
 
 start_datetime: "2026-01-01 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen soll
@@ -11,13 +11,17 @@ holidays:
     - 
 
 site:
-  number_chargers: 4                                     # Anzahl der Ladepunkte am Standort
-  rated_power_kw: 22                                      # Verfügbare Leistung pro Ladepunkt
-  grid_limit_p_avb_kw: 400                                # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
-  expected_sessions_per_charger_per_day: [3.0, 8.0]       # erwartete Ladevorgänge pro LP und Tag
-  charger_efficiency: 0.95                                # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
-  charging_strategy: "immediate"                          # Strombereitstellungsstrategie
-  allow_cross_day_charging: false                         # Ermöglicht keine Ladungen über Mitternacht hinaus
+  number_chargers: 4                                          # Anzahl der Ladepunkte am Standort
+  rated_power_kw: 22                                          # Verfügbare Leistung pro Ladepunkt
+  grid_limit_p_avb_kw: 400                                    # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  expected_sessions_per_charger_per_day: [3.0, 8.0]           # erwartete Ladevorgänge pro LP und Tag
+  charger_efficiency: 0.95                                    # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
+  
+  charging_strategy: "market"                              # Lademanagementstrategie: "immediate", "market", "generation"
+  strategy_csv: "../data/strategies/latest.csv"               # Pfad bei vorhandenen Daten zu Strompreisen bzw. zur Stromgeneration
+  strategy_value_col: 3                                       # Spalte, die entsprechende Werte in €/MWh bzw. MWh enthalten, woran sich die Lademanagementstrategie richtet (1-basierter Code: 1 = erste Spalte)
+  
+  allow_cross_day_charging: false                             # Ermöglicht keine Ladungen über Mitternacht hinaus
 
 # Fuhrparkbeschreibung – Ladekurven + Kapazitäten kommen aus CSV
 vehicles:
