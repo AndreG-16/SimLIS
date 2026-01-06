@@ -3,7 +3,7 @@ site_type: office      # Standort des Ladepunkts
 time_resolution_min: 15          # Zeitschritt, in der die Simulation berechnet wird
 simulation_horizon_days: 8       # gewünschter Analysehorizont in Tagen
 
-start_datetime: "2026-01-01 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen soll
+start_datetime: "2025-12-01 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen soll
 holidays:
   country: "DE"
   subdivision: "BY"     # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
@@ -17,7 +17,7 @@ site:
   expected_sessions_per_charger_per_day: [3.0, 8.0]           # erwartete Ladevorgänge pro LP und Tag
   charger_efficiency: 0.95                                    # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
   
-  charging_strategy: "market"                              # Lademanagementstrategie: "immediate", "market", "generation"
+  charging_strategy: "generation"                             # Lademanagementstrategie: "immediate" (default), "market", "generation"
   strategy_csv: "../data/strategies/latest.csv"               # Pfad bei vorhandenen Daten zu Strompreisen bzw. zur Stromgeneration
   strategy_value_col: 3                                       # Spalte, die entsprechende Werte in €/MWh bzw. MWh enthalten, woran sich die Lademanagementstrategie richtet (1-basierter Code: 1 = erste Spalte)
   

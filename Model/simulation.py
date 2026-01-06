@@ -3,6 +3,7 @@ import numpy as np
 from pathlib import Path
 import csv  # NEU: CSV-Parsing (Fahrzeugkurven + Markt/Erzeugungssignal)
 import holidays  # NEU: Feiertagslogik (optional)
+import warnings
 from dataclasses import dataclass
 from datetime import datetime, timedelta, date
 from typing import Any
@@ -850,6 +851,35 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
         values = np.array(list(strategy_map.values()), dtype=float)
         q_low_val = float(np.quantile(values, STRATEGY_Q_LOW))
         q_high_val = float(np.quantile(values, STRATEGY_Q_HIGH))
+
+        # -------------------------------------------------------------------
+        # 4b) Plausibilitätsprüfung: Deckt Strategie-CSV den Simulationszeitraum ab?
+        #     -> Warnung erscheint im Jupyter Notebook (UserWarning)
+        # -------------------------------------------------------------------
+        if time_index and strategy_map:
+            csv_start = min(strategy_map.keys())
+            csv_end = max(strategy_map.keys())
+
+            sim_start = time_index[0]
+            sim_end = time_index[-1]
+
+            if csv_end < sim_start or csv_start > sim_end:
+                warnings.warn(
+                    "⚠️ Strategie-CSV liegt zeitlich vollständig außerhalb des "
+                    "Simulationszeitraums.\n"
+                    "→ charging_strategy wirkt NICHT (Fallback ≈ immediate).\n"
+                    f"CSV-Zeitraum: {csv_start} bis {csv_end}\n"
+                    f"Simulation: {sim_start} bis {sim_end}",
+                    UserWarning,
+                )
+            elif csv_start > sim_start or csv_end < sim_end:
+                warnings.warn(
+                    "⚠️ Strategie-CSV deckt den Simulationszeitraum nur TEILWEISE ab.\n"
+                    "→ charging_strategy wirkt nur in überlappenden Zeitbereichen.\n"
+                    f"CSV-Zeitraum: {csv_start} bis {csv_end}\n"
+                    f"Simulation: {sim_start} bis {sim_end}",
+                    UserWarning,
+                )
 
     # -------------------------------------------------------------------
     # 5) Initialisierung: Simulationsparameter & Ergebniscontainer
