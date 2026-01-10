@@ -677,7 +677,7 @@ def build_charging_sessions_for_day(
 # 7) Strategie-Signal aus CSV (Market / Generation)
 # =============================================================================
 
-CSV_DT_FORMAT = "%d.%m.%Y %H:%M"
+CSV_DT_FORMATS = ("%d.%m.%Y %H:%M", "%d.%m.%y %H:%M")
 
 
 def read_strategy_series_from_csv_first_col_time(
@@ -716,11 +716,24 @@ def read_strategy_series_from_csv_first_col_time(
             if not t_raw or not v_raw or v_raw == "-":
                 continue
 
-            try:
-                ts = datetime.strptime(t_raw, CSV_DT_FORMAT)
-            except ValueError:
+            # -------------------------------
+            # Zeitstempel robust parsen (2- oder 4-stelliges Jahr)
+            # -------------------------------
+            ts = None
+            for fmt in CSV_DT_FORMATS:
+                try:
+                    ts = datetime.strptime(t_raw, fmt)
+                    break
+                except ValueError:
+                    pass
+
+            if ts is None:
+                # Header/sonstige Zeilen ohne Datum automatisch überspringen
                 continue
 
+            # -------------------------------
+            # Wert robust parsen
+            # -------------------------------
             try:
                 val = parse_number_de_or_en(v_raw)
             except ValueError:
