@@ -2,14 +2,13 @@ import yaml
 import numpy as np
 from pathlib import Path
 import csv  # CSV-Parsing (Fahrzeugkurven + Markt/Erzeugungssignal)
-import warnings
 from dataclasses import dataclass
 from datetime import datetime, timedelta, date
 from typing import Any
 
 
 # =============================================================================
-# 0) Projekt-/Pfad-Utilities (NEU)
+# 0) Projekt-/Pfad-Utilities
 # =============================================================================
 
 def resolve_path_relative_to_scenario(scenario: dict[str, Any], p: str) -> str:
@@ -29,7 +28,7 @@ def resolve_path_relative_to_scenario(scenario: dict[str, Any], p: str) -> str:
 
 
 # =============================================================================
-# 0b) Robustes Zahlen-Parsing (NEU)
+# 0b) Robustes Zahlen-Parsing
 # =============================================================================
 
 def parse_number_de_or_en(raw: str) -> float:
@@ -71,12 +70,11 @@ def parse_number_de_or_en(raw: str) -> float:
         return float(s)
 
     # nur '.' oder kein Separator
-    # englisch: 90.91 oder "1234"
     return float(s)
 
 
 # =============================================================================
-# 0c) HTML-Statusausgabe (NEU)
+# 0c) HTML-Statusausgabe (optional im Notebook)
 # =============================================================================
 
 def show_strategy_status_html(strategy: str, status: str) -> None:
@@ -84,20 +82,18 @@ def show_strategy_status_html(strategy: str, status: str) -> None:
     Zeigt im Jupyter Notebook eine farbige Statuszeile (HTML).
     Fallback: normaler print, wenn IPython nicht verfügbar ist.
 
-    status: "ACTIVE" | "PARTIAL" | "INACTIVE" | "IMMEDIATE"
+    status: "ACTIVE" | "INACTIVE" | "IMMEDIATE"
     """
     status = (status or "IMMEDIATE").upper()
     strategy = (strategy or "immediate").upper()
 
     color_map = {
         "ACTIVE": "green",
-        "PARTIAL": "orange",
         "INACTIVE": "red",
         "IMMEDIATE": "gray",
     }
     emoji_map = {
         "ACTIVE": "🟢",
-        "PARTIAL": "🟡",
         "INACTIVE": "🔴",
         "IMMEDIATE": "⚪",
     }
@@ -128,21 +124,20 @@ def show_strategy_status_html(strategy: str, status: str) -> None:
 class VehicleProfile:
     name: str
     battery_capacity_kwh: float
-    vehicle_class: str            # z.B. "PKW", "Transporter"
-    soc_grid: np.ndarray          # SoC-Stützstellen (0..1)
-    power_grid_kw: np.ndarray     # Ladeleistung in kW zu den SoC-Stützstellen
+    vehicle_class: str
+    soc_grid: np.ndarray
+    power_grid_kw: np.ndarray
 
 
 def load_vehicle_profiles_from_csv(path: str) -> list[VehicleProfile]:
     """
-    Liest eine CSV mit Fahrzeugen und SoC-abhängigen Ladekurven und gibt
-    eine Liste von VehicleProfile-Objekten zurück.
+    CSV mit Fahrzeugen und SoC-abhängigen Ladekurven laden.
 
-    Erwartete Struktur (Spaltentrenner ';'):
+    Struktur (Delimiter ';'):
       Zeile 1: Hersteller (ignoriert)
       Zeile 2: Modellnamen
       Zeile 3: Fahrzeugklasse
-      Zeile 4: max. Kapazität (kWh)
+      Zeile 4: Kapazität (kWh)
       Zeile 5: "SoC [%]" (Header)
       ab Zeile 6: SoC-Werte in % + Ladeleistungen je Fahrzeug
     """
@@ -249,8 +244,8 @@ def load_vehicle_profiles_from_csv(path: str) -> list[VehicleProfile]:
 
 def vehicle_power_at_soc(session: dict[str, Any]) -> float:
     """
-    Fahrzeugspezifische maximale Ladeleistung (kW) für aktuellen SoC,
-    basierend auf der in der Session gespeicherten Ladekurve.
+    Fahrzeugspezifische maximale Ladeleistung (kW) für aktuellen SoC
+    (Interpolation aus SoC-/Power-Stützstellen).
     """
     soc_grid = session["soc_grid"]
     power_grid = session["power_grid_kw"]
@@ -267,7 +262,7 @@ def vehicle_power_at_soc(session: dict[str, Any]) -> float:
 
 
 # =============================================================================
-# 2) Szenario laden (YAML) + Pfadkontext (NEU)
+# 2) Szenario laden (YAML) + Pfadkontext
 # =============================================================================
 
 def load_scenario(path: str) -> dict[str, Any]:
@@ -288,8 +283,7 @@ def load_scenario(path: str) -> dict[str, Any]:
 
 def sample_from_range(value_definition: Any) -> float:
     """
-    Verarbeitet Werte aus der YAML, die entweder als Skalar oder als Liste
-    [min, max] (bzw. [value]) angegeben sind, und gibt einen float zurück.
+    Verarbeitet YAML-Werte als Skalar oder als Liste [min, max] bzw. [value].
     """
     if isinstance(value_definition, (list, tuple)):
         if len(value_definition) == 1:
@@ -307,16 +301,11 @@ def parse_holiday_dates_from_scenario(
     simulation_start_datetime: datetime,
 ) -> set[date]:
     """
-    Erzeugt Feiertage als Set[date] aus der YAML.
+    Feiertage aus YAML als Set[date].
 
-    Unterstützte Varianten (kombinierbar):
-      A) Manuelle Liste:
-         holidays:
-           dates: ["2025-01-01", "2025-12-25", ...]
-      B) Automatisch nach Land + Bundesland:
-         holidays:
-           country: "DE"
-           subdivision: "BY"
+    Unterstützt:
+      A) manuell: holidays.dates
+      B) automatisch: holidays.country + holidays.subdivision
     """
     holidays_cfg = scenario.get("holidays", {}) or {}
     holiday_dates: set[date] = set()
@@ -391,11 +380,7 @@ def create_time_index(scenario: dict, start_datetime: datetime | None = None) ->
     number_of_time_steps = int(total_minutes_in_simulation / time_resolution_min)
 
     time_step_delta = timedelta(minutes=time_resolution_min)
-    time_index = [
-        simulation_start_datetime + step_index * time_step_delta
-        for step_index in range(number_of_time_steps)
-    ]
-    return time_index
+    return [simulation_start_datetime + step_index * time_step_delta for step_index in range(number_of_time_steps)]
 
 
 # =============================================================================
@@ -410,10 +395,8 @@ def sample_mixture(
 ) -> np.ndarray:
     """
     Erzeugt Stichproben aus einer Mischung von Verteilungen.
-    Unterstützte Verteilungen pro Komponente:
-      - lognormal, normal, beta, uniform
-    Optional:
-      - shift_minutes: wird nach dem Sampling addiert (z.B. Arrival Times).
+    Unterstützte Verteilungen pro Komponente: lognormal, normal, beta, uniform.
+    Optional: shift_minutes (bei Arrival Times).
     """
     if number_of_samples <= 0:
         return np.array([])
@@ -516,7 +499,7 @@ def choose_vehicle_profile(
     Wählt ein Fahrzeugprofil aus der geladenen Flotte aus.
     Optional kann pro Standort in der YAML ein fleet_mix gesetzt werden.
 
-    Falls fleet_mix fehlt oder ungültig ist, wird gleichverteilt gewählt.
+    Falls fleet_mix fehlt/ungültig: gleichverteilt.
     """
     fleet_mix = scenario.get("vehicles", {}).get("fleet_mix", None)
 
@@ -598,8 +581,7 @@ def sample_parking_durations(scenario: dict, number_of_sessions: int) -> np.ndar
         unit_description="minutes",
     )
 
-    durations = np.clip(durations, min_minutes, max_minutes)
-    return durations
+    return np.clip(durations, min_minutes, max_minutes)
 
 
 def sample_soc_upon_arrival(scenario: dict, number_of_sessions: int) -> np.ndarray:
@@ -630,7 +612,6 @@ def build_charging_sessions_for_day(
 ) -> list[dict[str, Any]]:
     """
     Erzeugt für einen Tag eine Liste von Ladesessions mit allen relevanten Parametern.
-    Jetzt mit zufälliger Fahrzeugwahl und fahrzeugspezifischen Ladekurven.
     """
     arrivals = sample_arrival_times_for_day(scenario, day_start_datetime, holiday_dates)
     n = len(arrivals)
@@ -680,6 +661,12 @@ def build_charging_sessions_for_day(
                 "vehicle_class": vehicle_profile.vehicle_class,
                 "soc_grid": vehicle_profile.soc_grid,
                 "power_grid_kw": vehicle_profile.power_grid_kw,
+
+                # -----------------------------------------------------------------
+                # OPTIMIERUNG: Slot-basierte Präferenzen (werden nach Sessionbau befüllt)
+                # -----------------------------------------------------------------
+                "preferred_slot_indices": [],  # Liste von Indizes in time_index, sortiert nach Signalqualität
+                "preferred_ptr": 0,            # Pointer auf nächsten bevorzugten Slot (>= aktuellem Schritt)
             }
         )
 
@@ -687,7 +674,7 @@ def build_charging_sessions_for_day(
 
 
 # =============================================================================
-# 7) Lademanagement-Strategien (NEU: market / generation)
+# 7) Strategie-Signal aus CSV (Market / Generation)
 # =============================================================================
 
 CSV_DT_FORMAT = "%d.%m.%Y %H:%M"
@@ -701,17 +688,10 @@ def read_strategy_series_from_csv_first_col_time(
     """
     Liest ein externes Strategie-Signal (Preis oder Erzeugung) aus CSV:
 
-    Annahmen (bewusst robust für unterschiedliche Header):
-      - Zeitstempel steht IMMER in der 1. Spalte (1-basiert: 1)
-      - Signalwert steht in der Spalte value_col_1_based (1-basiert: 1=erste Spalte)
-      - Header-Bezeichnungen können variieren (werden automatisch übersprungen)
-
-    Erwartetes Zeitformat der 1. Spalte:
-      "01.12.2025 00:15"  (Format: %d.%m.%Y %H:%M)
-
-    WICHTIG (1-basiert):
-      - value_col_1_based=1 wäre die Zeitspalte (nicht sinnvoll für Signal)
-      - typischerweise value_col_1_based=3 (3. Spalte)
+    Annahmen:
+      - Zeitstempel steht IMMER in der 1. Spalte
+      - Signalwert steht in Spalte value_col_1_based (1-basiert, >=2)
+      - Header-Zeilen werden übersprungen
     """
     if not isinstance(value_col_1_based, int) or value_col_1_based < 2:
         raise ValueError(
@@ -730,8 +710,8 @@ def read_strategy_series_from_csv_first_col_time(
             if len(row) < value_col_1_based:
                 continue
 
-            t_raw = (row[0] or "").strip()  # 1. Spalte (Zeit) -> Index 0
-            v_raw = (row[value_col_1_based - 1] or "").strip()  # 1-basiert -> Index
+            t_raw = (row[0] or "").strip()
+            v_raw = (row[value_col_1_based - 1] or "").strip()
 
             if not t_raw or not v_raw or v_raw == "-":
                 continue
@@ -739,7 +719,6 @@ def read_strategy_series_from_csv_first_col_time(
             try:
                 ts = datetime.strptime(t_raw, CSV_DT_FORMAT)
             except ValueError:
-                # Header/sonstige Zeilen ohne Datum automatisch überspringen
                 continue
 
             try:
@@ -766,42 +745,184 @@ def lookup_signal(strategy_map: dict[datetime, float], ts: datetime, resolution_
     return strategy_map.get(floor_to_resolution(ts, resolution_min), None)
 
 
-def compute_multiplier_from_signal(
-    signal_value: float,
-    q_low: float,
-    q_high: float,
-    min_mult: float,
-    max_mult: float,
-    mode: str,      # "market" oder "generation"
-    gamma: float = 1.0,
-) -> float:
+# =============================================================================
+# 7b) OPTIMIERUNG: Harte Validierung (Abbruch wenn CSV != Simulationshorizont)
+# =============================================================================
+
+def assert_strategy_csv_covers_simulation(
+    strategy_map: dict[datetime, float],
+    time_index: list[datetime],
+    strategy_resolution_min: int,
+    charging_strategy: str,
+    strategy_csv_path: str,
+) -> None:
     """
-    Mappt ein Signal (Preis oder Erzeugung) auf einen Multiplikator für die
-    maximal verfügbare Standortleistung.
+    Bricht ab, wenn die Strategie-CSV den Simulationszeitraum NICHT vollständig abdeckt
+    oder wenn innerhalb des Zeitraums Zeitstempel fehlen.
 
-    - market: niedriger Preis => hoher Multiplikator (invertiert)
-    - generation: hohe Erzeugung => hoher Multiplikator
+    Ziel: Keine langen Rechenzeiten durch stillen Fallback auf "immediate".
     """
-    if q_high <= q_low:
-        return max_mult
+    if not time_index:
+        raise ValueError("Simulationszeitachse ist leer – kann Strategie-CSV nicht prüfen.")
 
-    x = (signal_value - q_low) / (q_high - q_low)
-    x = float(np.clip(x, 0.0, 1.0))
+    # Erwartete Zeitpunkte auf Strategie-Auflösung (gefloort)
+    expected_ts = [floor_to_resolution(t, strategy_resolution_min) for t in time_index]
+    expected_set = set(expected_ts)
 
-    mode = (mode or "immediate").lower()
-    if mode == "market":
-        x = 1.0 - x
-    elif mode == "generation":
-        pass
-    else:
-        return 1.0
+    csv_start = min(strategy_map.keys())
+    csv_end = max(strategy_map.keys())
 
-    x = x ** float(gamma)
-    return float(min_mult + (max_mult - min_mult) * x)
+    sim_start = min(expected_set)
+    sim_end = max(expected_set)
+
+    # 1) Zeitraum muss vollständig enthalten sein
+    if csv_start > sim_start or csv_end < sim_end:
+        # Wie viele volle Tage sind ab sim_start durch die CSV abgedeckt?
+        covered_minutes = int((csv_end - sim_start).total_seconds() / 60)
+        covered_days = max(0.0, covered_minutes / (24 * 60))
+
+        # Vorschlag: horizon_days auf floor(covered_days) setzen
+        # Kalendertage zählen (wenn CSV bis Tagesende reicht, zählt der Tag voll)
+        last_day = csv_end.date()
+        first_day = sim_start.date()
+        suggested_days = (last_day - first_day).days + 1
+
+
+        raise ValueError(
+            "❌ Abbruch: Strategie-CSV deckt den Simulationszeitraum nicht vollständig ab.\n"
+            f"Strategie: {charging_strategy}\n"
+            f"CSV: {strategy_csv_path}\n"
+            f"CSV-Zeitraum: {csv_start} bis {csv_end}\n"
+            f"Simulation:   {sim_start} bis {sim_end}\n"
+            f"→ CSV deckt ab Start nur ca. {covered_days:.2f} Tage ab.\n"
+            f"✅ Vorschlag: simulation_horizon_days auf {suggested_days} setzen (oder CSV erweitern).\n"
+        )
+
+    # 2) Lückencheck: jeder benötigte Timestamp muss vorhanden sein
+    missing = sorted([t for t in expected_set if t not in strategy_map])
+    if missing:
+        preview = "\n".join([f"- {t}" for t in missing[:10]])
+        raise ValueError(
+            "❌ Abbruch: Strategie-CSV hat fehlende Zeitstempel innerhalb des Simulationszeitraums.\n"
+            f"Strategie: {charging_strategy}\n"
+            f"CSV: {strategy_csv_path}\n"
+            f"Fehlende Timestamps: {len(missing)} (erste 10):\n{preview}\n"
+            "Bitte CSV-Auflösung/Zeitraum prüfen (z.B. 15-min Raster, Sommer-/Winterzeit, fehlende Zeilen)."
+        )
 
 
 # =============================================================================
-# 8) Hauptsimulation / Orchestrierung der Lastgangberechnung
+# 8) OPTIMIERUNG: Slot-basierte Heuristik (Best Slot innerhalb der Standzeit)
+# =============================================================================
+
+def _slack_minutes_for_session(
+    s: dict[str, Any],
+    ts: datetime,
+    rated_power_kw: float,
+    charger_efficiency: float,
+) -> float:
+    """
+    Slack-Minuten (Puffer) der Session am Zeitpunkt ts.
+
+    slack = verbleibende Standzeit - benötigte Ladezeit (bei max. physikalischer Session-Leistung)
+
+    Hinweis: Netz-/NAP-Engpässe sind hier NICHT enthalten.
+    """
+    remaining_seconds = (s["departure_time"] - ts).total_seconds()
+    if remaining_seconds <= 0:
+        return -1e9
+
+    remaining_hours = remaining_seconds / 3600.0
+
+    vehicle_limit_kw = vehicle_power_at_soc(s)
+    p_max_kw = max(0.0, min(rated_power_kw, vehicle_limit_kw, float(s["max_charging_power_kw"])))
+
+    if p_max_kw <= 1e-9:
+        return -1e9
+
+    e_rest = float(s["energy_required_kwh"])
+    needed_hours = e_rest / (p_max_kw * charger_efficiency)
+
+    return (remaining_hours - needed_hours) * 60.0
+
+
+def _build_preferred_slots_for_all_sessions(
+    all_sessions: list[dict[str, Any]],
+    time_index: list[datetime],
+    time_to_idx: dict[datetime, int],
+    charging_strategy: str,
+    strategy_map: dict[datetime, float] | None,
+    strategy_resolution_min: int,
+) -> None:
+    """
+    Erzeugt pro Session eine Liste bevorzugter Zeitslots (Indices in time_index),
+    sortiert nach:
+      - market: günstigster Preis zuerst (aufsteigend)
+      - generation: höchste Erzeugung zuerst (absteigend)
+
+    Fehlende Signalwerte (None) werden als "sehr schlecht" behandelt und ans Ende sortiert.
+    """
+    if charging_strategy not in ("market", "generation"):
+        return
+    if not strategy_map or not time_index:
+        return
+
+    bad_market = 1e30          # fehlender Preis -> extrem schlecht
+    bad_generation_score = 1e30  # wir sortieren generation über -signal, fehlend -> schlecht
+
+    for s in all_sessions:
+        if float(s.get("energy_required_kwh", 0.0)) <= 0.0:
+            continue
+
+        # Session-Zeitraum auf Strategie-Auflösung runden
+        a = floor_to_resolution(s["arrival_time"], strategy_resolution_min)
+        d = floor_to_resolution(s["departure_time"], strategy_resolution_min)
+
+        # Robust: auf vorhandene time_index-Slots ziehen
+        while a not in time_to_idx and a < time_index[-1]:
+            a += timedelta(minutes=strategy_resolution_min)
+        while d not in time_to_idx and d > time_index[0]:
+            d -= timedelta(minutes=strategy_resolution_min)
+
+        if a not in time_to_idx or d not in time_to_idx:
+            s["preferred_slot_indices"] = []
+            s["preferred_ptr"] = 0
+            continue
+
+        start_idx = time_to_idx[a]
+        end_idx = time_to_idx[d]
+        if end_idx <= start_idx:
+            s["preferred_slot_indices"] = []
+            s["preferred_ptr"] = 0
+            continue
+
+        idxs = list(range(start_idx, end_idx))
+
+        scored: list[tuple[float, int]] = []
+        for idx in idxs:
+            t = time_index[idx]
+            sig = lookup_signal(strategy_map, t, strategy_resolution_min)
+
+            if sig is None:
+                # Missing signal -> ans Ende
+                score = bad_market if charging_strategy == "market" else bad_generation_score
+            else:
+                if charging_strategy == "market":
+                    # niedriger Preis ist besser
+                    score = float(sig)
+                else:
+                    # höher ist besser -> wir sortieren aufsteigend nach (-sig)
+                    score = -float(sig)
+
+            scored.append((score, idx))
+
+        scored.sort(key=lambda x: x[0])
+        s["preferred_slot_indices"] = [idx for _, idx in scored]
+        s["preferred_ptr"] = 0
+
+
+# =============================================================================
+# 9) Hauptsimulation / Orchestrierung der Lastgangberechnung
 # =============================================================================
 
 def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None):
@@ -810,13 +931,13 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
 
     Unterstützte Lademanagementstrategien:
       - immediate  : lädt (unter Restriktionen) sofort nach Ankunft
-      - market     : skaliert Standortleistung hoch, wenn Preis niedrig ist
-      - generation : skaliert Standortleistung hoch, wenn Erzeugung hoch ist
+      - market     : OPTIMIERUNG (slotbasiert): lädt bevorzugt zu günstigsten Zeitpunkten innerhalb der Standzeit
+      - generation : OPTIMIERUNG (slotbasiert): lädt bevorzugt zu erzeugungsstärksten Zeitpunkten innerhalb der Standzeit
 
-    Hinweis:
-      Das Strategie-Signal kommt aus einer CSV (z.B. Day-Ahead), dabei gilt:
-        - Zeitstempel steht in der 1. Spalte
-        - Signalwert-Spalte wird über YAML 'site.strategy_value_col' gewählt (1-basiert: 3 = 3. Spalte)
+    WICHTIG:
+      - Für market/generation wird die CSV-Abdeckung strikt geprüft:
+        passt die CSV nicht EXAKT zum Simulationshorizont -> ABRUCH (keine Fallback-Simulation).
+      - strategy_status nur: IMMEDIATE, ACTIVE, INACTIVE
     """
 
     # -------------------------------------------------------------------
@@ -825,17 +946,13 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
     time_index = create_time_index(scenario, start_datetime)
 
     # -------------------------------------------------------------------
-    # 2) Feiertage 1x ableiten (Bundesland, Jahr(e) aus Start + Horizont)
+    # 2) Feiertage 1x ableiten
     # -------------------------------------------------------------------
-    if time_index:
-        simulation_start_datetime = time_index[0]
-    else:
-        if start_datetime is not None:
-            simulation_start_datetime = start_datetime
-        elif "start_datetime" in scenario:
-            simulation_start_datetime = datetime.fromisoformat(scenario["start_datetime"])
-        else:
-            simulation_start_datetime = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    simulation_start_datetime = time_index[0] if time_index else (
+        start_datetime if start_datetime is not None else
+        datetime.fromisoformat(scenario["start_datetime"]) if "start_datetime" in scenario else
+        datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    )
 
     holiday_dates = parse_holiday_dates_from_scenario(
         scenario=scenario,
@@ -854,76 +971,45 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
     site_cfg = scenario.get("site", {}) or {}
     charging_strategy = (site_cfg.get("charging_strategy") or "immediate").lower()
 
-    # Strategie-Defaults (bewusst im Code, damit YAML schlank bleibt)
+    # CSV/Signal-Auflösung (typisch 15min)
     STRATEGY_RESOLUTION_MIN = 15
-    STRATEGY_MIN_MULTIPLIER = 0.20
-    STRATEGY_MAX_MULTIPLIER = 1.00
-    STRATEGY_Q_LOW = 0.20
-    STRATEGY_Q_HIGH = 0.80
-    STRATEGY_GAMMA = 1.0
 
     strategy_map: dict[datetime, float] | None = None
-    q_low_val: float | None = None
-    q_high_val: float | None = None
+    strategy_csv_path: str | None = None
 
     # -------------------------------------------------------------------
-    # 4a) Nur bei market/generation: Signal-CSV laden und Quantile bestimmen
+    # 4a) Nur bei market/generation: Signal-CSV laden + HARTE VALIDIERUNG
     # -------------------------------------------------------------------
     if charging_strategy in ("market", "generation"):
         strategy_csv = site_cfg.get("strategy_csv", None)
         if not strategy_csv:
             raise ValueError(
-                "Für charging_strategy 'market' oder 'generation' muss in der YAML 'site.strategy_csv' gesetzt sein."
+                "❌ Abbruch: Für charging_strategy 'market' oder 'generation' muss in der YAML 'site.strategy_csv' gesetzt sein."
             )
 
-        # Spaltennummer kommt aus YAML (1-basiert; 3 = dritte Spalte)
         col_1_based = site_cfg.get("strategy_value_col", None)
         if col_1_based is None or not isinstance(col_1_based, int) or col_1_based < 2:
             raise ValueError(
-                "Bitte 'site.strategy_value_col' in der YAML als ganze Zahl >= 2 setzen "
+                "❌ Abbruch: Bitte 'site.strategy_value_col' in der YAML als ganze Zahl >= 2 setzen "
                 "(1-basiert: 1=Zeitspalte, 3=dritte Spalte=Signal)."
             )
 
         strategy_csv_path = resolve_path_relative_to_scenario(scenario, strategy_csv)
 
-        # Strategie-Signal einlesen (Zeitstempel immer in Spalte 1)
         strategy_map = read_strategy_series_from_csv_first_col_time(
             csv_path=strategy_csv_path,
-            value_col_1_based=int(col_1_based),   # <<< 1-basiert bleibt 1-basiert
+            value_col_1_based=int(col_1_based),
             delimiter=";",
         )
 
-        values = np.array(list(strategy_map.values()), dtype=float)
-        q_low_val = float(np.quantile(values, STRATEGY_Q_LOW))
-        q_high_val = float(np.quantile(values, STRATEGY_Q_HIGH))
-
-        # -------------------------------------------------------------------
-        # 4b) Plausibilitätsprüfung: Zeitliche Abdeckung Strategie-CSV
-        # -------------------------------------------------------------------
-        if time_index and strategy_map:
-            csv_start = min(strategy_map.keys())
-            csv_end = max(strategy_map.keys())
-
-            sim_start = time_index[0]
-            sim_end = time_index[-1]
-
-            if csv_end < sim_start or csv_start > sim_end:
-                warnings.warn(
-                    "⚠️ Strategie-CSV liegt zeitlich vollständig außerhalb des "
-                    "Simulationszeitraums.\n"
-                    "→ charging_strategy wirkt NICHT (Fallback ≈ immediate).\n"
-                    f"CSV-Zeitraum: {csv_start} bis {csv_end}\n"
-                    f"Simulation: {sim_start} bis {sim_end}",
-                    UserWarning,
-                )
-            elif csv_start > sim_start or csv_end < sim_end:
-                warnings.warn(
-                    "⚠️ Strategie-CSV deckt den Simulationszeitraum nur TEILWEISE ab.\n"
-                    "→ charging_strategy wirkt nur in überlappenden Zeitbereichen.\n"
-                    f"CSV-Zeitraum: {csv_start} bis {csv_end}\n"
-                    f"Simulation: {sim_start} bis {sim_end}",
-                    UserWarning,
-                )
+        # OPTIMIERUNG: Abbruch, wenn CSV nicht exakt passt (kein PARTIAL/kein Fallback)
+        assert_strategy_csv_covers_simulation(
+            strategy_map=strategy_map,
+            time_index=time_index,
+            strategy_resolution_min=STRATEGY_RESOLUTION_MIN,
+            charging_strategy=charging_strategy,
+            strategy_csv_path=strategy_csv_path,
+        )
 
     # -------------------------------------------------------------------
     # 5) Initialisierung: Simulationsparameter & Ergebniscontainer
@@ -939,11 +1025,16 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
     number_of_chargers = scenario["site"]["number_chargers"]
     charger_efficiency = scenario["site"]["charger_efficiency"]
 
+    # OPTIMIERUNG: Notfall-Puffer (Minuten) – lädt unabhängig vom Slot, wenn kritisch
+    # (Retail/Highway mit immediate können strategy_params leer lassen; wird dann ignoriert)
+    strategy_params = site_cfg.get("strategy_params", {}) or {}
+    emergency_slack_minutes = float(strategy_params.get("emergency_slack_minutes", 60.0))
+
     charging_count_series: list[int] = []
     all_charging_sessions: list[dict[str, Any]] = []
 
     # -------------------------------------------------------------------
-    # 6) Tagesweise Ladesessions für den gesamten Horizont erzeugen
+    # 6) Tagesweise Ladesessions erzeugen
     # -------------------------------------------------------------------
     if time_index:
         first_day_start = time_index[0].replace(hour=0, minute=0, second=0, microsecond=0)
@@ -961,6 +1052,19 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
             )
 
     # -------------------------------------------------------------------
+    # OPTIMIERUNG: Präferenzlisten (best time slots) je Session vorberechnen
+    # -------------------------------------------------------------------
+    time_to_idx = {t: idx for idx, t in enumerate(time_index)} if time_index else {}
+    _build_preferred_slots_for_all_sessions(
+        all_sessions=all_charging_sessions,
+        time_index=time_index,
+        time_to_idx=time_to_idx,
+        charging_strategy=charging_strategy,
+        strategy_map=strategy_map,
+        strategy_resolution_min=STRATEGY_RESOLUTION_MIN,
+    )
+
+    # -------------------------------------------------------------------
     # 7) Zeitschrittweise Simulation: Sessions auswählen & Leistung/Energie zuweisen
     # -------------------------------------------------------------------
     for i, ts in enumerate(time_index):
@@ -976,40 +1080,91 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
             charging_count_series.append(0)
             continue
 
-        present_sessions.sort(key=lambda s: (s["departure_time"], s["arrival_time"]))
-        charging_sessions = present_sessions[:number_of_chargers]
+        # ---------------------------------------------------------------
+        # OPTIMIERUNG: Auswahl der zu ladenden Sessions
+        #   - immediate: Earliest departure first
+        #   - market/generation: lade nur in bevorzugten Slots, außer "emergency slack"
+        # ---------------------------------------------------------------
+        charging_sessions: list[dict[str, Any]] = []
+
+        if charging_strategy == "immediate":
+            # Immediate bleibt wie gehabt
+            present_sessions.sort(key=lambda s: (s["departure_time"], s["arrival_time"]))
+            charging_sessions = present_sessions[:number_of_chargers]
+
+        else:
+            # market/generation (strategy_map ist hier garantiert vorhanden, sonst wäre abgebrochen)
+            emergency: list[dict[str, Any]] = []
+            slot_candidates: list[dict[str, Any]] = []
+
+            for s in present_sessions:
+                slack_m = _slack_minutes_for_session(
+                    s=s,
+                    ts=ts,
+                    rated_power_kw=rated_power_kw,
+                    charger_efficiency=charger_efficiency,
+                )
+                s["_slack_minutes"] = slack_m  # nur intern
+
+                # Notfall: unabhängig vom Slot-Wunsch laden
+                if slack_m <= emergency_slack_minutes:
+                    emergency.append(s)
+                    continue
+
+                # Slot-Wunsch prüfen: (nächster bevorzugter Slot == current i)
+                pref = s.get("preferred_slot_indices", [])
+                ptr = int(s.get("preferred_ptr", 0))
+
+                while ptr < len(pref) and pref[ptr] < i:
+                    ptr += 1
+                s["preferred_ptr"] = ptr
+
+                if ptr < len(pref) and pref[ptr] == i:
+                    slot_candidates.append(s)
+
+            # Kandidaten: emergency zuerst, dann Slot-Kandidaten
+            seen = set()
+            candidates: list[dict[str, Any]] = []
+
+            for s in emergency:
+                sid = id(s)
+                if sid not in seen:
+                    candidates.append(s)
+                    seen.add(sid)
+
+            for s in slot_candidates:
+                sid = id(s)
+                if sid not in seen:
+                    candidates.append(s)
+                    seen.add(sid)
+
+            if candidates:
+                # Kritischste zuerst: kleiner Slack, dann frühere Abfahrt
+                candidates.sort(key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"]))
+                charging_sessions = candidates[:number_of_chargers]
+            else:
+                charging_sessions = []
+
         charging_count_series.append(len(charging_sessions))
 
-        # -------------------------------------------------------------------
-        # 7a) Standortleistung (immediate) + optionaler Strategie-Multiplikator
-        # -------------------------------------------------------------------
-        base_max_site_power_kw = min(
+        if not charging_sessions:
+            load_profile_kw[i] = 0.0
+            continue
+
+        # ---------------------------------------------------------------
+        # 7a) Standortleistung / Limits (NAP, CP, Anzahl Charger)
+        # ---------------------------------------------------------------
+        max_site_power_kw = min(
             grid_limit_p_avb_kw,
             len(charging_sessions) * rated_power_kw,
         )
-
-        multiplier = 1.0
-        if strategy_map is not None and q_low_val is not None and q_high_val is not None:
-            sig = lookup_signal(strategy_map, ts, STRATEGY_RESOLUTION_MIN)
-            if sig is not None:
-                multiplier = compute_multiplier_from_signal(
-                    signal_value=sig,
-                    q_low=q_low_val,
-                    q_high=q_high_val,
-                    min_mult=STRATEGY_MIN_MULTIPLIER,
-                    max_mult=STRATEGY_MAX_MULTIPLIER,
-                    mode=charging_strategy,
-                    gamma=STRATEGY_GAMMA,
-                )
-
-        max_site_power_kw = base_max_site_power_kw * multiplier
         available_power_per_session_kw = max_site_power_kw / len(charging_sessions)
 
         total_power_kw = 0.0
 
-        # -------------------------------------------------------------------
+        # ---------------------------------------------------------------
         # 7b) Pro Session: fahrzeugspezifische Leistung + Energiebedarf beachten
-        # -------------------------------------------------------------------
+        # ---------------------------------------------------------------
         for s in charging_sessions:
             vehicle_power_limit_kw = vehicle_power_at_soc(s)
 
@@ -1038,24 +1193,19 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
         load_profile_kw[i] = total_power_kw
 
     # -------------------------------------------------------------------
-    # 8) Strategie-Status (NEU): ACTIVE / PARTIAL / INACTIVE / IMMEDIATE
+    # 8) Strategie-Status: ACTIVE / INACTIVE / IMMEDIATE (kein PARTIAL)
     # -------------------------------------------------------------------
-    strategy_status = "IMMEDIATE"
-    if charging_strategy in ("market", "generation") and strategy_map and time_index:
-        csv_start = min(strategy_map.keys())
-        csv_end = max(strategy_map.keys())
-        sim_start = time_index[0]
-        sim_end = time_index[-1]
-
-        if csv_end < sim_start or csv_start > sim_end:
-            strategy_status = "INACTIVE"
-        elif csv_start > sim_start or csv_end < sim_end:
-            strategy_status = "PARTIAL"
-        else:
-            strategy_status = "ACTIVE"
+    if charging_strategy == "immediate":
+        strategy_status = "IMMEDIATE"
+    elif charging_strategy in ("market", "generation"):
+        # Wenn wir bis hier kommen, war die CSV-Abdeckung korrekt (sonst Abbruch)
+        strategy_status = "ACTIVE" if strategy_map else "INACTIVE"
+    else:
+        # Unbekannte Strategie -> defensiv abbrechen (anstatt stiller Fallback)
+        raise ValueError(f"❌ Abbruch: Unbekannte charging_strategy='{charging_strategy}'")
 
     # -------------------------------------------------------------------
-    # 9) Rückgabe der Simulationsergebnisse (erweitert)
+    # 9) Rückgabe der Simulationsergebnisse
     # -------------------------------------------------------------------
     return (
         time_index,
