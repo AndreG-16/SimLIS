@@ -16,8 +16,6 @@ def resolve_path_relative_to_scenario(scenario: dict[str, Any], p: str) -> str:
     Löst Dateipfade robust auf:
       - Absolute Pfade bleiben unverändert
       - Relative Pfade werden relativ zum YAML-Ordner (scenario["_scenario_dir"]) interpretiert
-
-    Ziel: Portables Projekt für verschiedene Nutzer/Computer.
     """
     pp = Path(p).expanduser()
     if pp.is_absolute():
@@ -37,13 +35,6 @@ def parse_number_de_or_en(raw: str) -> float:
       - deutschem Format:  "1.234,56"
       - englischem Format: "1,234.56" oder "90.91"
       - deutschem Dezimalkomma ohne Tausender: "90,91"
-
-    Regeln:
-      - Falls ',' UND '.' vorkommen:
-          - Wenn das letzte Trennzeichen ',' ist -> de: '.' Tausender, ',' Dezimal
-          - Wenn das letzte Trennzeichen '.' ist -> en: ',' Tausender, '.' Dezimal
-      - Falls nur ',' vorkommt: ',' Dezimal
-      - Falls nur '.' vorkommt: '.' Dezimal
     """
     s = (raw or "").strip().replace(" ", "")
     if s == "" or s == "-":
@@ -282,9 +273,7 @@ def load_scenario(path: str) -> dict[str, Any]:
 # =============================================================================
 
 def sample_from_range(value_definition: Any) -> float:
-    """
-    Verarbeitet YAML-Werte als Skalar oder als Liste [min, max] bzw. [value].
-    """
+    """Verarbeitet YAML-Werte als Skalar oder als Liste [min, max] bzw. [value]."""
     if isinstance(value_definition, (list, tuple)):
         if len(value_definition) == 1:
             return float(value_definition[0])
@@ -361,10 +350,7 @@ def determine_day_type_with_holidays(
 
 
 def create_time_index(scenario: dict, start_datetime: datetime | None = None) -> list[datetime]:
-    """
-    Erzeugt eine Liste von Zeitstempeln über den im Szenario definierten
-    Simulationshorizont.
-    """
+    """Erzeugt eine Liste von Zeitstempeln über den im Szenario definierten Simulationshorizont."""
     if start_datetime is not None:
         simulation_start_datetime = start_datetime
     elif "start_datetime" in scenario:
@@ -527,9 +513,7 @@ def sample_arrival_times_for_day(
     day_start_datetime: datetime,
     holiday_dates: set[date],
 ) -> list[datetime]:
-    """
-    Generiert alle Ankunftszeitpunkte für einen Tag als datetime-Objekte.
-    """
+    """Generiert alle Ankunftszeitpunkte für einen Tag als datetime-Objekte."""
     day_type = determine_day_type_with_holidays(day_start_datetime, holiday_dates)
 
     number_of_chargers = scenario["site"]["number_chargers"]
@@ -564,9 +548,7 @@ def sample_arrival_times_for_day(
 
 
 def sample_parking_durations(scenario: dict, number_of_sessions: int) -> np.ndarray:
-    """
-    Generiert Parkdauern in Minuten für die übergebene Anzahl an Sessions.
-    """
+    """Generiert Parkdauern in Minuten für die übergebene Anzahl an Sessions."""
     cfg = scenario["parking_duration_distribution"]
     max_minutes = cfg["max_duration_minutes"]
     min_minutes = cfg.get("min_duration_minutes", 10.0)
@@ -585,9 +567,7 @@ def sample_parking_durations(scenario: dict, number_of_sessions: int) -> np.ndar
 
 
 def sample_soc_upon_arrival(scenario: dict, number_of_sessions: int) -> np.ndarray:
-    """
-    Generiert SoC-Werte (0..1) bei Ankunft für mehrere Ladesessions.
-    """
+    """Generiert SoC-Werte (0..1) bei Ankunft für mehrere Ladesessions."""
     cfg = scenario["soc_at_arrival_distribution"]
     max_soc = cfg["max_soc"]
 
@@ -665,7 +645,7 @@ def build_charging_sessions_for_day(
                 # -----------------------------------------------------------------
                 # OPTIMIERUNG: Slot-basierte Präferenzen (werden nach Sessionbau befüllt)
                 # -----------------------------------------------------------------
-                "preferred_slot_indices": [],  # Liste von Indizes in time_index, sortiert nach Signalqualität
+                "preferred_slot_indices": [],  # Indizes in time_index, sortiert nach Signalqualität
                 "preferred_ptr": 0,            # Pointer auf nächsten bevorzugten Slot (>= aktuellem Schritt)
             }
         )
@@ -686,7 +666,7 @@ def read_strategy_series_from_csv_first_col_time(
     delimiter: str = ";",
 ) -> dict[datetime, float]:
     """
-    Liest ein externes Strategie-Signal (Preis oder Erzeugung) aus CSV:
+    Liest ein externes Strategie-Signal (Preis oder Erzeugung) aus CSV.
 
     Annahmen:
       - Zeitstempel steht IMMER in der 1. Spalte
@@ -728,7 +708,6 @@ def read_strategy_series_from_csv_first_col_time(
                     pass
 
             if ts is None:
-                # Header/sonstige Zeilen ohne Datum automatisch überspringen
                 continue
 
             # -------------------------------
@@ -778,7 +757,6 @@ def assert_strategy_csv_covers_simulation(
     if not time_index:
         raise ValueError("Simulationszeitachse ist leer – kann Strategie-CSV nicht prüfen.")
 
-    # Erwartete Zeitpunkte auf Strategie-Auflösung (gefloort)
     expected_ts = [floor_to_resolution(t, strategy_resolution_min) for t in time_index]
     expected_set = set(expected_ts)
 
@@ -790,16 +768,13 @@ def assert_strategy_csv_covers_simulation(
 
     # 1) Zeitraum muss vollständig enthalten sein
     if csv_start > sim_start or csv_end < sim_end:
-        # Wie viele volle Tage sind ab sim_start durch die CSV abgedeckt?
         covered_minutes = int((csv_end - sim_start).total_seconds() / 60)
         covered_days = max(0.0, covered_minutes / (24 * 60))
 
-        # Vorschlag: horizon_days auf floor(covered_days) setzen
-        # Kalendertage zählen (wenn CSV bis Tagesende reicht, zählt der Tag voll)
+        # Kalendertage als Vorschlag (inkl. letzter Tag)
         last_day = csv_end.date()
         first_day = sim_start.date()
         suggested_days = (last_day - first_day).days + 1
-
 
         raise ValueError(
             "❌ Abbruch: Strategie-CSV deckt den Simulationszeitraum nicht vollständig ab.\n"
@@ -811,7 +786,7 @@ def assert_strategy_csv_covers_simulation(
             f"✅ Vorschlag: simulation_horizon_days auf {suggested_days} setzen (oder CSV erweitern).\n"
         )
 
-    # 2) Lückencheck: jeder benötigte Timestamp muss vorhanden sein
+    # 2) Lückencheck
     missing = sorted([t for t in expected_set if t not in strategy_map])
     if missing:
         preview = "\n".join([f"- {t}" for t in missing[:10]])
@@ -822,6 +797,55 @@ def assert_strategy_csv_covers_simulation(
             f"Fehlende Timestamps: {len(missing)} (erste 10):\n{preview}\n"
             "Bitte CSV-Auflösung/Zeitraum prüfen (z.B. 15-min Raster, Sommer-/Winterzeit, fehlende Zeilen)."
         )
+
+
+# =============================================================================
+# 7c) OPTIMIERUNG: Normalisierung der CSV-Werte (Market: €/kWh, Generation: kW)
+# =============================================================================
+
+def convert_strategy_value_to_internal(
+    charging_strategy: str,
+    raw_value: float,
+    strategy_unit: str,
+    step_hours: float,
+) -> float:
+    """
+    Normalisiert Strategie-CSV-Werte auf interne Einheiten:
+
+    - generation: internes Signal = kW
+        * kW  -> kW
+        * kWh -> kW  (kWh pro Zeitschritt / step_hours)
+        * MWh -> kW  (MWh pro Zeitschritt * 1000 / step_hours)
+
+    - market: internes Signal = €/kWh
+        * €/MWh -> €/kWh ( /1000 )
+        * €/kWh -> €/kWh
+
+    Hinweis: 'step_hours' ist die Länge eines CSV-Zeitschritts (bei dir 0.25h).
+    """
+    unit = (strategy_unit or "").strip()
+
+    if charging_strategy == "generation":
+        if unit == "kW":
+            return float(raw_value)
+        if unit == "kWh":
+            return float(raw_value) / float(step_hours)
+        if unit == "MWh":
+            return float(raw_value) * 1000.0 / float(step_hours)
+        raise ValueError(
+            f"❌ Abbruch: Unbekannte strategy_unit='{strategy_unit}' für generation. Erlaubt: 'kW', 'kWh', 'MWh'."
+        )
+
+    if charging_strategy == "market":
+        if unit == "€/kWh":
+            return float(raw_value)
+        if unit == "€/MWh":
+            return float(raw_value) / 1000.0
+        raise ValueError(
+            f"❌ Abbruch: Unbekannte strategy_unit='{strategy_unit}' für market. Erlaubt: '€/kWh', '€/MWh'."
+        )
+
+    return float(raw_value)
 
 
 # =============================================================================
@@ -838,8 +862,6 @@ def _slack_minutes_for_session(
     Slack-Minuten (Puffer) der Session am Zeitpunkt ts.
 
     slack = verbleibende Standzeit - benötigte Ladezeit (bei max. physikalischer Session-Leistung)
-
-    Hinweis: Netz-/NAP-Engpässe sind hier NICHT enthalten.
     """
     remaining_seconds = (s["departure_time"] - ts).total_seconds()
     if remaining_seconds <= 0:
@@ -866,32 +888,27 @@ def _build_preferred_slots_for_all_sessions(
     charging_strategy: str,
     strategy_map: dict[datetime, float] | None,
     strategy_resolution_min: int,
+    strategy_unit: str,
+    step_hours: float,
 ) -> None:
     """
     Erzeugt pro Session eine Liste bevorzugter Zeitslots (Indices in time_index),
     sortiert nach:
-      - market: günstigster Preis zuerst (aufsteigend)
-      - generation: höchste Erzeugung zuerst (absteigend)
-
-    Fehlende Signalwerte (None) werden als "sehr schlecht" behandelt und ans Ende sortiert.
+      - market: günstigster Preis zuerst (aufsteigend) [intern: €/kWh]
+      - generation: höchste Erzeugung zuerst (absteigend) [intern: kW]
     """
     if charging_strategy not in ("market", "generation"):
         return
     if not strategy_map or not time_index:
         return
 
-    bad_market = 1e30          # fehlender Preis -> extrem schlecht
-    bad_generation_score = 1e30  # wir sortieren generation über -signal, fehlend -> schlecht
-
     for s in all_sessions:
         if float(s.get("energy_required_kwh", 0.0)) <= 0.0:
             continue
 
-        # Session-Zeitraum auf Strategie-Auflösung runden
         a = floor_to_resolution(s["arrival_time"], strategy_resolution_min)
         d = floor_to_resolution(s["departure_time"], strategy_resolution_min)
 
-        # Robust: auf vorhandene time_index-Slots ziehen
         while a not in time_to_idx and a < time_index[-1]:
             a += timedelta(minutes=strategy_resolution_min)
         while d not in time_to_idx and d > time_index[0]:
@@ -914,18 +931,24 @@ def _build_preferred_slots_for_all_sessions(
         scored: list[tuple[float, int]] = []
         for idx in idxs:
             t = time_index[idx]
-            sig = lookup_signal(strategy_map, t, strategy_resolution_min)
+            sig_raw = lookup_signal(strategy_map, t, strategy_resolution_min)
 
-            if sig is None:
-                # Missing signal -> ans Ende
-                score = bad_market if charging_strategy == "market" else bad_generation_score
+            if sig_raw is None:
+                score = 1e30  # fehlend -> ans Ende
             else:
+                sig_internal = convert_strategy_value_to_internal(
+                    charging_strategy=charging_strategy,
+                    raw_value=float(sig_raw),
+                    strategy_unit=strategy_unit,
+                    step_hours=step_hours,
+                )
+
                 if charging_strategy == "market":
-                    # niedriger Preis ist besser
-                    score = float(sig)
+                    # €/kWh: kleiner ist besser
+                    score = float(sig_internal)
                 else:
-                    # höher ist besser -> wir sortieren aufsteigend nach (-sig)
-                    score = -float(sig)
+                    # kW: größer ist besser -> sortiere nach -kW
+                    score = -float(sig_internal)
 
             scored.append((score, idx))
 
@@ -942,7 +965,7 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
     """
     Führt die Lastgang-Simulation durch.
 
-    Unterstützte Lademanagementstrategien:
+    Strategien:
       - immediate  : lädt (unter Restriktionen) sofort nach Ankunft
       - market     : OPTIMIERUNG (slotbasiert): lädt bevorzugt zu günstigsten Zeitpunkten innerhalb der Standzeit
       - generation : OPTIMIERUNG (slotbasiert): lädt bevorzugt zu erzeugungsstärksten Zeitpunkten innerhalb der Standzeit
@@ -950,7 +973,9 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
     WICHTIG:
       - Für market/generation wird die CSV-Abdeckung strikt geprüft:
         passt die CSV nicht EXAKT zum Simulationshorizont -> ABRUCH (keine Fallback-Simulation).
-      - strategy_status nur: IMMEDIATE, ACTIVE, INACTIVE
+      - strategy_unit ist verpflichtend für market/generation und wird intern normalisiert:
+        market: €/MWh oder €/kWh -> intern €/kWh
+        generation: MWh oder kWh oder kW -> intern kW
     """
 
     # -------------------------------------------------------------------
@@ -986,6 +1011,7 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
 
     # CSV/Signal-Auflösung (typisch 15min)
     STRATEGY_RESOLUTION_MIN = 15
+    strategy_step_hours = STRATEGY_RESOLUTION_MIN / 60.0  # bei 15 min -> 0.25 h
 
     strategy_map: dict[datetime, float] | None = None
     strategy_csv_path: str | None = None
@@ -993,7 +1019,15 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
     # -------------------------------------------------------------------
     # 4a) Nur bei market/generation: Signal-CSV laden + HARTE VALIDIERUNG
     # -------------------------------------------------------------------
+    strategy_unit = str(site_cfg.get("strategy_unit", "") or "").strip()
+
     if charging_strategy in ("market", "generation"):
+        if not strategy_unit:
+            raise ValueError(
+                "❌ Abbruch: Für charging_strategy 'market' oder 'generation' muss 'site.strategy_unit' gesetzt sein "
+                "(market: '€/MWh' oder '€/kWh' | generation: 'MWh' oder 'kWh' oder 'kW')."
+            )
+
         strategy_csv = site_cfg.get("strategy_csv", None)
         if not strategy_csv:
             raise ValueError(
@@ -1075,6 +1109,8 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
         charging_strategy=charging_strategy,
         strategy_map=strategy_map,
         strategy_resolution_min=STRATEGY_RESOLUTION_MIN,
+        strategy_unit=strategy_unit,
+        step_hours=strategy_step_hours,
     )
 
     # -------------------------------------------------------------------
@@ -1101,7 +1137,6 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
         charging_sessions: list[dict[str, Any]] = []
 
         if charging_strategy == "immediate":
-            # Immediate bleibt wie gehabt
             present_sessions.sort(key=lambda s: (s["departure_time"], s["arrival_time"]))
             charging_sessions = present_sessions[:number_of_chargers]
 
@@ -1206,7 +1241,7 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
         load_profile_kw[i] = total_power_kw
 
     # -------------------------------------------------------------------
-    # 8) Strategie-Status: ACTIVE / INACTIVE / IMMEDIATE (kein PARTIAL)
+    # 8) Strategie-Status see: ACTIVE / INACTIVE / IMMEDIATE (kein PARTIAL)
     # -------------------------------------------------------------------
     if charging_strategy == "immediate":
         strategy_status = "IMMEDIATE"
@@ -1214,7 +1249,6 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
         # Wenn wir bis hier kommen, war die CSV-Abdeckung korrekt (sonst Abbruch)
         strategy_status = "ACTIVE" if strategy_map else "INACTIVE"
     else:
-        # Unbekannte Strategie -> defensiv abbrechen (anstatt stiller Fallback)
         raise ValueError(f"❌ Abbruch: Unbekannte charging_strategy='{charging_strategy}'")
 
     # -------------------------------------------------------------------
