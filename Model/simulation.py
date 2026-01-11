@@ -821,7 +821,7 @@ def convert_strategy_value_to_internal(
         * €/MWh -> €/kWh ( /1000 )
         * €/kWh -> €/kWh
 
-    Hinweis: 'step_hours' ist die Länge eines CSV-Zeitschritts (bei dir 0.25h).
+    Hinweis: 'step_hours' ist die Länge eines CSV-Zeitschritts (bei dir typ. 0.25h).
     """
     unit = (strategy_unit or "").strip()
 
@@ -846,6 +846,91 @@ def convert_strategy_value_to_internal(
         )
 
     return float(raw_value)
+
+
+# =============================================================================
+# 7d) Reporting/Notebook-Helper: Strategie-Signal als aligned Zeitreihe
+# =============================================================================
+
+def build_strategy_signal_series(
+    scenario: dict[str, Any],
+    timestamps: list[datetime],
+    charging_strategy: str,
+    normalize_to_internal: bool = True,
+    strategy_resolution_min: int = 15,
+) -> tuple[np.ndarray | None, str | None]:
+    """
+    Baut eine Signal-Zeitreihe aligned auf 'timestamps' (für Plot/Reporting im Notebook).
+
+    Rückgabe:
+      - series: np.ndarray der Länge len(timestamps), np.nan wenn kein Wert gefunden
+      - y_label: passende Achsenbeschriftung
+
+    normalize_to_internal=True:
+      - market: €/kWh
+      - generation: kW
+
+    normalize_to_internal=False:
+      - Originalwerte aus CSV + strategy_unit aus YAML (z.B. €/MWh, MWh, kWh, kW)
+    """
+    strat = (charging_strategy or "immediate").lower()
+    if strat not in ("market", "generation"):
+        return None, None
+
+    if not timestamps:
+        return None, None
+
+    site_cfg = scenario.get("site", {}) or {}
+
+    # Pflichtfelder
+    strategy_unit = str(site_cfg.get("strategy_unit", "") or "").strip()
+    if not strategy_unit:
+        raise ValueError(
+            "❌ Abbruch: Für market/generation muss 'site.strategy_unit' gesetzt sein "
+            "(market: '€/MWh' oder '€/kWh' | generation: 'MWh' oder 'kWh' oder 'kW')."
+        )
+
+    strategy_csv = site_cfg.get("strategy_csv", None)
+    col_1_based = site_cfg.get("strategy_value_col", None)
+    if not strategy_csv or not isinstance(col_1_based, int) or col_1_based < 2:
+        raise ValueError("❌ Abbruch: 'site.strategy_csv' oder 'site.strategy_value_col' fehlt/ungültig.")
+
+    csv_path = resolve_path_relative_to_scenario(scenario, str(strategy_csv))
+
+    strategy_map = read_strategy_series_from_csv_first_col_time(
+        csv_path=csv_path,
+        value_col_1_based=int(col_1_based),
+        delimiter=";",
+    )
+
+    # Optional: wenn du hier auch "hard validation" erzwingen willst, kannst du
+    # assert_strategy_csv_covers_simulation(strategy_map, timestamps, strategy_resolution_min, strat, csv_path)
+    # nutzen. Aktuell: nur "Series bauen" (die Sim selbst validiert bereits).
+
+    step_hours = strategy_resolution_min / 60.0
+
+    series = np.full(len(timestamps), np.nan, dtype=float)
+    for i, ts in enumerate(timestamps):
+        v = lookup_signal(strategy_map, ts, strategy_resolution_min)
+        if v is None:
+            continue
+
+        if normalize_to_internal:
+            series[i] = convert_strategy_value_to_internal(
+                charging_strategy=strat,
+                raw_value=float(v),
+                strategy_unit=strategy_unit,
+                step_hours=step_hours,
+            )
+        else:
+            series[i] = float(v)
+
+    if normalize_to_internal:
+        y_label = "Preis [€/kWh]" if strat == "market" else "Erzeugung [kW]"
+    else:
+        y_label = f"{strat.upper()} [{strategy_unit}]"
+
+    return series, y_label
 
 
 # =============================================================================
@@ -1241,7 +1326,7 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
         load_profile_kw[i] = total_power_kw
 
     # -------------------------------------------------------------------
-    # 8) Strategie-Status see: ACTIVE / INACTIVE / IMMEDIATE (kein PARTIAL)
+    # 8) Strategie-Status: ACTIVE / INACTIVE / IMMEDIATE (kein PARTIAL)
     # -------------------------------------------------------------------
     if charging_strategy == "immediate":
         strategy_status = "IMMEDIATE"
