@@ -1,13 +1,13 @@
 site_type: office      # Standort des Ladepunkts
 
 time_resolution_min: 15          # Zeitschritt, in der die Simulation berechnet wird
-simulation_horizon_days: 14       # gewünschter Analysehorizont in Tagen
+simulation_horizon_days: 12       # gewünschter Analysehorizont in Tagen
 
 start_datetime: "2025-12-01 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen soll
 holidays:
   country: "DE"
   subdivision: "BY"     # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
-  dates: []               # zusätzliche bekannte betriebsfreie Tage manuell eingeben, getrennt durch Kommas ("2026-01-01", "")
+  dates: []               # zusätzliche bekannte betriebsfreie Tage manuell eingeben, getrennt durch neue Zeile (- "2026-01-01")
      
 
 site:
@@ -17,10 +17,10 @@ site:
   expected_sessions_per_charger_per_day: [3.0, 8.0]           # erwartete Ladevorgänge pro LP und Tag
   charger_efficiency: 0.95                                    # Verhäl0tnis Fahrzeugaufnahme zu abgegebener LP-Leistung
   
-  charging_strategy: "generation"                             # Lademanagementstrategie: "immediate" (default), "market", "generation"
-  strategy_csv: "../data/strategies/latest.csv"               # Pfad bei vorhandenen Daten zu Strompreisen bzw. zur Stromgeneration
+  charging_strategy: "market"                              # Lademanagementstrategie: "immediate" (default), "market", "generation"
+  strategy_csv: "../data/strategies/latest.csv"               # Pfad bei vorhandenen Daten zu Strompreisen bzw. zur Stromgeneration: "../data/strategies/latest.csv"
   strategy_value_col: 3                                       # Spalte, die entsprechende Werte ("€/MWh", "MWh", o.ä.) enthalten, woran sich die Lademanagementstrategie richtet (1-basierter Code: 1 = erste Spalte)
-  strategy_unit: "kW"                                        # Einheit, die für den Wert im Lademanagement verwendet wird ("MWh", "kWh", "kW", "€/MWh")
+  strategy_unit: "€/kWh"                                         # Einheit, die für den Wert im Lademanagement verwendet wird ("MWh", "kWh", "kW", "€/MWh")
   
   allow_cross_day_charging: false                             # Ermöglicht keine Ladungen über Mitternacht hinaus
 

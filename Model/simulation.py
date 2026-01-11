@@ -1365,7 +1365,7 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
                     rated_power_kw=rated_power_kw,
                     charger_efficiency=charger_efficiency,
                 )
-                s["_slack_minutes"] = slack_m  # nur intern
+                s["_slack_minutes"] = slack_m
 
                 # Notfall: unabhängig vom Slot-Wunsch laden
                 if slack_m <= emergency_slack_minutes:
