@@ -20,7 +20,7 @@ site:
   charging_strategy: "generation"                             # Lademanagementstrategie: "immediate" (default), "market", "generation"
   strategy_csv: "../data/strategies/latest.csv"               # Pfad bei vorhandenen Daten zu Strompreisen bzw. zur Stromgeneration
   strategy_value_col: 3                                       # Spalte, die entsprechende Werte ("€/MWh", "MWh", o.ä.) enthalten, woran sich die Lademanagementstrategie richtet (1-basierter Code: 1 = erste Spalte)
-  strategy_unit: "MWh"                                        # Einheit, die für den Wert im Lademanagement verwendet wird ("MWh", "kWh", "kW", "€/MWh")
+  strategy_unit: "kWh"                                        # Einheit, die für den Wert im Lademanagement verwendet wird ("MWh", "kWh", "kW", "€/MWh")
   
   allow_cross_day_charging: false                             # Ermöglicht keine Ladungen über Mitternacht hinaus
 
