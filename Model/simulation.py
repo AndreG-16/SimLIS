@@ -1273,11 +1273,9 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
     # 6b) OPTIMIERUNG: Präferenzlisten (best time slots) je Session vorberechnen
     # -------------------------------------------------------------------
     # Für market/generation wird pro Session eine sortierte Liste von Slots innerhalb der Standzeit erstellt:
-    #
     #   market:
     #     - Preis wird aus strategy_map pro Slot geholt und auf €/kWh normalisiert
     #     - bevorzugt werden die günstigsten Slots (aufsteigend)
-    #
     #   generation:
     #     - Erzeugung wird aus strategy_map pro Slot geholt und auf kW normalisiert
     #     - bevorzugt werden die Slots mit höchster Erzeugung (absteigend)

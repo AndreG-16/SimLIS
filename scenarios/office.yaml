@@ -1,7 +1,7 @@
 site_type: office      # Standort des Ladepunkts
 
 time_resolution_min: 15          # Zeitschritt, in der die Simulation berechnet wird
-simulation_horizon_days: 12       # gewünschter Analysehorizont in Tagen
+simulation_horizon_days: 20       # gewünschter Analysehorizont in Tagen
 
 start_datetime: "2025-12-01 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen soll
 holidays:
@@ -20,7 +20,7 @@ site:
   charging_strategy: "market"                              # Lademanagementstrategie: "immediate" (default), "market", "generation"
   strategy_csv: "../data/strategies/latest.csv"               # Pfad bei vorhandenen Daten zu Strompreisen bzw. zur Stromgeneration: "../data/strategies/latest.csv"
   strategy_value_col: 3                                       # Spalte, die entsprechende Werte ("€/MWh", "MWh", o.ä.) enthalten, woran sich die Lademanagementstrategie richtet (1-basierter Code: 1 = erste Spalte)
-  strategy_unit: "€/kWh"                                         # Einheit, die für den Wert im Lademanagement verwendet wird ("MWh", "kWh", "kW", "€/MWh")
+  strategy_unit: "€/MWh"                                         # Einheit, die für den Wert im Lademanagement verwendet wird ("MWh", "kWh", "kW", "€/MWh")
   
   allow_cross_day_charging: false                             # Ermöglicht keine Ladungen über Mitternacht hinaus
 
