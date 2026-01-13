@@ -1376,24 +1376,15 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
             charging_sessions = present_sessions[:number_of_chargers]
 
         else:
-            # Market/Generation:
-            # Es werden Kandidatenlisten aufgebaut:
-            #   A) emergency: zeitkritisch => es wird unabhängig von Preis/PV geladen.
-            #   B) slot_candidates: es wird geladen, wenn der aktuelle Zeitschritt zu den bevorzugten Slots gehört.
+            # Für market/generation werden Kandidatenlisten aufgebaut:
+            #   A) emergency: zeitkritisch => es wird unabhängig vom Preis/PV geladen.
+            #   B) slot_candidates: es wird im "gewünschten" Slot geladen.
             #
-            # Erweiterung für generation:
-            #   - Wenn PV-Überschuss vorhanden ist, werden nicht nur genau "der nächste Wunschslot",
-            #     sondern mehrere sehr gute Slots ("Top-K") zugelassen.
-            #   - Dadurch wird PV-Überschuss besser genutzt und späterer Netzbezug (Peaks) reduziert,
-            #     weil mehr Energie bereits in PV-starken Zeitfenstern geladen wurde.
-
-            # ------------------------------------------------------------
-            # Fixe Strategie-Parameter im Code (nicht in YAML)
-            # ------------------------------------------------------------
-            # Top-K für generation:
-            #   - K=8 bei 15-min Raster entspricht 2 Stunden "sehr gute" Slots
-            #   - K sollte klein bleiben, damit nicht beliebig überall geladen wird.
-            GENERATION_TOP_K_SLOTS = 8
+            # Erweiterung (generation):
+            #   Wenn PV-Überschuss > 0 vorliegt und keine Notfall-Session aktiv ist,
+            #   werden anwesende Sessions als Kandidaten zugelassen, auch wenn es nicht exakt
+            #   ein Wunschslot ist. Dadurch wird PV-Überschuss besser genutzt und späterer
+            #   Netzbezug vermieden bzw. reduziert.
 
             emergency: list[dict[str, Any]] = []
             slot_candidates: list[dict[str, Any]] = []
@@ -1414,43 +1405,36 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
                 )
                 s["_slack_minutes"] = slack_m
 
-                # Notfall: unabhängig vom Slot-Wunsch laden
+                # Notfall: unabhängig von PV/Preis laden
                 if slack_m <= emergency_slack_minutes:
                     emergency.append(s)
                     continue
 
-                # Slot-Präferenz prüfen
                 pref = s.get("preferred_slot_indices", [])
                 ptr = int(s.get("preferred_ptr", 0))
 
-                # Pointer vorziehen, falls bevorzugte Slots bereits in der Vergangenheit liegen
                 while ptr < len(pref) and pref[ptr] < i:
                     ptr += 1
                 s["preferred_ptr"] = ptr
 
-                if not pref or ptr >= len(pref):
-                    continue
-
                 if charging_strategy == "market":
-                    # Market: Es wird nur geladen, wenn "jetzt" der nächste Wunschslot ist.
-                    if pref[ptr] == i:
+                    # Market: es wird nur im nächsten Wunschslot geladen (Kostenminimierung über Slot-Liste)
+                    if pref and ptr < len(pref) and pref[ptr] == i:
                         slot_candidates.append(s)
 
                 elif charging_strategy == "generation":
-                    # Generation: Standard wäre ebenfalls "nur nächster Wunschslot".
-                    # Erweiterung: Wenn PV-Überschuss vorhanden ist, gelten Top-K Wunschslots als zulässig.
-                    #
-                    # Ziel: PV-Überschuss nutzen, um späteren Notfall-/Netzbezug zu vermeiden.
+                    # Generation (neu):
+                    # Wenn PV-Überschuss da ist, werden Sessions als Kandidaten zugelassen,
+                    # auch wenn es nicht exakt der Wunschslot ist.
+                    # Dadurch kann PV-Überschuss genutzt werden, statt später Netz zu beziehen.
                     if pv_surplus_kw > 0.0:
-                        window = pref[ptr: ptr + GENERATION_TOP_K_SLOTS]
-                        if i in window:
-                            slot_candidates.append(s)
+                        slot_candidates.append(s)
                     else:
-                        # Ohne PV-Überschuss bleibt es bei der konservativen Logik.
-                        if pref[ptr] == i:
+                        # Ohne Überschuss wird konservativ im nächsten Wunschslot geladen
+                        if pref and ptr < len(pref) and pref[ptr] == i:
                             slot_candidates.append(s)
 
-            # Kandidaten: emergency zuerst, dann slot_candidates (ohne Duplikate)
+            # Kandidatenliste ohne Duplikate: Notfall zuerst, dann PV/Slot-Kandidaten
             seen = set()
             candidates: list[dict[str, Any]] = []
 
@@ -1467,10 +1451,7 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
                     seen.add(sid)
 
             if candidates:
-                # Priorität:
-                #   1) kleiner Slack (kritischer)
-                #   2) frühere Abfahrt
-                #   3) frühere Ankunft
+                # Priorität: kritischer zuerst (kleiner Slack), dann frühere Abfahrt, dann frühere Ankunft
                 candidates.sort(key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"]))
                 charging_sessions = candidates[:number_of_chargers]
             else:
@@ -1485,26 +1466,17 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
         # ---------------------------------------------------------------
         # 7.2) Standortleistung / Limits
         # ---------------------------------------------------------------
-        # In generation wird PV zuerst für die Basislast genutzt.
-        # Übrig bleibt PV_Überschuss, der "kostenlos" für das Laden verfügbar ist.
+        # Bei generation gilt:
+        #   - PV wird zuerst für Basislast genutzt, Rest = PV-Überschuss.
+        #   - Ohne Notfall wird Netzbezug minimiert => Laden nur aus PV-Überschuss.
+        #   - Mit Notfall darf zusätzlich Netz bezogen werden, aber Import ist durch NAP begrenzt.
         #
-        # Der Netzanschlusspunkt (NAP) begrenzt ausschließlich den Import aus dem Netz.
-        # Lokale Erzeugung erhöht das Importlimit nicht, sondern reduziert nur den Netzbezug.
+        # NAP begrenzt nur den Netzimport. PV erhöht nicht das Importlimit, reduziert aber den Importbedarf.
         #
-        # Regel:
-        #   - Ohne Notfall (keine kritische Session): Es wird nur mit PV_Überschuss geladen.
-        #   - Mit Notfall (mindestens eine kritische Session): PV_Überschuss + Netzimport bis NAP.
-        #
-        # Dadurch wird Netzbezug minimiert und Peaks oberhalb der Erzeugung entstehen
-        # nur dann, wenn das SoC-Ziel sonst nicht erreichbar wäre.
+        # Gesamtleistung wird außerdem durch aktive Charger (N_active * CP) begrenzt.
 
-        charger_cap_kw = len(charging_sessions) * rated_power_kw
-        import_cap_kw = grid_limit_p_avb_kw
-
-        # Notfallstatus: mindestens eine Session ist zeitkritisch
         has_emergency = any(
-            float(s.get("_slack_minutes", 1e9)) <= emergency_slack_minutes
-            for s in charging_sessions
+            float(s.get("_slack_minutes", 1e9)) <= emergency_slack_minutes for s in charging_sessions
         )
 
         if charging_strategy == "generation":
@@ -1512,16 +1484,22 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
             base_kw = _base_load_kw_at(i)
             pv_surplus_kw = max(0.0, pv_kw - base_kw)
 
-            # Netzimport nur, wenn Notfall aktiv ist
-            extra_grid_kw = import_cap_kw if has_emergency else 0.0
+            # maximal mögliche Leistung aus Sicht der Hardware (Charger)
+            charger_cap_kw = len(charging_sessions) * rated_power_kw
 
-            max_site_power_kw = min(
-                charger_cap_kw,
-                pv_surplus_kw + extra_grid_kw,
-            )
+            if has_emergency:
+                # Notfall: PV + Netzimport (Netzimport bis NAP)
+                max_site_power_kw = min(charger_cap_kw, pv_surplus_kw + grid_limit_p_avb_kw)
+            else:
+                # Normalfall: Netzbezug minimieren => Laden nur aus PV-Überschuss
+                max_site_power_kw = min(charger_cap_kw, pv_surplus_kw)
+
         else:
-            # market / immediate: Netzimport & Charger-Cap
-            max_site_power_kw = min(charger_cap_kw, import_cap_kw)
+            # Immediate/Market: klassische Begrenzung über Netzanschluss (Importlimit) + Charger
+            max_site_power_kw = min(
+                grid_limit_p_avb_kw,
+                len(charging_sessions) * rated_power_kw,
+            )
 
         available_power_per_session_kw = max_site_power_kw / len(charging_sessions)
         total_power_kw = 0.0
