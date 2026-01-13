@@ -1376,9 +1376,34 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
             charging_sessions = present_sessions[:number_of_chargers]
 
         else:
-            # Bei market/generation wird zunächst zwischen Notfall- und Slot-Kandidaten unterschieden.
+            # Market/Generation:
+            # Es werden Kandidatenlisten aufgebaut:
+            #   A) emergency: zeitkritisch => es wird unabhängig von Preis/PV geladen.
+            #   B) slot_candidates: es wird geladen, wenn der aktuelle Zeitschritt zu den bevorzugten Slots gehört.
+            #
+            # Erweiterung für generation:
+            #   - Wenn PV-Überschuss vorhanden ist, werden nicht nur genau "der nächste Wunschslot",
+            #     sondern mehrere sehr gute Slots ("Top-K") zugelassen.
+            #   - Dadurch wird PV-Überschuss besser genutzt und späterer Netzbezug (Peaks) reduziert,
+            #     weil mehr Energie bereits in PV-starken Zeitfenstern geladen wurde.
+
+            # ------------------------------------------------------------
+            # Fixe Strategie-Parameter im Code (nicht in YAML)
+            # ------------------------------------------------------------
+            # Top-K für generation:
+            #   - K=8 bei 15-min Raster entspricht 2 Stunden "sehr gute" Slots
+            #   - K sollte klein bleiben, damit nicht beliebig überall geladen wird.
+            GENERATION_TOP_K_SLOTS = 8
+
             emergency: list[dict[str, Any]] = []
             slot_candidates: list[dict[str, Any]] = []
+
+            # PV-Überschuss im aktuellen Zeitschritt (nur relevant für generation)
+            pv_surplus_kw = 0.0
+            if charging_strategy == "generation":
+                pv_kw = _generation_kw_at(ts)
+                base_kw = _base_load_kw_at(i)
+                pv_surplus_kw = max(0.0, pv_kw - base_kw)
 
             for s in present_sessions:
                 slack_m = _slack_minutes_for_session(
@@ -1389,46 +1414,43 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
                 )
                 s["_slack_minutes"] = slack_m
 
-                # Notfall: Bei zu geringem Slack wird unabhängig vom Signal geladen.
-                if slack_m <= EMERGENCY_SLACK_MINUTES:
+                # Notfall: unabhängig vom Slot-Wunsch laden
+                if slack_m <= emergency_slack_minutes:
                     emergency.append(s)
                     continue
 
-                # Slot-Kriterium:
-                # - preferred_slot_indices ist nach Signalqualität sortiert (best -> worst).
-                # - preferred_ptr wird auf den nächsten Slot >= i geschoben.
+                # Slot-Präferenz prüfen
                 pref = s.get("preferred_slot_indices", [])
                 ptr = int(s.get("preferred_ptr", 0))
 
+                # Pointer vorziehen, falls bevorzugte Slots bereits in der Vergangenheit liegen
                 while ptr < len(pref) and pref[ptr] < i:
                     ptr += 1
                 s["preferred_ptr"] = ptr
 
-                # Market: Ein Slot wird akzeptiert, wenn er zu den Top-K besten Slots gehört.
-                # Generation: Der gleiche Mechanismus kann angewandt werden; hier ist K=1 implizit sinnvoll,
-                # da die Slotqualität bereits nach Erzeugung sortiert ist. Es wird dennoch der gleiche Test genutzt.
-                if charging_strategy == "market":
-                    window = pref[ptr:ptr + MARKET_TOP_K_SLOTS]
-                    if i in window:
-                        slot_candidates.append(s)
-                else:
-                    if ptr < len(pref) and pref[ptr] == i:
-                        # Für generation werden flexible (nicht-Notfall) Sessions nur dann als Kandidaten zugelassen,
-                        # wenn im aktuellen Zeitschritt tatsächlich PV-Überschuss verfügbar ist.
-                        # Dadurch wird vermieden, dass ohne Not Netzbezug entsteht und Peaks > PV auftreten.
-                        if charging_strategy == "generation":
-                            pv_kw = _generation_kw_at(ts)
-                            base_kw = _base_load_kw_at(i)
-                            pv_surplus_kw = max(0.0, pv_kw - base_kw)
+                if not pref or ptr >= len(pref):
+                    continue
 
-                            if pv_surplus_kw > 1e-6:
-                                slot_candidates.append(s)
-                        else:
-                            # market bleibt unverändert: Slot-Kandidat rein nach Preispräferenz
+                if charging_strategy == "market":
+                    # Market: Es wird nur geladen, wenn "jetzt" der nächste Wunschslot ist.
+                    if pref[ptr] == i:
+                        slot_candidates.append(s)
+
+                elif charging_strategy == "generation":
+                    # Generation: Standard wäre ebenfalls "nur nächster Wunschslot".
+                    # Erweiterung: Wenn PV-Überschuss vorhanden ist, gelten Top-K Wunschslots als zulässig.
+                    #
+                    # Ziel: PV-Überschuss nutzen, um späteren Notfall-/Netzbezug zu vermeiden.
+                    if pv_surplus_kw > 0.0:
+                        window = pref[ptr: ptr + GENERATION_TOP_K_SLOTS]
+                        if i in window:
+                            slot_candidates.append(s)
+                    else:
+                        # Ohne PV-Überschuss bleibt es bei der konservativen Logik.
+                        if pref[ptr] == i:
                             slot_candidates.append(s)
 
-
-            # Kandidatenliste: Notfälle zuerst, danach Slot-Kandidaten (ohne Duplikate)
+            # Kandidaten: emergency zuerst, dann slot_candidates (ohne Duplikate)
             seen = set()
             candidates: list[dict[str, Any]] = []
 
@@ -1445,7 +1467,10 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
                     seen.add(sid)
 
             if candidates:
-                # Priorisierung: kleinster Slack, dann frühere Abfahrt, dann frühere Ankunft.
+                # Priorität:
+                #   1) kleiner Slack (kritischer)
+                #   2) frühere Abfahrt
+                #   3) frühere Ankunft
                 candidates.sort(key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"]))
                 charging_sessions = candidates[:number_of_chargers]
             else:
