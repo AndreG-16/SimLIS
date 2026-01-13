@@ -1460,39 +1460,47 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
         # ---------------------------------------------------------------
         # 7.2) Standortleistung / Limits
         # ---------------------------------------------------------------
-        # Die maximal verfügbare Ladeleistung wird durch drei Grenzen bestimmt:
-        #   (1) Importlimit aus dem Netz (NAP): grid_limit_p_avb_kw
-        #   (2) Summe der aktiven Ladepunkte:  len(charging_sessions) * rated_power_kw
-        #   (3) (optional, nur generation) PV-Überschuss nach Basislast:
-        #         pv_surplus_kw = max(0, PV - Basislast)
+        # In generation wird PV zuerst für die Basislast genutzt.
+        # Übrig bleibt PV_Überschuss, der "kostenlos" für das Laden verfügbar ist.
         #
-        # Wichtig:
-        # - PV reduziert den Netzbezug, erhöht aber nicht das Importlimit.
-        # - Es wird deshalb immer mit min(...) gearbeitet, nicht "plus".
+        # Der Netzanschlusspunkt (NAP) begrenzt ausschließlich den Import aus dem Netz.
+        # Lokale Erzeugung erhöht das Importlimit nicht, sondern reduziert nur den Netzbezug.
         #
-        # In generation wird zuerst PV genutzt und der Rest (falls nötig) aus dem Netz,
-        # aber der Netzbezug bleibt durch grid_limit_p_avb_kw begrenzt.
+        # Regel:
+        #   - Ohne Notfall (keine kritische Session): Es wird nur mit PV_Überschuss geladen.
+        #   - Mit Notfall (mindestens eine kritische Session): PV_Überschuss + Netzimport bis NAP.
+        #
+        # Dadurch wird Netzbezug minimiert und Peaks oberhalb der Erzeugung entstehen
+        # nur dann, wenn das SoC-Ziel sonst nicht erreichbar wäre.
 
         charger_cap_kw = len(charging_sessions) * rated_power_kw
         import_cap_kw = grid_limit_p_avb_kw
+
+        # Notfallstatus: mindestens eine Session ist zeitkritisch
+        has_emergency = any(
+            float(s.get("_slack_minutes", 1e9)) <= emergency_slack_minutes
+            for s in charging_sessions
+        )
 
         if charging_strategy == "generation":
             pv_kw = _generation_kw_at(ts)
             base_kw = _base_load_kw_at(i)
             pv_surplus_kw = max(0.0, pv_kw - base_kw)
 
-            # Für die Ladeinfrastruktur ist maximal PV-Überschuss + Netzimport verfügbar,
-            # aber Netzimport bleibt auf import_cap_kw begrenzt.
-            max_site_power_kw = min(charger_cap_kw, pv_surplus_kw + import_cap_kw)
+            # Netzimport nur, wenn Notfall aktiv ist
+            extra_grid_kw = import_cap_kw if has_emergency else 0.0
+
+            max_site_power_kw = min(
+                charger_cap_kw,
+                pv_surplus_kw + extra_grid_kw,
+            )
         else:
-            # market / immediate: keine PV-Limitierung (nur Netzimport & Charger)
+            # market / immediate: Netzimport & Charger-Cap
             max_site_power_kw = min(charger_cap_kw, import_cap_kw)
 
-        # Fair-Share: gleichmäßige Verteilung der verfügbaren Gesamtleistung
         available_power_per_session_kw = max_site_power_kw / len(charging_sessions)
-
-        # ✅ MUSS immer hier initialisiert werden, bevor in der Session-Schleife addiert wird
         total_power_kw = 0.0
+
 
         # ---------------------------------------------------------------
         # 7.3) Pro Session: fahrzeugspezifische Leistung + Energiebedarf beachten
