@@ -1319,6 +1319,8 @@ def simulate_load_profile(
     charging_count_series: list[int] = []
     all_charging_sessions: list[dict[str, Any]] = []
 
+    debug_rows: list[dict[str, Any]] = []
+
 
     # ------------------------------------------------------------
     # 5d) Debug-Log (optional): protokolliert pro Zeitschritt, 
@@ -1589,6 +1591,58 @@ def simulate_load_profile(
 
 
         load_profile_kw[i] = total_power_kw
+
+        if record_debug:
+            # Für die Debug-Auswertung werden pro aktiv ladender Session Zeilen geschrieben.
+            # Diese Debug-Ausgabe wird nur befüllt, wenn record_debug=True gesetzt ist.
+            #
+            # Hinweis:
+            # - grid_limit_p_avb_kw ist das Importlimit aus dem Netz (NAP).
+            # - Lokale Erzeugung reduziert den Netzbezug, erhöht aber nicht das Importlimit.
+            # - Ein Netzbezug kann entstehen, wenn die Standortlast > PV-Überschuss ist.
+
+            pv_kw = 0.0
+            base_kw = 0.0
+            pv_surplus_kw = 0.0
+
+            if charging_strategy == "generation":
+                pv_kw = _generation_kw_at(ts)
+                base_kw = _base_load_kw_at(i)
+                pv_surplus_kw = max(0.0, pv_kw - base_kw)
+
+            grid_import_kw = max(0.0, total_power_kw - pv_surplus_kw)
+
+            has_any_emergency_this_step = any(
+                float(s.get("_slack_minutes", 1e9)) <= emergency_slack_minutes
+                for s in charging_sessions
+            )
+
+            for s in charging_sessions:
+                arrival_time = s["arrival_time"]
+                departure_time = s["departure_time"]
+                parking_hours = (departure_time - arrival_time).total_seconds() / 3600.0
+                slack_minutes = float(s.get("_slack_minutes", np.nan))
+                is_emergency = bool(slack_minutes <= emergency_slack_minutes) if not np.isnan(slack_minutes) else False
+
+                debug_rows.append(
+                    {
+                        "ts": ts,
+                        "vehicle_name": s.get("vehicle_name", ""),
+                        "vehicle_class": s.get("vehicle_class", ""),
+                        "arrival_time": arrival_time,
+                        "departure_time": departure_time,
+                        "parking_hours": parking_hours,
+                        "slack_minutes": slack_minutes,
+                        "is_emergency": is_emergency,
+                        "pv_kw": pv_kw,
+                        "base_kw": base_kw,
+                        "pv_surplus_kw": pv_surplus_kw,
+                        "site_total_power_kw": total_power_kw,
+                        "grid_import_kw": grid_import_kw,
+                        "has_any_emergency_this_step": has_any_emergency_this_step,
+                    }
+                )
+        
 
     # ------------------------------------------------------------
     # 8) Strategie-Status
