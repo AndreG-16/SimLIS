@@ -1457,50 +1457,46 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
             load_profile_kw[i] = 0.0
             continue
 
-
         # ---------------------------------------------------------------
         # 7.2) Standortleistung / Limits
         # ---------------------------------------------------------------
-        # Für immediate/market:
-        #   - Es wird wie bisher mit dem Importlimit (NAP) gearbeitet.
+        # Die maximal verfügbare Ladeleistung wird durch drei Grenzen bestimmt:
+        #   (1) Importlimit aus dem Netz (NAP): grid_limit_p_avb_kw
+        #   (2) Summe der aktiven Ladepunkte:  len(charging_sessions) * rated_power_kw
+        #   (3) (optional, nur generation) PV-Überschuss nach Basislast:
+        #         pv_surplus_kw = max(0, PV - Basislast)
         #
-        # Für generation (PV-first, Grid-min):
-        #   - PV wird zuerst für die nicht-flexible Last verwendet.
-        #   - Der verbleibende PV-Überschuss darf für EV-Laden genutzt werden.
-        #   - Der Netzanschlusspunkt (grid_limit_p_avb_kw) begrenzt weiterhin nur den Import aus dem Netz.
-        #   - Netzbezug wird für generation nur für Notfall-Sessions zugelassen (SoC-Ziel hat Vorrang).
+        # Wichtig:
+        # - PV reduziert den Netzbezug, erhöht aber nicht das Importlimit.
+        # - Es wird deshalb immer mit min(...) gearbeitet, nicht "plus".
         #
-        # Resultat:
-        #   - Nicht-Notfall lädt bei generation nur aus PV-Überschuss (Peak-Glättung).
-        #   - Netzimport entsteht nur, wenn Fahrzeuge sonst das SoC-Ziel verfehlen würden.
-        if charging_strategy != "generation":
-            max_site_power_kw = min(
-                grid_limit_p_avb_kw,
-                len(charging_sessions) * rated_power_kw,
-            )
-        else:
+        # In generation wird zuerst PV genutzt und der Rest (falls nötig) aus dem Netz,
+        # aber der Netzbezug bleibt durch grid_limit_p_avb_kw begrenzt.
+
+        charger_cap_kw = len(charging_sessions) * rated_power_kw
+        import_cap_kw = grid_limit_p_avb_kw
+
+        if charging_strategy == "generation":
             pv_kw = _generation_kw_at(ts)
             base_kw = _base_load_kw_at(i)
             pv_surplus_kw = max(0.0, pv_kw - base_kw)
 
-            # Es wird geprüft, ob im aktuellen Zeitschritt Notfall-Sessions dabei sind.
-            has_emergency = any(float(s.get("_slack_minutes", 1e9)) <= emergency_slack_minutes for s in charging_sessions)
+            # Für die Ladeinfrastruktur ist maximal PV-Überschuss + Netzimport verfügbar,
+            # aber Netzimport bleibt auf import_cap_kw begrenzt.
+            max_site_power_kw = min(charger_cap_kw, pv_surplus_kw + import_cap_kw)
+        else:
+            # market / immediate: keine PV-Limitierung (nur Netzimport & Charger)
+            max_site_power_kw = min(charger_cap_kw, import_cap_kw)
 
-            # Grid-Import nur, wenn Notfall vorhanden ist (SoC-Ziel hat Vorrang).
-            grid_budget_kw = grid_limit_p_avb_kw if has_emergency else 0.0
-
-            # Gesamtbudget = PV-Überschuss + (ggf.) Netzimport, aber zusätzlich durch Charger begrenzt
-            max_site_power_kw = min(
-                pv_surplus_kw + grid_budget_kw,
-                len(charging_sessions) * rated_power_kw,
-            )
-
+        # Fair-Share: gleichmäßige Verteilung der verfügbaren Gesamtleistung
         available_power_per_session_kw = max_site_power_kw / len(charging_sessions)
 
+        # ✅ MUSS immer hier initialisiert werden, bevor in der Session-Schleife addiert wird
+        total_power_kw = 0.0
 
-        # --------------------------------------------------------
-        # 7.3) Pro Session: Leistung + Energieübertragung
-        # --------------------------------------------------------
+        # ---------------------------------------------------------------
+        # 7.3) Pro Session: fahrzeugspezifische Leistung + Energiebedarf beachten
+        # ---------------------------------------------------------------
         for s in charging_sessions:
             vehicle_power_limit_kw = vehicle_power_at_soc(s)
 
