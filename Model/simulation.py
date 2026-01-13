@@ -942,21 +942,17 @@ def build_base_load_series(
     base_load_resolution_min: int = 15,
 ) -> np.ndarray | None:
     """
-    Baut eine Basislast-Zeitreihe aligned auf 'timestamps'.
+    Es wird eine Basislast-Zeitreihe aligned auf 'timestamps' erzeugt.
 
     Priorität:
-      1) base_load_csv (wenn gesetzt)  -> Zeitreihe aus CSV (intern kW)
-      2) base_load_kw  (wenn gesetzt)  -> konstante Grundlast (intern kW)
-      3) None                          -> keine Basislast
+      1) site.base_load_csv (wenn gesetzt)  -> Zeitreihe aus CSV (intern kW)
+      2) site.base_load_kw  (wenn gesetzt)  -> konstante Grundlast (intern kW)
+      3) None                               -> keine Basislast
 
     CSV-Annahmen (falls genutzt):
       - Spalte 1: Zeitstempel
-      - Spalte base_load_value_col: Basislastwert
-      - Einheit base_load_unit: 'kW' | 'kWh' | 'MWh'
-
-    Output:
-      - np.ndarray in kW (intern), Länge = len(timestamps)
-      - np.nan wenn CSV-Werte fehlen
+      - Spalte site.base_load_value_col: Basislastwert
+      - Einheit site.base_load_unit: 'kW' | 'kWh' | 'MWh'
     """
     if not timestamps:
         return None
@@ -991,7 +987,6 @@ def build_base_load_series(
             if v is None:
                 continue
 
-            # Normalisierung auf kW
             if base_load_unit == "kW":
                 series_kw[i] = float(v)
             elif base_load_unit == "kWh":
@@ -1012,6 +1007,7 @@ def build_base_load_series(
     # 3) Keine Basislast konfiguriert
     # ------------------------------------------------------------
     return None
+
 
 # =============================================================================
 # 8) Slot-basierte Heuristik (Best Slot innerhalb der Standzeit)
@@ -1250,19 +1246,71 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
     n_steps = len(time_index)
     load_profile_kw = np.zeros(n_steps, dtype=float)
 
-    grid_limit_p_avb_kw = scenario["site"]["grid_limit_p_avb_kw"]  # Importlimit aus dem Netz (NAP)
+    # grid_limit_p_avb_kw ist hier als Importlimit aus dem öffentlichen Netz interpretiert (NAP-Importlimit).
+    # Lokale Erzeugung (PV) reduziert den Netzbezug, erhöht aber nicht das Importlimit.
+    grid_limit_p_avb_kw = scenario["site"]["grid_limit_p_avb_kw"]
     rated_power_kw = scenario["site"]["rated_power_kw"]
     number_of_chargers = scenario["site"]["number_chargers"]
     charger_efficiency = scenario["site"]["charger_efficiency"]
 
-    # Basislastreihe wird nur für generation benötigt (optional)
-    base_load_kw_series = None
+    # -------------------------------------------------------------------
+    # 5b) Basislast (nicht-flexible Last) vorbereiten (relevant für generation)
+    # -------------------------------------------------------------------
+    # Es wird eine Zeitreihe base_load_series[t] (kW) aufgebaut:
+    #   - aus CSV (site.base_load_csv) oder
+    #   - konstant (site.base_load_kw)
+    # Wenn beides fehlt, wird base_load_series = None und Basislast = 0 kW angenommen.
+    #
+    # Die Basislast wird später von der lokalen Erzeugung abgezogen:
+    #   PV_Überschuss = max(0, PV - Basislast)
+    base_load_series = None
     if charging_strategy == "generation":
-        base_load_kw_series = build_base_load_series(
+        base_load_series = build_base_load_series(
             scenario=scenario,
             timestamps=time_index,
             base_load_resolution_min=STRATEGY_RESOLUTION_MIN,
         )
+
+    def _base_load_kw_at(i: int) -> float:
+        """Gibt die Basislast (kW) für den Zeitschritt i zurück (NaN/None -> 0)."""
+        if base_load_series is None:
+            return 0.0
+        v = float(base_load_series[i])
+        return 0.0 if np.isnan(v) else max(0.0, v)
+
+    def _generation_kw_at(ts: datetime) -> float:
+        """
+        Gibt die lokale Erzeugung (kW) für den Zeitschritt ts zurück.
+        Fehlende/NaN-Werte werden als 0 interpretiert.
+        """
+        if charging_strategy != "generation":
+            return 0.0
+        if not strategy_map:
+            return 0.0
+
+        raw = lookup_signal(strategy_map, ts, STRATEGY_RESOLUTION_MIN)
+        if raw is None:
+            return 0.0
+
+        return max(
+            0.0,
+            float(
+                convert_strategy_value_to_internal(
+                    charging_strategy="generation",
+                    raw_value=float(raw),
+                    strategy_unit=strategy_unit,
+                    step_hours=strategy_step_hours,
+                )
+            ),
+        )
+
+    # -------------------------------------------------------------------
+    # 5c) Strategieparameter (zentral definiert, im ganzen Loop verfügbar)
+    # -------------------------------------------------------------------
+    # emergency_slack_minutes definiert, ab welchem zeitlichen Puffer (Slack)
+    # eine Session als kritisch gilt und unabhängig von PV/Preis laden darf.
+    strategy_params = site_cfg.get("strategy_params", {}) or {}
+    emergency_slack_minutes = float(strategy_params.get("emergency_slack_minutes", 60.0))
 
     charging_count_series: list[int] = []
     all_charging_sessions: list[dict[str, Any]] = []
@@ -1364,9 +1412,21 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
                     if i in window:
                         slot_candidates.append(s)
                 else:
-                    # Generation: Standardmäßig wird nur der jeweils beste noch kommende Slot akzeptiert.
                     if ptr < len(pref) and pref[ptr] == i:
-                        slot_candidates.append(s)
+                        # Für generation werden flexible (nicht-Notfall) Sessions nur dann als Kandidaten zugelassen,
+                        # wenn im aktuellen Zeitschritt tatsächlich PV-Überschuss verfügbar ist.
+                        # Dadurch wird vermieden, dass ohne Not Netzbezug entsteht und Peaks > PV auftreten.
+                        if charging_strategy == "generation":
+                            pv_kw = _generation_kw_at(ts)
+                            base_kw = _base_load_kw_at(i)
+                            pv_surplus_kw = max(0.0, pv_kw - base_kw)
+
+                            if pv_surplus_kw > 1e-6:
+                                slot_candidates.append(s)
+                        else:
+                            # market bleibt unverändert: Slot-Kandidat rein nach Preispräferenz
+                            slot_candidates.append(s)
+
 
             # Kandidatenliste: Notfälle zuerst, danach Slot-Kandidaten (ohne Duplikate)
             seen = set()
@@ -1397,51 +1457,46 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
             load_profile_kw[i] = 0.0
             continue
 
-        # --------------------------------------------------------
-        # 7.2) Standortlimit (NAP, Charger, optional PV/Basislast)
-        # --------------------------------------------------------
-        # Grundsätzlich wird die Gesamtleistung durch die Ladehardware begrenzt:
-        charger_cap_kw = len(charging_sessions) * rated_power_kw
 
-        # NAP begrenzt den Import aus dem Netz. Lokale Erzeugung erhöht dieses Importlimit nicht,
-        # sondern reduziert den erforderlichen Netzbezug bei gegebener EV-Leistung.
-        nap_import_limit_kw = grid_limit_p_avb_kw
+        # ---------------------------------------------------------------
+        # 7.2) Standortleistung / Limits
+        # ---------------------------------------------------------------
+        # Für immediate/market:
+        #   - Es wird wie bisher mit dem Importlimit (NAP) gearbeitet.
+        #
+        # Für generation (PV-first, Grid-min):
+        #   - PV wird zuerst für die nicht-flexible Last verwendet.
+        #   - Der verbleibende PV-Überschuss darf für EV-Laden genutzt werden.
+        #   - Der Netzanschlusspunkt (grid_limit_p_avb_kw) begrenzt weiterhin nur den Import aus dem Netz.
+        #   - Netzbezug wird für generation nur für Notfall-Sessions zugelassen (SoC-Ziel hat Vorrang).
+        #
+        # Resultat:
+        #   - Nicht-Notfall lädt bei generation nur aus PV-Überschuss (Peak-Glättung).
+        #   - Netzimport entsteht nur, wenn Fahrzeuge sonst das SoC-Ziel verfehlen würden.
+        if charging_strategy != "generation":
+            max_site_power_kw = min(
+                grid_limit_p_avb_kw,
+                len(charging_sessions) * rated_power_kw,
+            )
+        else:
+            pv_kw = _generation_kw_at(ts)
+            base_kw = _base_load_kw_at(i)
+            pv_surplus_kw = max(0.0, pv_kw - base_kw)
 
-        # Standardfall (immediate/market): Es wird ein reines NAP+Charger-Limit genutzt.
-        max_site_power_kw = min(nap_import_limit_kw, charger_cap_kw)
+            # Es wird geprüft, ob im aktuellen Zeitschritt Notfall-Sessions dabei sind.
+            has_emergency = any(float(s.get("_slack_minutes", 1e9)) <= emergency_slack_minutes for s in charging_sessions)
 
-        if charging_strategy == "generation":
-            # Bei generation wird zusätzlich ein PV-Freigabefenster gebildet:
-            #   PV_free = max(0, PV - Basislast)
-            # und die EV-Leistung darf PV_free + NAP nicht überschreiten.
-            # Dadurch wird der Netzbezug minimiert, bleibt aber möglich.
-            pv_kw = 0.0
-            if strategy_map is not None:
-                sig_raw = lookup_signal(strategy_map, ts, STRATEGY_RESOLUTION_MIN)
-                if sig_raw is not None:
-                    pv_kw = convert_strategy_value_to_internal(
-                        charging_strategy="generation",
-                        raw_value=float(sig_raw),
-                        strategy_unit=strategy_unit,
-                        step_hours=strategy_step_hours,
-                    )
+            # Grid-Import nur, wenn Notfall vorhanden ist (SoC-Ziel hat Vorrang).
+            grid_budget_kw = grid_limit_p_avb_kw if has_emergency else 0.0
 
-            base_kw = 0.0
-            if base_load_kw_series is not None and i < len(base_load_kw_series):
-                v = base_load_kw_series[i]
-                base_kw = float(v) if np.isfinite(v) else 0.0
+            # Gesamtbudget = PV-Überschuss + (ggf.) Netzimport, aber zusätzlich durch Charger begrenzt
+            max_site_power_kw = min(
+                pv_surplus_kw + grid_budget_kw,
+                len(charging_sessions) * rated_power_kw,
+            )
 
-            pv_free_kw = max(0.0, pv_kw - base_kw)
-
-            # EV-Leistung ist begrenzt durch:
-            #   - Charger-Limit
-            #   - (PV_free + Importlimit)
-            max_site_power_kw = min(charger_cap_kw, pv_free_kw + nap_import_limit_kw)
-
-        # Fair-Share: verfügbare Standortleistung wird gleichmäßig auf aktive Sessions verteilt.
         available_power_per_session_kw = max_site_power_kw / len(charging_sessions)
 
-        total_power_kw = 0.0
 
         # --------------------------------------------------------
         # 7.3) Pro Session: Leistung + Energieübertragung
