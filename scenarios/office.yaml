@@ -22,6 +22,14 @@ site:
   strategy_value_col: 3                                       # Spalte, die entsprechende Werte ("€/MWh", "MWh", o.ä.) enthalten, woran sich die Lademanagementstrategie richtet (1-basierter Code: 1 = erste Spalte)
   strategy_unit: "€/MWh"                                         # Einheit, die für den Wert im Lademanagement verwendet wird ("MWh", "kWh", "kW", "€/MWh")
   
+  # Option A: konstante Grundlast (kW)
+  base_load_kw: 100
+  
+  # Option B: Grundlast aus CSV-Datei (hat Vorrang gegenüber Option A)
+  base_load_csv: "../data/loads/base_load.csv"                # optional; nur für "generation"
+  base_load_value_col: 2                                      #  1-basiert (1=Zeit, 2..n=Wert)
+  base_load_unit: "kW"                                        # Einheit, die für den Wert der Grundlast verwendet wird ("kW", "kWh", "MWh")
+   
   allow_cross_day_charging: false                             # Ermöglicht keine Ladungen über Mitternacht hinaus
 
 # Fuhrparkbeschreibung – Ladekurven + Kapazitäten kommen aus CSV
