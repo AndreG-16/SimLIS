@@ -1133,7 +1133,11 @@ def _build_preferred_slots_for_all_sessions(
 # 9) Hauptsimulation / Orchestrierung der Lastgangberechnung
 # =============================================================================
 
-def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None):
+def simulate_load_profile(
+    scenario: dict,
+    start_datetime: datetime | None = None,
+    record_debug: bool = False,
+):
     """
     Führt die Lastgang-Simulation durch.
 
@@ -1314,6 +1318,14 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
 
     charging_count_series: list[int] = []
     all_charging_sessions: list[dict[str, Any]] = []
+
+
+    # ------------------------------------------------------------
+    # 5d) Debug-Log (optional): protokolliert pro Zeitschritt, 
+    # welche Sessions laden und ob dabei Netzbezug entsteht.
+    # ------------------------------------------------------------
+    debug_rows: list[dict[str, Any]] = []
+   
 
     # ------------------------------------------------------------
     # 6) Tagesweise Ladesessions erzeugen
@@ -1533,6 +1545,49 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
             s["delivered_energy_kwh"] += energy_delivered
             total_power_kw += actual_power_kw
 
+        # ---------------------------------------------------------------
+        # Debug: Netzbezug je Zeitschritt + Session-Details loggen
+        # ---------------------------------------------------------------
+        if record_debug:
+            # PV-Überschuss nur für generation relevant (sonst 0)
+            pv_kw = _generation_kw_at(ts) if charging_strategy == "generation" else 0.0
+            base_kw = _base_load_kw_at(i) if charging_strategy == "generation" else 0.0
+            pv_surplus_kw = max(0.0, pv_kw - base_kw) if charging_strategy == "generation" else 0.0
+
+            # Netzbezug-Definition:
+            # - In generation wird erst PV-Überschuss genutzt, Rest ist Netzimport.
+            # - In market/immediate entspricht "Netzbezug" hier einfach der Last (vereinfachte Sicht).
+            if charging_strategy == "generation":
+                grid_import_kw = max(0.0, total_power_kw - pv_surplus_kw)
+            else:
+                grid_import_kw = max(0.0, total_power_kw)
+
+            has_emergency = any(
+                float(s.get("_slack_minutes", 1e9)) <= emergency_slack_minutes for s in charging_sessions
+            )
+
+            for s in charging_sessions:
+                debug_rows.append(
+                    {
+                        "ts": ts,
+                        "vehicle_name": s.get("vehicle_name"),
+                        "vehicle_class": s.get("vehicle_class"),
+                        "arrival_time": s.get("arrival_time"),
+                        "departure_time": s.get("departure_time"),
+                        "parking_hours": (s["departure_time"] - s["arrival_time"]).total_seconds() / 3600.0,
+                        "slack_minutes": float(s.get("_slack_minutes", np.nan)),
+                        "is_emergency": bool(float(s.get("_slack_minutes", 1e9)) <= emergency_slack_minutes),
+                        "charging_strategy": charging_strategy,
+                        "site_total_power_kw": float(total_power_kw),
+                        "pv_kw": float(pv_kw),
+                        "base_kw": float(base_kw),
+                        "pv_surplus_kw": float(pv_surplus_kw),
+                        "grid_import_kw": float(grid_import_kw),
+                        "has_any_emergency_this_step": bool(has_emergency),
+                    }
+                )
+
+
         load_profile_kw[i] = total_power_kw
 
     # ------------------------------------------------------------
@@ -1556,4 +1611,5 @@ def simulate_load_profile(scenario: dict, start_datetime: datetime | None = None
         holiday_dates,
         charging_strategy,
         strategy_status,
+        debug_rows if record_debug else None,
     )
