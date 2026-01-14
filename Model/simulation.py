@@ -1478,74 +1478,186 @@ def simulate_load_profile(
             continue
 
         # ---------------------------------------------------------------
-        # 7.2) Standortleistung / Limits
+        # 7.2–7.3) Leistungsbudget & Verteilung (GENERATION: PV priorisiert)
         # ---------------------------------------------------------------
-        # Bei generation gilt:
-        #   - PV wird zuerst für Basislast genutzt, Rest = PV-Überschuss.
-        #   - Ohne Notfall wird Netzbezug minimiert => Laden nur aus PV-Überschuss.
-        #   - Mit Notfall darf zusätzlich Netz bezogen werden, aber Import ist durch NAP begrenzt.
+        # Ziel:
+        #   - SoC-Ziel bleibt oberste Priorität (Emergency darf Netz beziehen).
+        #   - Netzbezug für Non-Emergency ist KOMPLETT verboten.
         #
-        # NAP begrenzt nur den Netzimport. PV erhöht nicht das Importlimit, reduziert aber den Importbedarf.
+        # Interpretation der Grenzen:
+        #   - grid_limit_p_avb_kw ist das Importlimit aus dem öffentlichen Netz (NAP).
+        #     Lokale Erzeugung erhöht dieses Importlimit NICHT, sie reduziert nur den
+        #     notwendigen Netzbezug.
+        #   - Charger-Limit: Summe der aktiven Ladepunkte (N_active * rated_power_kw).
         #
-        # Gesamtleistung wird außerdem durch aktive Charger (N_active * CP) begrenzt.
+        # Konsequenz:
+        #   - In generation:
+        #       * PV zuerst: pv_surplus_kw = max(0, generation_kw - base_load_kw)
+        #       * Emergency darf zusätzlich Netz bis zum Importlimit nutzen.
+        #       * Non-Emergency darf NUR pv_surplus_kw nutzen (kein Netz).
+        #   - In market/immediate bleibt die klassische Fair-Share-Logik bestehen.
 
-        has_emergency = any(
-            float(s.get("_slack_minutes", 1e9)) <= emergency_slack_minutes for s in charging_sessions
-        )
+        total_power_kw = 0.0  # Gesamtleistung aller aktiven Sessions in diesem Zeitschritt
 
         if charging_strategy == "generation":
-            pv_kw = _generation_kw_at(ts)
-            base_kw = _base_load_kw_at(i)
-            pv_surplus_kw = max(0.0, pv_kw - base_kw)
+            # -----------------------------
+            # (A) PV-Überschuss bestimmen
+            # -----------------------------
+            base_kw = _base_load_kw_at(i)                    # nicht-flexible Last
+            gen_kw = _generation_kw_at(ts)                   # lokale Erzeugung (z.B. PV)
+            pv_surplus_kw = max(0.0, gen_kw - base_kw)       # nur dieser Anteil steht EV "PV-only" zur Verfügung
 
-            # maximal mögliche Leistung aus Sicht der Hardware (Charger)
-            charger_cap_kw = len(charging_sessions) * rated_power_kw
+            # Gesamtleistung, die die aktiven Charger physikalisch maximal abgeben könnten
+            charger_budget_kw = len(charging_sessions) * rated_power_kw
 
-            if has_emergency:
-                # Notfall: PV + Netzimport (Netzimport bis NAP)
-                max_site_power_kw = min(charger_cap_kw, pv_surplus_kw + grid_limit_p_avb_kw)
-            else:
-                # Normalfall: Netzbezug minimieren => Laden nur aus PV-Überschuss
-                max_site_power_kw = min(charger_cap_kw, pv_surplus_kw)
+            # Grid-Importbudget ist vorhanden, aber darf NUR für Emergency genutzt werden
+            grid_budget_kw = max(0.0, float(grid_limit_p_avb_kw))
+
+            # Emergency-Flag je Session (Slack wurde bereits berechnet und in _slack_minutes gespeichert)
+            emergency_sessions = [
+                s for s in charging_sessions
+                if float(s.get("_slack_minutes", 1e9)) <= emergency_slack_minutes
+            ]
+            non_emergency_sessions = [
+                s for s in charging_sessions
+                if float(s.get("_slack_minutes", 1e9)) > emergency_slack_minutes
+            ]
+
+            # -----------------------------
+            # (B) Emergency zuerst bedienen
+            # -----------------------------
+            # Emergency darf PV + Netz nutzen, aber begrenzt durch Chargerbudget
+            pv_budget_kw = pv_surplus_kw
+
+            charger_budget_remaining_kw = charger_budget_kw
+
+            if emergency_sessions:
+                # Budget, das Emergency maximal nutzen darf:
+                #   - PV + Grid (Grid nur hier erlaubt)
+                emergency_budget_kw = min(
+                    charger_budget_remaining_kw,
+                    pv_budget_kw + grid_budget_kw
+                )
+
+                # Fair-Share innerhalb Emergency-Gruppe
+                available_per_emergency_kw = emergency_budget_kw / len(emergency_sessions)
+
+                emergency_power_used_kw = 0.0
+
+                for s in emergency_sessions:
+                    vehicle_power_limit_kw = vehicle_power_at_soc(s)
+
+                    allowed_power_kw = min(
+                        available_per_emergency_kw,
+                        rated_power_kw,
+                        vehicle_power_limit_kw,
+                        s["max_charging_power_kw"],
+                    )
+
+                    possible_energy_kwh = allowed_power_kw * time_step_hours * charger_efficiency
+                    energy_needed = s["energy_required_kwh"]
+
+                    if possible_energy_kwh >= energy_needed:
+                        energy_delivered = energy_needed
+                        s["energy_required_kwh"] = 0.0
+                        actual_power_kw = energy_delivered / (time_step_hours * charger_efficiency)
+                    else:
+                        energy_delivered = possible_energy_kwh
+                        s["energy_required_kwh"] -= possible_energy_kwh
+                        actual_power_kw = allowed_power_kw
+
+                    s["delivered_energy_kwh"] += energy_delivered
+                    emergency_power_used_kw += actual_power_kw
+                    total_power_kw += actual_power_kw
+
+                # Budgets aktualisieren:
+                # PV wird zuerst verwendet, Rest (falls nötig) kommt aus dem Netz (nur Emergency)
+                pv_used_by_emergency_kw = min(pv_budget_kw, emergency_power_used_kw)
+                pv_budget_kw = max(0.0, pv_budget_kw - pv_used_by_emergency_kw)
+
+                # Chargerbudget reduzieren (physikalische Abgabeleistung)
+                charger_budget_remaining_kw = max(0.0, charger_budget_remaining_kw - emergency_power_used_kw)
+
+            # -----------------------------
+            # (C) Non-Emergency: PV-only
+            # -----------------------------
+            # Non-Emergency darf ausschließlich den verbleibenden PV-Überschuss nutzen
+            if non_emergency_sessions and pv_budget_kw > 1e-9 and charger_budget_remaining_kw > 1e-9:
+                non_em_budget_kw = min(pv_budget_kw, charger_budget_remaining_kw)
+                available_per_non_em_kw = non_em_budget_kw / len(non_emergency_sessions)
+
+                non_em_power_used_kw = 0.0
+
+                for s in non_emergency_sessions:
+                    vehicle_power_limit_kw = vehicle_power_at_soc(s)
+
+                    allowed_power_kw = min(
+                        available_per_non_em_kw,
+                        rated_power_kw,
+                        vehicle_power_limit_kw,
+                        s["max_charging_power_kw"],
+                    )
+
+                    # PV-only: wenn PV-Budget knapp ist, begrenzt allowed_power_kw automatisch
+                    possible_energy_kwh = allowed_power_kw * time_step_hours * charger_efficiency
+                    energy_needed = s["energy_required_kwh"]
+
+                    if possible_energy_kwh >= energy_needed:
+                        energy_delivered = energy_needed
+                        s["energy_required_kwh"] = 0.0
+                        actual_power_kw = energy_delivered / (time_step_hours * charger_efficiency)
+                    else:
+                        energy_delivered = possible_energy_kwh
+                        s["energy_required_kwh"] -= possible_energy_kwh
+                        actual_power_kw = allowed_power_kw
+
+                    s["delivered_energy_kwh"] += energy_delivered
+                    non_em_power_used_kw += actual_power_kw
+                    total_power_kw += actual_power_kw
+
+                # PV-Budget reduzieren (Netz ist hier verboten)
+                pv_budget_kw = max(0.0, pv_budget_kw - non_em_power_used_kw)
+
+            # Ergebnis für diesen Zeitschritt
+            load_profile_kw[i] = total_power_kw
 
         else:
-            # Immediate/Market: klassische Begrenzung über Netzanschluss (Importlimit) + Charger
+            # ---------------------------------------------------------------
+            # Fallback für immediate/market: klassische Fair-Share-Logik
+            # ---------------------------------------------------------------
             max_site_power_kw = min(
                 grid_limit_p_avb_kw,
                 len(charging_sessions) * rated_power_kw,
             )
+            available_power_per_session_kw = max_site_power_kw / len(charging_sessions)
 
-        available_power_per_session_kw = max_site_power_kw / len(charging_sessions)
-        total_power_kw = 0.0
+            for s in charging_sessions:
+                vehicle_power_limit_kw = vehicle_power_at_soc(s)
 
+                allowed_power_kw = min(
+                    available_power_per_session_kw,
+                    rated_power_kw,
+                    vehicle_power_limit_kw,
+                    s["max_charging_power_kw"],
+                )
 
-        # ---------------------------------------------------------------
-        # 7.3) Pro Session: fahrzeugspezifische Leistung + Energiebedarf beachten
-        # ---------------------------------------------------------------
-        for s in charging_sessions:
-            vehicle_power_limit_kw = vehicle_power_at_soc(s)
+                possible_energy_kwh = allowed_power_kw * time_step_hours * charger_efficiency
+                energy_needed = s["energy_required_kwh"]
 
-            allowed_power_kw = min(
-                available_power_per_session_kw,
-                rated_power_kw,
-                vehicle_power_limit_kw,
-                s["max_charging_power_kw"],
-            )
+                if possible_energy_kwh >= energy_needed:
+                    energy_delivered = energy_needed
+                    s["energy_required_kwh"] = 0.0
+                    actual_power_kw = energy_delivered / (time_step_hours * charger_efficiency)
+                else:
+                    energy_delivered = possible_energy_kwh
+                    s["energy_required_kwh"] -= possible_energy_kwh
+                    actual_power_kw = allowed_power_kw
 
-            possible_energy_kwh = allowed_power_kw * time_step_hours * charger_efficiency
-            energy_needed = s["energy_required_kwh"]
+                s["delivered_energy_kwh"] += energy_delivered
+                total_power_kw += actual_power_kw
 
-            if possible_energy_kwh >= energy_needed:
-                energy_delivered = energy_needed
-                s["energy_required_kwh"] = 0.0
-                actual_power_kw = energy_delivered / (time_step_hours * charger_efficiency)
-            else:
-                energy_delivered = possible_energy_kwh
-                s["energy_required_kwh"] -= possible_energy_kwh
-                actual_power_kw = allowed_power_kw
+            load_profile_kw[i] = total_power_kw
 
-            s["delivered_energy_kwh"] += energy_delivered
-            total_power_kw += actual_power_kw
 
         # ---------------------------------------------------------------
         # Debug: Netzbezug je Zeitschritt + Session-Details loggen
