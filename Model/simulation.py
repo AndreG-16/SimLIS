@@ -1696,12 +1696,24 @@ def simulate_load_profile(
                 slack_minutes = float(s.get("_slack_minutes", np.nan))
                 is_emergency = bool(slack_minutes <= emergency_slack_minutes)
 
-                # Netzanteil pro Session: nur Emergency bekommt Netz (gemäß deiner Regel)
-                grid_import_kw_session = 0.0
+                # -------------------------------------------------------
+                # Netzanteile pro Session (2 Sichten!)
+                #
+                # (1) physical: Attribution des Standort-Netzimports proportional zur Session-Leistung.
+                #     Das beantwortet: "Welche Fahrzeuge haben in einem Import-Zeitschritt geladen?"
+                #
+                # (2) policy: Netzimport wird nur Emergency-Sessions zugeschrieben (Regel-Logik).
+                #     Das beantwortet: "Welche Fahrzeuge mussten laut Policy aus dem Netz laden dürfen?"
+                # -------------------------------------------------------
+                session_power_kw = float(s.get("_actual_power_kw", 0.0))
+
+                grid_import_kw_session_physical = 0.0
+                if charging_strategy == "generation" and total_power_kw > 1e-9:
+                    grid_import_kw_session_physical = site_grid_import_kw * (session_power_kw / float(total_power_kw))
+
+                grid_import_kw_session_policy = 0.0
                 if charging_strategy == "generation" and is_emergency and emergency_power_kw > 1e-9:
-                    grid_import_kw_session = site_grid_import_kw * (
-                        float(s.get("_actual_power_kw", 0.0)) / emergency_power_kw
-                    )
+                    grid_import_kw_session_policy = site_grid_import_kw * (session_power_kw / emergency_power_kw)
 
                 debug_rows.append(
                     {
@@ -1718,7 +1730,8 @@ def simulate_load_profile(
                         "pv_surplus_kw": float(pv_surplus_kw),
                         "site_total_power_kw": float(total_power_kw),
                         "grid_import_kw_site": float(site_grid_import_kw),
-                        "grid_import_kw_session": float(grid_import_kw_session),
+                        "grid_import_kw_session_physical": float(grid_import_kw_session_physical),
+                        "grid_import_kw_session_policy": float(grid_import_kw_session_policy),
                         "has_any_emergency_this_step": bool(has_any_emergency_this_step),
                     }
                 )
