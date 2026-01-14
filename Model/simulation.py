@@ -1592,14 +1592,18 @@ def simulate_load_profile(
     # ------------------------------------------------------------
     # 7) Zeitschrittweise Simulation (mit FIFO-Belegung der Ladepunkte)
     # ------------------------------------------------------------
+    # In dieser Schleife wird pro Zeitschritt:
+    #   (A) physische Belegung der Ladepunkte (FIFO) aktualisiert,
+    #   (B) die Strategie-Logik auf die physisch angeschlossenen Sessions angewandt,
+    #   (C) die Leistung verteilt und die Session-Energien fortgeschrieben.
     for i, ts in enumerate(time_index):
 
         # --------------------------------------------------------
-        # 7.0) Ladepunkte freigeben (Abfahrt oder optional: fertig geladen)
+        # 7.0) Ladepunkte freigeben (Abfahrt oder zeitverzögertes Abstecken nach Ladeende)
         # --------------------------------------------------------
         # Ein Ladepunkt wird frei, wenn das Fahrzeug abfährt.
-        # Optional wird ein Ladepunkt zusätzlich frei, wenn das Fahrzeug sein Ziel erreicht hat
-        # (disconnect_when_full = True).
+        # Optional wird ein Ladepunkt frei, wenn das Fahrzeug fertig geladen ist und
+        # die konfigurierte Verzögerung (disconnect_delay_hours) abgelaufen ist.
         for c in range(len(chargers)):
             s = chargers[c]
             if s is None:
@@ -1610,12 +1614,10 @@ def simulate_load_profile(
             finished = float(s.get("energy_required_kwh", 0.0)) <= 1e-9
             finished_time = s.get("finished_charging_time", None)
 
-            # Entscheidung: darf Fahrzeug abstecken?
             disconnect_allowed = False
-
-            if finished and disconnect_delay_hours is not None and finished_time is not None:
+            if finished and (disconnect_delay_hours is not None) and (finished_time is not None):
                 elapsed_h = (ts - finished_time).total_seconds() / 3600.0
-                if elapsed_h >= disconnect_delay_hours:
+                if elapsed_h >= float(disconnect_delay_hours):
                     disconnect_allowed = True
 
             if departed or disconnect_allowed:
@@ -1624,17 +1626,16 @@ def simulate_load_profile(
         # --------------------------------------------------------
         # 7.0b) Neue Ankünfte in FIFO-Warteschlange aufnehmen
         # --------------------------------------------------------
-        # Alle Sessions, deren Ankunft <= aktueller Zeitschritt, werden „angekommen“.
-        # Sie gehen zuerst in die Warteschlange und werden dann FIFO ggf. auf freie Ladepunkte gesteckt.
-        while next_arrival_idx < len(all_charging_sessions) and all_charging_sessions[next_arrival_idx]["arrival_time"] <= ts:
+        while (
+            next_arrival_idx < len(all_charging_sessions)
+            and all_charging_sessions[next_arrival_idx]["arrival_time"] <= ts
+        ):
             waiting_queue.append(all_charging_sessions[next_arrival_idx])
             next_arrival_idx += 1
 
         # --------------------------------------------------------
         # 7.0c) FIFO-Zuweisung auf freie Ladepunkte (physisches „Stecken“)
         # --------------------------------------------------------
-        # Freie Ladepunkte werden in fixer Reihenfolge gefüllt (FIFO).
-        # Dadurch kann ein später ankommendes Fahrzeug keinen bereits belegten Punkt verdrängen.
         for c in range(len(chargers)):
             if chargers[c] is not None:
                 continue
@@ -1643,7 +1644,7 @@ def simulate_load_profile(
 
             s = waiting_queue.popleft()
 
-            # Fahrzeuge ohne Ladebedarf werden nicht gesteckt (oder werden sofort als „fertig“ betrachtet).
+            # Fahrzeuge ohne Ladebedarf werden nicht gesteckt.
             if float(s.get("energy_required_kwh", 0.0)) <= 1e-9:
                 continue
 
@@ -1652,16 +1653,14 @@ def simulate_load_profile(
             s["_plug_in_time"] = ts
 
         # --------------------------------------------------------
-        # 7.0d) „Anwesende Sessions“ = physisch angeschlossene Sessions
+        # 7.0d) „Anwesende Sessions“ = physisch angeschlossene Sessions mit Restbedarf
         # --------------------------------------------------------
-        # In diesem Modell sind nur Fahrzeuge aktiv steuerbar, die physisch eingesteckt sind.
         plugged_sessions = [s for s in chargers if s is not None]
 
-        # Nur angeschlossene Sessions mit Restbedarf sind relevant fürs Scheduling.
         present_sessions = [
             s for s in plugged_sessions
             if s["arrival_time"] <= ts < s["departure_time"]
-            and float(s.get("energy_required_kwh", 0.0)) > 0.0
+            and float(s.get("energy_required_kwh", 0.0)) > 1e-9
         ]
 
         if not present_sessions:
@@ -1669,65 +1668,34 @@ def simulate_load_profile(
             charging_count_series.append(0)
             continue
 
-
         # --------------------------------------------------------
-        # 7.1) Auswahl der zu ladenden Sessions
+        # 7.1) Auswahl der zu ladenden Sessions (innerhalb der physisch angeschlossenen)
         # --------------------------------------------------------
+        # Es wird weiterhin strategiebasiert entschieden, welche der eingesteckten Fahrzeuge
+        # tatsächlich Leistung bekommen.
         charging_sessions: list[dict[str, Any]] = []
 
         if charging_strategy == "immediate":
-            # Bei immediate werden die Sessions mit frühester Abfahrt priorisiert.
+            # Immediate priorisiert die früheste Abfahrt, damit Deadlines eingehalten werden.
             present_sessions.sort(key=lambda s: (s["departure_time"], s["arrival_time"]))
             charging_sessions = present_sessions[:number_of_chargers]
 
-        else:
-            # Für market/generation werden Kandidatenlisten aufgebaut:
-            #   A) emergency: zeitkritisch => es wird unabhängig vom Preis/PV geladen.
-            #   B) slot_candidates: es wird im "gewünschten" Slot geladen.
-            #
-            # Erweiterung (generation):
-            #   Wenn PV-Überschuss > 0 vorliegt und keine Notfall-Session aktiv ist,
-            #   werden anwesende Sessions als Kandidaten zugelassen, auch wenn es nicht exakt
-            #   ein Wunschslot ist. Dadurch wird PV-Überschuss besser genutzt und späterer
-            #   Netzbezug vermieden bzw. reduziert.
-
-            emergency: list[dict[str, Any]] = []
-            slot_candidates: list[dict[str, Any]] = []
-
-            # PV-Überschuss im aktuellen Zeitschritt (nur relevant für generation)
-            pv_surplus_kw = 0.0
-        if charging_strategy == "generation":
+        elif charging_strategy == "generation":
             # ---------------------------------------------------------------
             # GENERATION (kombiniert): PV-Reservation + Grid-Only-If-Necessary
             # ---------------------------------------------------------------
-            # Die Logik arbeitet in 3 Stufen:
-            # (1) Rolling-Horizon PV-Reservation (Planung):
-            #     Es wird geprüft, welche Sessions ihren Restbedarf vollständig aus
-            #     zukünftigem PV-Überschuss decken könnten. Für diese Sessions wird
-            #     Grid gesperrt.
-            #
-            # (2) Auswahl aktiver Sessions (Charger-Limit):
-            #     Sessions, die PV nicht vollständig abdecken kann, werden als
-            #     "grid-needed" priorisiert, damit Ziel-SoC nicht verfehlt wird.
-            #
-            # (3) Leistungsverteilung:
-            #     - PV wird zuerst verteilt (PV-only Sessions zuerst).
-            #     - Grid wird ausschließlich für grid-needed Sessions genutzt.
-            #
-            # Hinweis:
-            # - Diese Heuristik ist Rolling-Horizon: die PV-Planung bezieht sich
-            #   immer auf „jetzt bis Abfahrt“ und wird pro Zeitschritt neu bewertet.
 
             # (A) PV-Überschuss im aktuellen Zeitschritt (kW)
             base_kw_now = _base_load_kw_at(i)
             gen_kw_now = _generation_kw_at(ts)
             pv_surplus_kw_now = max(0.0, gen_kw_now - base_kw_now)
 
-            # (B) Rolling-Horizon PV-Reservation + Grid-Feasibility
-            #     Es wird auf Basis pv_surplus_series_kw entschieden, ob PV in der Restzeit reichen könnte.
-            if pv_surplus_series_kw is None:
+            # (B) PV-Surplus-Zeitreihe als Rolling-Horizon-Input (Fallback = 0)
+            if "pv_surplus_series_kw" not in locals() or pv_surplus_series_kw is None:
                 pv_surplus_series_kw = np.zeros(len(time_index), dtype=float)
 
+            # (C) Rolling-Horizon PV-Reservation:
+            #     Es wird entschieden, welche Sessions den Restbedarf vollständig aus zukünftigem PV decken könnten.
             pv_commit_kw, grid_needed_ids = _plan_pv_commitments_for_present_sessions(
                 present_sessions=present_sessions,
                 i_now=i,
@@ -1739,7 +1707,7 @@ def simulate_load_profile(
                 rated_power_kw=rated_power_kw,
             )
 
-            # Sessions markieren: Grid-Status + Slack
+            # (D) Sessions markieren + Slack berechnen
             pv_only_candidates: list[dict[str, Any]] = []
             grid_needed_candidates: list[dict[str, Any]] = []
 
@@ -1761,40 +1729,95 @@ def simulate_load_profile(
                 else:
                     pv_only_candidates.append(s)
 
-            # (C) Charger-Auswahl:
-            #     - grid-needed zuerst (Ziel-SoC darf nicht verfehlt werden)
-            #     - dann PV-only (nutzt PV-Überschuss, vermeidet Grid)
+            # (E) Auswahl der aktiven Charger-Sessions:
+            #     grid-needed zuerst (Ziel-SoC darf nicht verfehlt werden), dann PV-only
             grid_needed_candidates.sort(key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"]))
             pv_only_candidates.sort(key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"]))
 
-            charging_sessions: list[dict[str, Any]] = []
+            charging_sessions = []
             charging_sessions.extend(grid_needed_candidates[:number_of_chargers])
 
-            remaining_slots = number_of_chargers - len(charging_sessions)
-            if remaining_slots > 0:
-                charging_sessions.extend(pv_only_candidates[:remaining_slots])
+            remaining = number_of_chargers - len(charging_sessions)
+            if remaining > 0:
+                charging_sessions.extend(pv_only_candidates[:remaining])
 
-            charging_count_series.append(len(charging_sessions))
+        else:
+            # ---------------------------------------------------------------
+            # MARKET (oder weitere Strategien): bleibt wie bisher über Slot-Kandidaten + Emergency
+            # ---------------------------------------------------------------
+            # Es wird hier bewusst die bisherige Market-Logik genutzt.
+            emergency: list[dict[str, Any]] = []
+            slot_candidates: list[dict[str, Any]] = []
 
-            if not charging_sessions:
-                load_profile_kw[i] = 0.0
-                continue
+            for s in present_sessions:
+                slack_m = _slack_minutes_for_session(
+                    s=s,
+                    ts=ts,
+                    rated_power_kw=rated_power_kw,
+                    charger_efficiency=charger_efficiency,
+                )
+                s["_slack_minutes"] = float(slack_m)
 
-            # (D) Budgets:
-            #     - Chargerbudget ist physikalische Abgabeleistung (kW)
-            #     - Gridbudget ist Importlimit (kW), darf nur für grid-needed Sessions genutzt werden
+                if slack_m <= emergency_slack_minutes:
+                    emergency.append(s)
+                    continue
+
+                pref = s.get("preferred_slot_indices", [])
+                ptr = int(s.get("preferred_ptr", 0))
+
+                while ptr < len(pref) and pref[ptr] < i:
+                    ptr += 1
+                s["preferred_ptr"] = ptr
+
+                if pref and ptr < len(pref) and pref[ptr] == i:
+                    slot_candidates.append(s)
+
+            seen = set()
+            candidates: list[dict[str, Any]] = []
+
+            for s in emergency:
+                sid = id(s)
+                if sid not in seen:
+                    candidates.append(s)
+                    seen.add(sid)
+
+            for s in slot_candidates:
+                sid = id(s)
+                if sid not in seen:
+                    candidates.append(s)
+                    seen.add(sid)
+
+            if candidates:
+                candidates.sort(key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"]))
+                charging_sessions = candidates[:number_of_chargers]
+            else:
+                charging_sessions = []
+
+        charging_count_series.append(len(charging_sessions))
+
+        if not charging_sessions:
+            load_profile_kw[i] = 0.0
+            continue
+
+        # ---------------------------------------------------------------
+        # 7.2) Leistungsverteilung / Energieupdate
+        # ---------------------------------------------------------------
+        total_power_kw = 0.0
+
+        if charging_strategy == "generation":
+            # Budgets:
             charger_budget_kw = len(charging_sessions) * rated_power_kw
             grid_budget_kw = max(0.0, float(grid_limit_p_avb_kw))
-            pv_budget_kw = float(pv_surplus_kw_now)
 
-            # Gruppen trennen
+            base_kw_now = _base_load_kw_at(i)
+            gen_kw_now = _generation_kw_at(ts)
+            pv_budget_kw = max(0.0, gen_kw_now - base_kw_now)
+
             grid_needed_sessions = [s for s in charging_sessions if bool(s.get("_grid_needed", False))]
             pv_only_sessions = [s for s in charging_sessions if not bool(s.get("_grid_needed", False))]
 
-            total_power_kw = 0.0
-
             # -----------------------------------------------------------
-            # (E) PV-only Sessions zuerst: dürfen ausschließlich PV nutzen
+            # (F) PV-only Sessions: dürfen ausschließlich PV nutzen
             # -----------------------------------------------------------
             if pv_only_sessions and pv_budget_kw > 1e-9 and charger_budget_kw > 1e-9:
                 pv_only_budget_kw = min(pv_budget_kw, charger_budget_kw)
@@ -1812,42 +1835,44 @@ def simulate_load_profile(
                         float(s.get("max_charging_power_kw", rated_power_kw)),
                     )
 
-                    possible_energy_kwh = allowed_power_kw * time_step_hours * charger_efficiency
-                    energy_needed = float(s["energy_required_kwh"])
+                    # Energieabgabe robust berechnen
+                    energy_delivered = 0.0
+                    actual_power_kw = 0.0
 
-                    if possible_energy_kwh >= energy_needed:
-                        energy_delivered = energy_needed
-                        s["energy_required_kwh"] = 0.0
-                        actual_power_kw = energy_delivered / (time_step_hours * charger_efficiency)
-                        # Zeitpunkt merken, ab dem Abstecken erlaubt ist
-                    if "finished_charging_time" not in s:
-                        s["finished_charging_time"] = ts
+                    if allowed_power_kw > 1e-9:
+                        possible_energy_kwh = allowed_power_kw * time_step_hours * charger_efficiency
+                        energy_needed = float(s.get("energy_required_kwh", 0.0))
 
-                    else:
-                        energy_delivered = possible_energy_kwh
-                        s["energy_required_kwh"] = energy_needed - possible_energy_kwh
-                        actual_power_kw = allowed_power_kw
+                        if possible_energy_kwh >= energy_needed:
+                            energy_delivered = energy_needed
+                            s["energy_required_kwh"] = 0.0
+                            actual_power_kw = (
+                                energy_delivered / (time_step_hours * charger_efficiency)
+                                if energy_delivered > 0.0 else 0.0
+                            )
 
-                    s["delivered_energy_kwh"] += energy_delivered
+                            # Zeitpunkt wird gemerkt, ab dem Abstecken erlaubt ist.
+                            if "finished_charging_time" not in s:
+                                s["finished_charging_time"] = ts
+                        else:
+                            energy_delivered = possible_energy_kwh
+                            s["energy_required_kwh"] = energy_needed - possible_energy_kwh
+                            actual_power_kw = allowed_power_kw
+
+                    s["delivered_energy_kwh"] = float(s.get("delivered_energy_kwh", 0.0)) + float(energy_delivered)
                     s["_actual_power_kw"] = float(actual_power_kw)
 
                     pv_only_used_kw += actual_power_kw
                     total_power_kw += actual_power_kw
 
-                # Budgets reduzieren
                 pv_budget_kw = max(0.0, pv_budget_kw - pv_only_used_kw)
                 charger_budget_kw = max(0.0, charger_budget_kw - pv_only_used_kw)
 
-            # -----------------------------------------------------------------
-            # (F) Grid-needed Sessions: dürfen PV + Grid nutzen (aber nur hier)
-            # -----------------------------------------------------------------
-            # Diese Sessions werden nur dann als grid-needed klassifiziert, wenn
-            # PV-Reservation zeigt, dass PV innerhalb der Reststandzeit nicht reicht.
+            # -----------------------------------------------------------
+            # (G) Grid-needed Sessions: dürfen PV + Grid nutzen (Grid nur hier)
+            # -----------------------------------------------------------
             if grid_needed_sessions and charger_budget_kw > 1e-9:
-                usable_budget_kw = min(
-                    charger_budget_kw,
-                    pv_budget_kw + grid_budget_kw,
-                )
+                usable_budget_kw = min(charger_budget_kw, pv_budget_kw + grid_budget_kw)
                 per_session_kw = usable_budget_kw / len(grid_needed_sessions)
 
                 grid_needed_used_kw = 0.0
@@ -1862,33 +1887,40 @@ def simulate_load_profile(
                         float(s.get("max_charging_power_kw", rated_power_kw)),
                     )
 
-                    possible_energy_kwh = allowed_power_kw * time_step_hours * charger_efficiency
-                    energy_needed = float(s["energy_required_kwh"])
+                    energy_delivered = 0.0
+                    actual_power_kw = 0.0
 
-                    if possible_energy_kwh >= energy_needed:
-                        energy_delivered = energy_needed
-                        s["energy_required_kwh"] = 0.0
-                        actual_power_kw = energy_delivered / (time_step_hours * charger_efficiency)
-                    else:
-                        energy_delivered = possible_energy_kwh
-                        s["energy_required_kwh"] = energy_needed - possible_energy_kwh
-                        actual_power_kw = allowed_power_kw
+                    if allowed_power_kw > 1e-9:
+                        possible_energy_kwh = allowed_power_kw * time_step_hours * charger_efficiency
+                        energy_needed = float(s.get("energy_required_kwh", 0.0))
 
-                    s["delivered_energy_kwh"] += energy_delivered
+                        if possible_energy_kwh >= energy_needed:
+                            energy_delivered = energy_needed
+                            s["energy_required_kwh"] = 0.0
+                            actual_power_kw = (
+                                energy_delivered / (time_step_hours * charger_efficiency)
+                                if energy_delivered > 0.0 else 0.0
+                            )
+                            if "finished_charging_time" not in s:
+                                s["finished_charging_time"] = ts
+                        else:
+                            energy_delivered = possible_energy_kwh
+                            s["energy_required_kwh"] = energy_needed - possible_energy_kwh
+                            actual_power_kw = allowed_power_kw
+
+                    s["delivered_energy_kwh"] = float(s.get("delivered_energy_kwh", 0.0)) + float(energy_delivered)
                     s["_actual_power_kw"] = float(actual_power_kw)
 
                     grid_needed_used_kw += actual_power_kw
                     total_power_kw += actual_power_kw
 
-                # PV wird zuerst verwendet, Rest kommt aus Grid (nur in dieser Gruppe)
                 pv_used_by_grid_needed_kw = min(pv_budget_kw, grid_needed_used_kw)
                 pv_budget_kw = max(0.0, pv_budget_kw - pv_used_by_grid_needed_kw)
 
-                # Grid-Import wäre der Restanteil, wird aber hier nur budgettechnisch gekappt:
+                # Grid-Anteil ist der Rest (budgetseitig limitiert)
                 grid_used_kw = max(0.0, grid_needed_used_kw - pv_used_by_grid_needed_kw)
                 grid_used_kw = min(grid_used_kw, grid_budget_kw)
 
-                # Budgets reduzieren (physikalisch relevant)
                 charger_budget_kw = max(0.0, charger_budget_kw - grid_needed_used_kw)
 
             load_profile_kw[i] = float(total_power_kw)
@@ -1903,8 +1935,6 @@ def simulate_load_profile(
             )
             available_power_per_session_kw = max_site_power_kw / len(charging_sessions)
 
-            total_power_kw = 0.0
-
             for s in charging_sessions:
                 vehicle_power_limit_kw = vehicle_power_at_soc(s)
 
@@ -1912,27 +1942,36 @@ def simulate_load_profile(
                     available_power_per_session_kw,
                     rated_power_kw,
                     vehicle_power_limit_kw,
-                    s["max_charging_power_kw"],
+                    float(s.get("max_charging_power_kw", rated_power_kw)),
                 )
 
-                possible_energy_kwh = allowed_power_kw * time_step_hours * charger_efficiency
-                energy_needed = s["energy_required_kwh"]
+                energy_delivered = 0.0
+                actual_power_kw = 0.0
 
-                if possible_energy_kwh >= energy_needed:
-                    energy_delivered = energy_needed
-                    s["energy_required_kwh"] = 0.0
-                    actual_power_kw = energy_delivered / (time_step_hours * charger_efficiency)
-                else:
-                    energy_delivered = possible_energy_kwh
-                    s["energy_required_kwh"] -= possible_energy_kwh
-                    actual_power_kw = allowed_power_kw
+                if allowed_power_kw > 1e-9:
+                    possible_energy_kwh = allowed_power_kw * time_step_hours * charger_efficiency
+                    energy_needed = float(s.get("energy_required_kwh", 0.0))
 
-                s["delivered_energy_kwh"] += energy_delivered
+                    if possible_energy_kwh >= energy_needed:
+                        energy_delivered = energy_needed
+                        s["energy_required_kwh"] = 0.0
+                        actual_power_kw = (
+                            energy_delivered / (time_step_hours * charger_efficiency)
+                            if energy_delivered > 0.0 else 0.0
+                        )
+                        if "finished_charging_time" not in s:
+                            s["finished_charging_time"] = ts
+                    else:
+                        energy_delivered = possible_energy_kwh
+                        s["energy_required_kwh"] = energy_needed - possible_energy_kwh
+                        actual_power_kw = allowed_power_kw
+
+                s["delivered_energy_kwh"] = float(s.get("delivered_energy_kwh", 0.0)) + float(energy_delivered)
                 s["_actual_power_kw"] = float(actual_power_kw)
 
                 total_power_kw += actual_power_kw
 
-            load_profile_kw[i] = total_power_kw
+            load_profile_kw[i] = float(total_power_kw)
 
 
         # ---------------------------------------------------------------
