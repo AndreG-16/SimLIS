@@ -1360,8 +1360,6 @@ def simulate_load_profile(
     rejected_session_ids = set()        # drive_off / max_wait überschritten
     parked_no_charge_ids = set()        # park_no_charge
 
-    print("DEBUG arrival_policy =", arrival_policy, "max_wait_minutes =", max_wait_minutes)
-
 
     # ============================================================
     # 7) Zeitschrittweise Simulation (IN DER FUNKTION!)
