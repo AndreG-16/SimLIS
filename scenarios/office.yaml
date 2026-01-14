@@ -1,7 +1,7 @@
 site_type: office      # Standort des Ladepunkts
 
 time_resolution_min: 15          # Zeitschritt, in der die Simulation berechnet wird
-simulation_horizon_days: 14       # gewünschter Analysehorizont in Tagen
+simulation_horizon_days: 3       # gewünschter Analysehorizont in Tagen
 
 start_datetime: "2025-12-01 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen soll
 holidays:
@@ -11,8 +11,8 @@ holidays:
      
 
 site:
-  number_chargers: 10                                         # Anzahl der Ladepunkte am Standort
-  rated_power_kw: 100                                         # Verfügbare Leistung pro Ladepunkt
+  number_chargers: 30                                         # Anzahl der Ladepunkte am Standort
+  rated_power_kw: 22                                         # Verfügbare Leistung pro Ladepunkt
   grid_limit_p_avb_kw: 550                                    # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
   expected_sessions_per_charger_per_day: [3.0, 8.0]           # erwartete Ladevorgänge pro LP und Tag
   charger_efficiency: 0.95                                    # Verhäl0tnis Fahrzeugaufnahme zu abgegebener LP-Leistung
@@ -31,7 +31,7 @@ site:
   base_load_unit: "kW"                                        # Einheit, die für den Wert der Grundlast verwendet wird ("kW", "kWh", "MWh")
    
   allow_cross_day_charging: false                             # Ermöglicht keine Ladungen über Mitternacht hinaus
-  disconnect_when_full: true                            # Fahrzeug verlässt den Ladepunkt nach Erreichung des Ziel-SoCs (true, false, 0.5, [0.5, 2.0])
+  disconnect_when_full: [0.5, 2.0]                            # Fahrzeug verlässt den Ladepunkt nach Erreichung des Ziel-SoCs (true, false, 0.5, [0.5, 2.0])
 
 
 # Fuhrparkbeschreibung – Ladekurven + Kapazitäten kommen aus CSV
