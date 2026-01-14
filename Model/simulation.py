@@ -1955,6 +1955,96 @@ def simulate_load_profile(
 
             load_profile_kw[i] = float(total_power_kw)
 
+            # -----------------------------------------------------------------
+            # (H) Rest-PV (work-conserving): PV nicht liegen lassen
+            # -----------------------------------------------------------------
+            # Wenn nach PV-only und grid-needed noch PV-Budget übrig ist, wird es
+            # iterativ auf alle Sessions mit Restbedarf verteilt, die physikalisch
+            # noch Leistung aufnehmen können.
+            #
+            # Dadurch wird sichergestellt, dass PV-Überschuss nicht ungenutzt bleibt,
+            # solange mindestens ein Fahrzeug aufnehmen kann.
+
+            if pv_budget_kw > 1e-9 and charger_budget_kw > 1e-9:
+                # Kandidaten: alle aktiven Sessions, die noch Bedarf haben
+                pv_fill_candidates = [
+                    s for s in charging_sessions
+                    if float(s.get("energy_required_kwh", 0.0)) > 1e-9
+                ]
+
+                if pv_fill_candidates:
+                    remaining_budget_kw = min(pv_budget_kw, charger_budget_kw)
+
+                    # Iterative (waterfilling) Verteilung
+                    active = pv_fill_candidates[:]
+                    iter_guard = 0
+                    pv_fill_used_kw = 0.0
+
+                    while remaining_budget_kw > 1e-9 and active and iter_guard < 20:
+                        iter_guard += 1
+                        per_kw = remaining_budget_kw / len(active)
+
+                        used_round_kw = 0.0
+                        next_active: list[dict[str, Any]] = []
+
+                        for s in active:
+                            vehicle_power_limit_kw = vehicle_power_at_soc(s)
+
+                            allowed_power_kw = min(
+                                per_kw,
+                                rated_power_kw,
+                                vehicle_power_limit_kw,
+                                float(s.get("max_charging_power_kw", rated_power_kw)),
+                            )
+
+                            if allowed_power_kw <= 1e-9:
+                                s["_actual_power_kw"] = float(s.get("_actual_power_kw", 0.0))
+                                next_active.append(s)
+                                continue
+
+                            possible_energy_kwh = allowed_power_kw * time_step_hours * charger_efficiency
+                            energy_needed = float(s.get("energy_required_kwh", 0.0))
+
+                            energy_delivered = 0.0
+                            actual_power_kw = 0.0
+
+                            if possible_energy_kwh >= energy_needed:
+                                energy_delivered = energy_needed
+                                s["energy_required_kwh"] = 0.0
+                                actual_power_kw = (
+                                    energy_delivered / (time_step_hours * charger_efficiency)
+                                    if energy_delivered > 0.0 else 0.0
+                                )
+                                if "finished_charging_time" not in s:
+                                    s["finished_charging_time"] = ts
+                            else:
+                                energy_delivered = possible_energy_kwh
+                                s["energy_required_kwh"] = energy_needed - possible_energy_kwh
+                                actual_power_kw = allowed_power_kw
+
+                            s["delivered_energy_kwh"] = float(s.get("delivered_energy_kwh", 0.0)) + float(energy_delivered)
+
+                            # _actual_power_kw wird additiv geführt, weil evtl. vorher schon Leistung zugewiesen wurde
+                            s["_actual_power_kw"] = float(s.get("_actual_power_kw", 0.0)) + float(actual_power_kw)
+
+                            used_round_kw += actual_power_kw
+                            pv_fill_used_kw += actual_power_kw
+                            total_power_kw += actual_power_kw
+
+                            if float(s.get("energy_required_kwh", 0.0)) > 1e-9:
+                                next_active.append(s)
+
+                        if used_round_kw <= 1e-9:
+                            break
+
+                        used_round_kw = min(used_round_kw, remaining_budget_kw)
+                        remaining_budget_kw = max(0.0, remaining_budget_kw - used_round_kw)
+                        active = next_active
+
+                    # Budgets reduzieren: Rest-PV ist PV-only, kein Grid
+                    pv_budget_kw = max(0.0, pv_budget_kw - pv_fill_used_kw)
+                    charger_budget_kw = max(0.0, charger_budget_kw - pv_fill_used_kw)
+
         else:
             # ---------------------------------------------------------------
             # Fallback für immediate/market: klassische Fair-Share-Logik
