@@ -31,7 +31,7 @@ site:
   base_load_unit: "kW"                                        # Einheit, die für den Wert der Grundlast verwendet wird ("kW", "kWh", "MWh")
    
   allow_cross_day_charging: false                             # Ermöglicht keine Ladungen über Mitternacht hinaus
-  disconnect_when_full: [0.5, 2.0]                            # Fahrzeug verlässt den Ladepunkt nach Erreichung des Ziel-SoCs (true, false, 0.5, [0.5, 2.0])
+  disconnect_when_full: [0.1, 0.5]                            # Fahrzeug verlässt den Ladepunkt nach Erreichung des Ziel-SoCs (true, false, 0.5, [0.5, 2.0])
 
 
 # Fuhrparkbeschreibung – Ladekurven + Kapazitäten kommen aus CSV
