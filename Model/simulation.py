@@ -611,6 +611,7 @@ def build_charging_sessions_for_day(
 
         sessions.append(
             {
+                "session_id": f"{day_start_datetime.date()}_{i}",
                 "arrival_time": arrival_time,
                 "departure_time": departure_time,
                 "soc_arrival": soc_at_arrival,
@@ -1321,6 +1322,8 @@ def simulate_load_profile(
     disconnect_cfg = site_cfg.get("disconnect_when_full", True)
     disconnect_delay_hours = sample_disconnect_delay_hours(disconnect_cfg)
 
+    plugged_session_ids = set()
+
     # ============================================================
     # 7) Zeitschrittweise Simulation (IN DER FUNKTION!)
     # ============================================================
@@ -1375,6 +1378,9 @@ def simulate_load_profile(
             chargers[c] = s
             s["_charger_id"] = c
             s["_plug_in_time"] = ts
+
+            plugged_session_ids.add(s["session_id"])
+
 
         # --------------------------------------------------------
         # 7.3) anwesende Sessions (physisch eingesteckt + Restbedarf)
@@ -1778,6 +1784,8 @@ def simulate_load_profile(
     # ============================================================
     # 9) Rückgabe (NACH der Simulation!)
     # ============================================================
+    num_unique_plugged = len(plugged_session_ids)
+    
     return (
         time_index,
         load_profile_kw,
@@ -1787,4 +1795,5 @@ def simulate_load_profile(
         charging_strategy,
         strategy_status,
         debug_rows if record_debug else None,
+        num_unique_plugged,
     )
