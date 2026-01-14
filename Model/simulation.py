@@ -1046,6 +1046,78 @@ def _plan_pv_commitments_for_present_sessions(
 
     return pv_commit_kw, grid_needed_session_ids
 
+# =============================================================================
+# 7d) Reporting Helper: Strategy signal series (aligned)
+# =============================================================================
+
+def build_strategy_signal_series(
+    scenario: dict[str, Any],
+    timestamps: list[datetime],
+    charging_strategy: str,
+    normalize_to_internal: bool = True,
+    strategy_resolution_min: int = 15,
+) -> tuple[np.ndarray | None, str | None]:
+    """
+    Baut eine Signal-Zeitreihe aligned auf 'timestamps' (für Plot/Reporting).
+
+    Rückgabe:
+      - series: np.ndarray der Länge len(timestamps), np.nan wenn kein Wert gefunden
+      - y_label: passende Achsenbeschriftung
+    """
+    strat = (charging_strategy or "immediate").lower()
+    if strat not in ("market", "generation"):
+        return None, None
+
+    if not timestamps:
+        return None, None
+
+    site_cfg = scenario.get("site", {}) or {}
+
+    strategy_unit = str(site_cfg.get("strategy_unit", "") or "").strip()
+    if not strategy_unit:
+        raise ValueError(
+            "❌ Abbruch: Für market/generation muss 'site.strategy_unit' gesetzt sein "
+            "(market: '€/MWh' oder '€/kWh' | generation: 'MWh' oder 'kWh' oder 'kW')."
+        )
+
+    strategy_csv = site_cfg.get("strategy_csv", None)
+    col_1_based = site_cfg.get("strategy_value_col", None)
+    if not strategy_csv or not isinstance(col_1_based, int) or col_1_based < 2:
+        raise ValueError("❌ Abbruch: 'site.strategy_csv' oder 'site.strategy_value_col' fehlt/ungültig.")
+
+    csv_path = resolve_path_relative_to_scenario(scenario, str(strategy_csv))
+
+    strategy_map = read_strategy_series_from_csv_first_col_time(
+        csv_path=csv_path,
+        value_col_1_based=int(col_1_based),
+        delimiter=";",
+    )
+
+    step_hours = strategy_resolution_min / 60.0
+
+    series = np.full(len(timestamps), np.nan, dtype=float)
+    for i, ts in enumerate(timestamps):
+        v = lookup_signal(strategy_map, ts, strategy_resolution_min)
+        if v is None:
+            continue
+
+        if normalize_to_internal:
+            series[i] = convert_strategy_value_to_internal(
+                charging_strategy=strat,
+                raw_value=float(v),
+                strategy_unit=strategy_unit,
+                step_hours=step_hours,
+            )
+        else:
+            series[i] = float(v)
+
+    if normalize_to_internal:
+        y_label = "Preis [€/kWh]" if strat == "market" else "Erzeugung [kW]"
+    else:
+        y_label = f"{strat.upper()} [{strategy_unit}]"
+
+    return series, y_label
+
 
 # =============================================================================
 # 9) Hauptsimulation
