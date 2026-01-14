@@ -1319,8 +1319,6 @@ def simulate_load_profile(
     charging_count_series: list[int] = []
     all_charging_sessions: list[dict[str, Any]] = []
 
-    debug_rows: list[dict[str, Any]] = []
-
 
     # ------------------------------------------------------------
     # 5d) Debug-Log (optional): protokolliert pro Zeitschritt, 
@@ -1663,70 +1661,32 @@ def simulate_load_profile(
         # Debug: Netzbezug je Zeitschritt + Session-Details loggen
         # ---------------------------------------------------------------
         if record_debug:
-            # PV-Überschuss nur für generation relevant (sonst 0)
-            pv_kw = _generation_kw_at(ts) if charging_strategy == "generation" else 0.0
-            base_kw = _base_load_kw_at(i) if charging_strategy == "generation" else 0.0
-            pv_surplus_kw = max(0.0, pv_kw - base_kw) if charging_strategy == "generation" else 0.0
-
-            # Netzbezug-Definition:
-            # - In generation wird erst PV-Überschuss genutzt, Rest ist Netzimport.
-            # - In market/immediate entspricht "Netzbezug" hier einfach der Last (vereinfachte Sicht).
-            if charging_strategy == "generation":
-                grid_import_kw = max(0.0, total_power_kw - pv_surplus_kw)
-            else:
-                grid_import_kw = max(0.0, total_power_kw)
-
-            has_emergency = any(
-                float(s.get("_slack_minutes", 1e9)) <= emergency_slack_minutes for s in charging_sessions
-            )
-
-            for s in charging_sessions:
-                debug_rows.append(
-                    {
-                        "ts": ts,
-                        "vehicle_name": s.get("vehicle_name"),
-                        "vehicle_class": s.get("vehicle_class"),
-                        "arrival_time": s.get("arrival_time"),
-                        "departure_time": s.get("departure_time"),
-                        "parking_hours": (s["departure_time"] - s["arrival_time"]).total_seconds() / 3600.0,
-                        "slack_minutes": float(s.get("_slack_minutes", np.nan)),
-                        "is_emergency": bool(float(s.get("_slack_minutes", 1e9)) <= emergency_slack_minutes),
-                        "charging_strategy": charging_strategy,
-                        "site_total_power_kw": float(total_power_kw),
-                        "pv_kw": float(pv_kw),
-                        "base_kw": float(base_kw),
-                        "pv_surplus_kw": float(pv_surplus_kw),
-                        "grid_import_kw": float(grid_import_kw),
-                        "has_any_emergency_this_step": bool(has_emergency),
-                    }
-                )
-
-
-        load_profile_kw[i] = total_power_kw
-
-        if record_debug:
-            # Für die Debug-Auswertung werden pro aktiv ladender Session Zeilen geschrieben.
-            # Diese Debug-Ausgabe wird nur befüllt, wenn record_debug=True gesetzt ist.
-            #
-            # Hinweis:
-            # - grid_limit_p_avb_kw ist das Importlimit aus dem Netz (NAP).
-            # - Lokale Erzeugung reduziert den Netzbezug, erhöht aber nicht das Importlimit.
-            # - Ein Netzbezug kann entstehen, wenn die Standortlast > PV-Überschuss ist.
-
-            pv_kw = 0.0
-            base_kw = 0.0
-            pv_surplus_kw = 0.0
-
+            # PV- und Basislast nur für generation relevant
             if charging_strategy == "generation":
                 pv_kw = _generation_kw_at(ts)
                 base_kw = _base_load_kw_at(i)
                 pv_surplus_kw = max(0.0, pv_kw - base_kw)
-
-            grid_import_kw = max(0.0, total_power_kw - pv_surplus_kw)
+            else:
+                pv_kw = 0.0
+                base_kw = 0.0
+                pv_surplus_kw = 0.0
 
             has_any_emergency_this_step = any(
                 float(s.get("_slack_minutes", 1e9)) <= emergency_slack_minutes
                 for s in charging_sessions
+            )
+
+            # Standort-Netzimport (nur generation physikalisch sinnvoll interpretiert)
+            if charging_strategy == "generation":
+                site_grid_import_kw = max(0.0, total_power_kw - pv_surplus_kw)
+            else:
+                site_grid_import_kw = max(0.0, total_power_kw)
+
+            # Summe der Leistung der Emergency-Sessions (für proportionalen Netzanteil)
+            emergency_power_kw = sum(
+                float(s.get("_actual_power_kw", 0.0))
+                for s in charging_sessions
+                if float(s.get("_slack_minutes", 1e9)) <= emergency_slack_minutes
             )
 
             for s in charging_sessions:
@@ -1734,7 +1694,14 @@ def simulate_load_profile(
                 departure_time = s["departure_time"]
                 parking_hours = (departure_time - arrival_time).total_seconds() / 3600.0
                 slack_minutes = float(s.get("_slack_minutes", np.nan))
-                is_emergency = bool(slack_minutes <= emergency_slack_minutes) if not np.isnan(slack_minutes) else False
+                is_emergency = bool(slack_minutes <= emergency_slack_minutes)
+
+                # Netzanteil pro Session: nur Emergency bekommt Netz (gemäß deiner Regel)
+                grid_import_kw_session = 0.0
+                if charging_strategy == "generation" and is_emergency and emergency_power_kw > 1e-9:
+                    grid_import_kw_session = site_grid_import_kw * (
+                        float(s.get("_actual_power_kw", 0.0)) / emergency_power_kw
+                    )
 
                 debug_rows.append(
                     {
@@ -1746,15 +1713,17 @@ def simulate_load_profile(
                         "parking_hours": parking_hours,
                         "slack_minutes": slack_minutes,
                         "is_emergency": is_emergency,
-                        "pv_kw": pv_kw,
-                        "base_kw": base_kw,
-                        "pv_surplus_kw": pv_surplus_kw,
-                        "site_total_power_kw": total_power_kw,
-                        "grid_import_kw": grid_import_kw,
-                        "has_any_emergency_this_step": has_any_emergency_this_step,
+                        "pv_kw": float(pv_kw),
+                        "base_kw": float(base_kw),
+                        "pv_surplus_kw": float(pv_surplus_kw),
+                        "site_total_power_kw": float(total_power_kw),
+                        "grid_import_kw_site": float(site_grid_import_kw),
+                        "grid_import_kw_session": float(grid_import_kw_session),
+                        "has_any_emergency_this_step": bool(has_any_emergency_this_step),
                     }
                 )
-        
+
+
 
     # ------------------------------------------------------------
     # 8) Strategie-Status
