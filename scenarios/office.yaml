@@ -11,8 +11,8 @@ holidays:
      
 
 site:
-  number_chargers: 30                                         # Anzahl der Ladepunkte am Standort
-  rated_power_kw: 22                                         # Verfügbare Leistung pro Ladepunkt
+  number_chargers: 10                                         # Anzahl der Ladepunkte am Standort
+  rated_power_kw: 11                                         # Verfügbare Leistung pro Ladepunkt
   grid_limit_p_avb_kw: 550                                    # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
   expected_sessions_per_charger_per_day: [3.0, 8.0]           # erwartete Ladevorgänge pro LP und Tag
   charger_efficiency: 0.95                                    # Verhäl0tnis Fahrzeugaufnahme zu abgegebener LP-Leistung
@@ -32,6 +32,9 @@ site:
    
   allow_cross_day_charging: false                             # Ermöglicht keine Ladungen über Mitternacht hinaus
   disconnect_when_full: false                                 # Fahrzeug verlässt den Ladepunkt nach Erreichung des Ziel-SoCs (true, false, 0.5, [0.5, 2.0])
+  arrival_blocking_policy: "park_no_charge"                    # "drive_off" | "park_no_charge" | "virtual_queue"
+  max_wait_minutes: 0                                          # nur relevant für "virtual_queue" (optional, default z.B. 24h)
+
 
 
 # Fuhrparkbeschreibung – Ladekurven + Kapazitäten kommen aus CSV

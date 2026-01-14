@@ -805,6 +805,14 @@ def build_base_load_series(
 
     site_cfg = scenario.get("site", {}) or {}
 
+    arrival_policy = str(site_cfg.get("arrival_blocking_policy", "virtual_queue") or "virtual_queue").lower()
+    if arrival_policy not in ("drive_off", "park_no_charge", "virtual_queue"):
+        raise ValueError("❌ Abbruch: site.arrival_blocking_policy muss drive_off | park_no_charge | virtual_queue sein.")
+
+    max_wait_minutes_cfg = site_cfg.get("max_wait_minutes", None)
+    max_wait_minutes = None if max_wait_minutes_cfg in (None, "") else float(max_wait_minutes_cfg)
+
+    
     base_load_csv = site_cfg.get("base_load_csv", None)
     if base_load_csv:
         base_load_col = site_cfg.get("base_load_value_col", None)
@@ -1312,17 +1320,55 @@ def simulate_load_profile(
     )
 
     # ------------------------------------------------------------
-    # 6c) FIFO-Belegung vorbereiten
+    # 6c) Arrival-Blocking-Policy + Belegung vorbereiten
     # ------------------------------------------------------------
+
+    # Sessions zeitlich sortieren (wichtig für arrival handling)
     all_charging_sessions.sort(key=lambda s: s["arrival_time"])
-    waiting_queue = deque()
+
+    # --- Arrival blocking policy --------------------------------
+    arrival_policy = str(
+        site_cfg.get("arrival_blocking_policy", "virtual_queue") or "virtual_queue"
+    ).strip().lower()
+
+    if arrival_policy not in ("drive_off", "park_no_charge", "virtual_queue"):
+        raise ValueError(
+            "❌ Abbruch: site.arrival_blocking_policy muss "
+            "'drive_off' | 'park_no_charge' | 'virtual_queue' sein."
+        )
+
+    # max_wait_minutes nur für virtual_queue relevant
+    max_wait_minutes_cfg = site_cfg.get("max_wait_minutes", None)
+    if max_wait_minutes_cfg in (None, "", False):
+        max_wait_minutes = None
+    else:
+        try:
+            max_wait_minutes = float(max_wait_minutes_cfg)
+        except Exception as e:
+            raise ValueError(
+                "❌ Abbruch: site.max_wait_minutes muss leer/None oder eine Zahl sein."
+            ) from e
+
+        if max_wait_minutes < 0:
+            raise ValueError("❌ Abbruch: site.max_wait_minutes darf nicht negativ sein.")
+
+    # Virtuelle Warteschlange nur bei virtual_queue
+    waiting_queue = deque() if arrival_policy == "virtual_queue" else None
+
+    # --- Ladepunkte & Arrival-Iterator ---------------------------
     chargers: list[dict[str, Any] | None] = [None] * number_of_chargers
     next_arrival_idx = 0
 
+    # --- Disconnect-Logik ----------------------------------------
     disconnect_cfg = site_cfg.get("disconnect_when_full", True)
     disconnect_delay_hours = sample_disconnect_delay_hours(disconnect_cfg)
 
+    # --- KPI / Tracking ------------------------------------------
     plugged_session_ids = set()
+    rejected_session_ids = set()        # drive_off / max_wait überschritten
+    parked_no_charge_ids = set()        # park_no_charge
+
+
 
     # ============================================================
     # 7) Zeitschrittweise Simulation (IN DER FUNKTION!)
@@ -1352,35 +1398,104 @@ def simulate_load_profile(
                 chargers[c] = None
 
         # --------------------------------------------------------
-        # 7.1) Neue Ankünfte in FIFO-Warteschlange
+        # 7.1) Neue Ankünfte
         # --------------------------------------------------------
         while (
             next_arrival_idx < len(all_charging_sessions)
             and all_charging_sessions[next_arrival_idx]["arrival_time"] <= ts
         ):
-            waiting_queue.append(all_charging_sessions[next_arrival_idx])
+            s = all_charging_sessions[next_arrival_idx]
             next_arrival_idx += 1
-
-        # --------------------------------------------------------
-        # 7.2) FIFO-Zuweisung auf freie Ladepunkte
-        # --------------------------------------------------------
-        for c in range(len(chargers)):
-            if chargers[c] is not None:
-                continue
-            if not waiting_queue:
-                break
-
-            s = waiting_queue.popleft()
 
             if float(s.get("energy_required_kwh", 0.0)) <= 1e-9:
                 continue
 
-            chargers[c] = s
-            s["_charger_id"] = c
-            s["_plug_in_time"] = ts
+            # Flags initialisieren (für Reporting)
+            s["_rejected"] = False
+            s["_parked_no_charge"] = False
 
-            plugged_session_ids.add(s["session_id"])
+            # freien Charger suchen
+            free_c = None
+            for c in range(len(chargers)):
+                if chargers[c] is None:
+                    free_c = c
+                    break
 
+            if free_c is not None:
+                # sofort anstecken
+                chargers[free_c] = s
+                s["_charger_id"] = free_c
+                s["_plug_in_time"] = ts
+                plugged_session_ids.add(s["session_id"])
+                continue
+
+            # kein Charger frei -> policy
+            if arrival_policy == "drive_off":
+                s["_rejected"] = True
+                s["_rejection_time"] = ts
+                s["_no_charge_reason"] = "no_free_charger_at_arrival"
+                rejected_session_ids.add(s["session_id"])
+                continue
+
+            if arrival_policy == "park_no_charge":
+                s["_parked_no_charge"] = True
+                s["_no_charge_reason"] = "no_free_charger_at_arrival"
+                parked_no_charge_ids.add(s["session_id"])
+                continue
+
+            # virtual_queue
+            # waiting_queue MUSS dann als deque initialisiert sein (sonst ValueError vorher)
+            s["_queue_enter_time"] = ts
+            waiting_queue.append(s)
+
+        # --------------------------------------------------------
+        # 7.2) Zuweisung auf freie Ladepunkte (nur virtual_queue)
+        # --------------------------------------------------------
+        if arrival_policy == "virtual_queue" and waiting_queue is not None:
+
+            # Optional: Wartezeit-Limit anwenden (reject nach max_wait)
+            if max_wait_minutes is not None:
+                kept = deque()
+                while waiting_queue:
+                    s = waiting_queue.popleft()
+                    waited_min = (ts - s.get("_queue_enter_time", s["arrival_time"])).total_seconds() / 60.0
+
+                    if waited_min > float(max_wait_minutes):
+                        s["_rejected"] = True
+                        s["_rejection_time"] = ts
+                        s["_no_charge_reason"] = "max_wait_exceeded"
+                        rejected_session_ids.add(s["session_id"])
+                    else:
+                        kept.append(s)
+
+                # IN-PLACE statt waiting_queue = kept
+                waiting_queue.clear()
+                waiting_queue.extend(kept)
+
+            # Nun freie Charger befüllen
+            for c in range(len(chargers)):
+                if chargers[c] is not None:
+                    continue
+                if not waiting_queue:
+                    break
+
+                s = waiting_queue.popleft()
+
+                # falls inzwischen Abfahrt vorbei: nicht mehr relevant
+                if not (s["arrival_time"] <= ts < s["departure_time"]):
+                    s["_rejected"] = True
+                    s["_rejection_time"] = ts
+                    s["_no_charge_reason"] = "departed_before_plug_in"
+                    rejected_session_ids.add(s["session_id"])
+                    continue
+
+                if float(s.get("energy_required_kwh", 0.0)) <= 1e-9:
+                    continue
+
+                chargers[c] = s
+                s["_charger_id"] = c
+                s["_plug_in_time"] = ts
+                plugged_session_ids.add(s["session_id"])
 
         # --------------------------------------------------------
         # 7.3) anwesende Sessions (physisch eingesteckt + Restbedarf)
@@ -1447,8 +1562,12 @@ def simulate_load_profile(
                 else:
                     pv_only_candidates.append(s)
 
-            grid_needed_candidates.sort(key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"]))
-            pv_only_candidates.sort(key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"]))
+            grid_needed_candidates.sort(
+                key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"])
+            )
+            pv_only_candidates.sort(
+                key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"])
+            )
 
             charging_sessions = []
             charging_sessions.extend(grid_needed_candidates[:number_of_chargers])
@@ -1458,7 +1577,7 @@ def simulate_load_profile(
                 charging_sessions.extend(pv_only_candidates[:remaining])
 
         else:
-            # market / sonstige: hier bleibt deine bisherige Logik
+            # market / sonstige
             emergency: list[dict[str, Any]] = []
             slot_candidates: list[dict[str, Any]] = []
 
@@ -1520,15 +1639,12 @@ def simulate_load_profile(
         if charging_strategy == "generation":
             charger_budget_kw = len(charging_sessions) * rated_power_kw
             grid_budget_kw = max(0.0, float(grid_limit_p_avb_kw))
-
             pv_budget_kw = max(0.0, _generation_kw_at(ts) - _base_load_kw_at(i))
 
             grid_needed_sessions = [s for s in charging_sessions if bool(s.get("_grid_needed", False))]
             pv_only_sessions = [s for s in charging_sessions if not bool(s.get("_grid_needed", False))]
 
-            # ----------------------------
             # (F1) grid-needed: PV + Grid
-            # ----------------------------
             grid_needed_used_kw = 0.0
 
             if grid_needed_sessions and charger_budget_kw > 1e-9:
@@ -1575,14 +1691,10 @@ def simulate_load_profile(
                 pv_used_by_grid_needed_kw = min(pv_budget_kw, grid_needed_used_kw)
                 pv_budget_kw = max(0.0, pv_budget_kw - pv_used_by_grid_needed_kw)
 
-                # grid_used_kw wäre hier verfügbar (Debug), aber die Energieverteilung ist schon in total_power_kw enthalten
                 _grid_used_kw = min(max(0.0, grid_needed_used_kw - pv_used_by_grid_needed_kw), grid_budget_kw)
-
                 charger_budget_kw = max(0.0, charger_budget_kw - grid_needed_used_kw)
 
-            # -----------------------------------------
             # (F2) pv-only: NUR PV-Rest (work-conserving)
-            # -----------------------------------------
             if pv_only_sessions and pv_budget_kw > 1e-9 and charger_budget_kw > 1e-9:
                 pv_only_budget_kw = min(pv_budget_kw, charger_budget_kw)
 
@@ -1657,9 +1769,7 @@ def simulate_load_profile(
             load_profile_kw[i] = float(total_power_kw)
 
         else:
-            # ---------------------------------------------------------------
             # immediate/market: klassische Fair-Share-Logik
-            # ---------------------------------------------------------------
             max_site_power_kw = min(
                 grid_limit_p_avb_kw,
                 len(charging_sessions) * rated_power_kw,
@@ -1772,7 +1882,7 @@ def simulate_load_profile(
                 )
 
     # ============================================================
-    # 8) Strategie-Status (NACH der Simulation!)
+    # 8) Strategie-Status
     # ============================================================
     if charging_strategy == "immediate":
         strategy_status = "IMMEDIATE"
@@ -1782,10 +1892,10 @@ def simulate_load_profile(
         raise ValueError(f"❌ Abbruch: Unbekannte charging_strategy='{charging_strategy}'")
 
     # ============================================================
-    # 9) Rückgabe (NACH der Simulation!)
+    # 9) Rückgabe
     # ============================================================
     num_unique_plugged = len(plugged_session_ids)
-    
+
     return (
         time_index,
         load_profile_kw,
