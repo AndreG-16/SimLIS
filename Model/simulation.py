@@ -1887,7 +1887,6 @@ def simulate_load_profile(
     # ============================================================
     # 9) Rückgabe
     # ============================================================
-    num_unique_plugged = len(plugged_session_ids)
 
     return (
         time_index,
@@ -1898,5 +1897,4 @@ def simulate_load_profile(
         charging_strategy,
         strategy_status,
         debug_rows if record_debug else None,
-        num_unique_plugged,
     )
