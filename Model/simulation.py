@@ -804,14 +804,6 @@ def build_base_load_series(
         return None
 
     site_cfg = scenario.get("site", {}) or {}
-
-    arrival_policy = str(site_cfg.get("arrival_blocking_policy", "virtual_queue") or "virtual_queue").lower()
-    if arrival_policy not in ("drive_off", "park_no_charge", "virtual_queue"):
-        raise ValueError("❌ Abbruch: site.arrival_blocking_policy muss drive_off | park_no_charge | virtual_queue sein.")
-
-    max_wait_minutes_cfg = site_cfg.get("max_wait_minutes", None)
-    max_wait_minutes = None if max_wait_minutes_cfg in (None, "") else float(max_wait_minutes_cfg)
-
     
     base_load_csv = site_cfg.get("base_load_csv", None)
     if base_load_csv:
@@ -1368,6 +1360,7 @@ def simulate_load_profile(
     rejected_session_ids = set()        # drive_off / max_wait überschritten
     parked_no_charge_ids = set()        # park_no_charge
 
+    print("DEBUG arrival_policy =", arrival_policy, "max_wait_minutes =", max_wait_minutes)
 
 
     # ============================================================
