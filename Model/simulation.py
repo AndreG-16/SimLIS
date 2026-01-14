@@ -1817,31 +1817,48 @@ def simulate_load_profile(
             pv_only_sessions = [s for s in charging_sessions if not bool(s.get("_grid_needed", False))]
 
             # -----------------------------------------------------------
-            # (F) PV-only Sessions: dürfen ausschließlich PV nutzen
+            # (F) PV-only Sessions: PV wird work-conserving verteilt
             # -----------------------------------------------------------
+            # Hier wird PV so verteilt, dass kein PV-Budget „liegen bleibt“,
+            # nur weil einzelne Fahrzeuge begrenzen (Tapering / max_power / 0 kW).
             if pv_only_sessions and pv_budget_kw > 1e-9 and charger_budget_kw > 1e-9:
                 pv_only_budget_kw = min(pv_budget_kw, charger_budget_kw)
-                per_session_kw = pv_only_budget_kw / len(pv_only_sessions)
 
+                remaining_budget_kw = float(pv_only_budget_kw)
                 pv_only_used_kw = 0.0
 
-                for s in pv_only_sessions:
-                    vehicle_power_limit_kw = vehicle_power_at_soc(s)
+                # Iterative Verteilung, bis PV-Budget verbraucht oder niemand mehr aufnehmen kann
+                active = [s for s in pv_only_sessions if float(s.get("energy_required_kwh", 0.0)) > 1e-9]
+                iter_guard = 0
 
-                    allowed_power_kw = min(
-                        per_session_kw,
-                        rated_power_kw,
-                        vehicle_power_limit_kw,
-                        float(s.get("max_charging_power_kw", rated_power_kw)),
-                    )
+                while remaining_budget_kw > 1e-9 and active and iter_guard < 20:
+                    iter_guard += 1
+                    per_kw = remaining_budget_kw / len(active)
 
-                    # Energieabgabe robust berechnen
-                    energy_delivered = 0.0
-                    actual_power_kw = 0.0
+                    used_round_kw = 0.0
+                    next_active: list[dict[str, Any]] = []
 
-                    if allowed_power_kw > 1e-9:
+                    for s in active:
+                        vehicle_power_limit_kw = vehicle_power_at_soc(s)
+
+                        allowed_power_kw = min(
+                            per_kw,
+                            rated_power_kw,
+                            vehicle_power_limit_kw,
+                            float(s.get("max_charging_power_kw", rated_power_kw)),
+                        )
+
+                        # Wenn keine Leistung möglich ist, bleibt die Session im Pool (evtl. später möglich)
+                        if allowed_power_kw <= 1e-9:
+                            s["_actual_power_kw"] = 0.0
+                            next_active.append(s)
+                            continue
+
                         possible_energy_kwh = allowed_power_kw * time_step_hours * charger_efficiency
                         energy_needed = float(s.get("energy_required_kwh", 0.0))
+
+                        energy_delivered = 0.0
+                        actual_power_kw = 0.0
 
                         if possible_energy_kwh >= energy_needed:
                             energy_delivered = energy_needed
@@ -1859,12 +1876,25 @@ def simulate_load_profile(
                             s["energy_required_kwh"] = energy_needed - possible_energy_kwh
                             actual_power_kw = allowed_power_kw
 
-                    s["delivered_energy_kwh"] = float(s.get("delivered_energy_kwh", 0.0)) + float(energy_delivered)
-                    s["_actual_power_kw"] = float(actual_power_kw)
+                        s["delivered_energy_kwh"] = float(s.get("delivered_energy_kwh", 0.0)) + float(energy_delivered)
+                        s["_actual_power_kw"] = float(actual_power_kw)
 
-                    pv_only_used_kw += actual_power_kw
-                    total_power_kw += actual_power_kw
+                        used_round_kw += actual_power_kw
+                        pv_only_used_kw += actual_power_kw
+                        total_power_kw += actual_power_kw
 
+                        if float(s.get("energy_required_kwh", 0.0)) > 1e-9:
+                            next_active.append(s)
+
+                    # Wenn in dieser Runde nichts genutzt wurde, wird abgebrochen.
+                    if used_round_kw <= 1e-9:
+                        break
+
+                    used_round_kw = min(used_round_kw, remaining_budget_kw)
+                    remaining_budget_kw = max(0.0, remaining_budget_kw - used_round_kw)
+                    active = next_active
+
+                # Budgets reduzieren (PV-only darf ausschließlich PV verbrauchen)
                 pv_budget_kw = max(0.0, pv_budget_kw - pv_only_used_kw)
                 charger_budget_kw = max(0.0, charger_budget_kw - pv_only_used_kw)
 
