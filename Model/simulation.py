@@ -5,6 +5,7 @@ import csv  # CSV-Parsing (Fahrzeugkurven + Markt/Erzeugungssignal)
 from dataclasses import dataclass
 from datetime import datetime, timedelta, date
 from typing import Any
+from collections import deque
 
 
 # =============================================================================
@@ -275,7 +276,7 @@ def load_scenario(path: str) -> dict[str, Any]:
 
 
 # =============================================================================
-# 3) Hilfsfunktionen: Ranges, Feiertage, Zeitindex
+# 3) Hilfsfunktionen: Ranges, Feiertage, Zeitindex, Freigabe der Ladepunkte nach abgeschlossenen Ladevorgang
 # =============================================================================
 
 def sample_from_range(value_definition: Any) -> float:
@@ -373,6 +374,35 @@ def create_time_index(scenario: dict, start_datetime: datetime | None = None) ->
 
     time_step_delta = timedelta(minutes=time_resolution_min)
     return [simulation_start_datetime + step_index * time_step_delta for step_index in range(number_of_time_steps)]
+
+def sample_disconnect_delay_hours(cfg_value: Any) -> float | None:
+    """
+    Interpretiert disconnect_when_full aus der YAML.
+
+    Rückgabe:
+      - None        -> Fahrzeug bleibt bis Abfahrt gesteckt
+      - 0.0         -> sofort abstecken
+      - >0.0 (h)    -> Abstecken x Stunden nach Ladeende
+    """
+    if cfg_value is None:
+        return None
+
+    if isinstance(cfg_value, bool):
+        return 0.0 if cfg_value else None
+
+    if isinstance(cfg_value, (int, float)):
+        return max(0.0, float(cfg_value))
+
+    if isinstance(cfg_value, (list, tuple)):
+        if len(cfg_value) == 1:
+            return max(0.0, float(cfg_value[0]))
+        if len(cfg_value) == 2:
+            return max(0.0, float(np.random.uniform(cfg_value[0], cfg_value[1])))
+
+    raise ValueError(
+        "❌ Ungültiger Wert für site.disconnect_when_full. "
+        "Erlaubt: true | false | Zahl | [min, max]"
+    )
 
 
 # =============================================================================
@@ -1531,21 +1561,114 @@ def simulate_load_profile(
     )
 
     # ------------------------------------------------------------
-    # 7) Zeitschrittweise Simulation
+    # 6c) FIFO-Belegung der Ladepunkte vorbereiten (physische Realität)
+    # ------------------------------------------------------------
+    # Es wird ein physisches Modell der Ladepunkte abgebildet:
+    # - Fahrzeuge „besetzen“ einen Ladepunkt nach FIFO, sobald sie ankommen und ein Punkt frei ist.
+    # - Fahrzeuge, die keinen freien Punkt finden, warten in einer FIFO-Warteschlange.
+    # - Innerhalb der physisch angeschlossenen Fahrzeuge läuft das bestehende Scheduling weiter
+    #   (z.B. Slack/Abfahrtszeit -> ggf. mehr Leistung bei Ziel-SoC-Risiko).
+    #
+    # Dadurch wird verhindert, dass ein später ankommendes Fahrzeug “virtuell” einen Ladepunkt erhält,
+    # wenn dieser physisch bereits durch ein früher angekommenes Fahrzeug belegt wäre.
+
+    # Sessions einmal nach Ankunft sortieren, damit Ankünfte effizient „eingeschleust“ werden können.
+    all_charging_sessions.sort(key=lambda s: s["arrival_time"])
+
+    # FIFO-Warteschlange für Fahrzeuge, die bei Ankunft keinen freien Ladepunkt finden.
+    waiting_queue = deque()
+
+    # Physische Ladepunkte: jeder Slot enthält entweder None oder eine Session (dict).
+    chargers: list[dict[str, Any] | None] = [None] * int(number_of_chargers)
+
+    # Zeiger auf die nächste Session, die in der Zeitachse noch „ankommt“.
+    next_arrival_idx = 0
+
+    # Parameter: ob ein Fahrzeug den Ladepunkt freigibt, sobald es fertig geladen ist.(Zeitverzögert möglich)
+    disconnect_cfg = site_cfg.get("disconnect_when_full", True)
+    disconnect_delay_hours = sample_disconnect_delay_hours(disconnect_cfg)
+
+
+    # ------------------------------------------------------------
+    # 7) Zeitschrittweise Simulation (mit FIFO-Belegung der Ladepunkte)
     # ------------------------------------------------------------
     for i, ts in enumerate(time_index):
 
-        # Anwesende Sessions mit Restbedarf
+        # --------------------------------------------------------
+        # 7.0) Ladepunkte freigeben (Abfahrt oder optional: fertig geladen)
+        # --------------------------------------------------------
+        # Ein Ladepunkt wird frei, wenn das Fahrzeug abfährt.
+        # Optional wird ein Ladepunkt zusätzlich frei, wenn das Fahrzeug sein Ziel erreicht hat
+        # (disconnect_when_full = True).
+        for c in range(len(chargers)):
+            s = chargers[c]
+            if s is None:
+                continue
+
+            departed = not (s["arrival_time"] <= ts < s["departure_time"])
+
+            finished = float(s.get("energy_required_kwh", 0.0)) <= 1e-9
+            finished_time = s.get("finished_charging_time", None)
+
+            # Entscheidung: darf Fahrzeug abstecken?
+            disconnect_allowed = False
+
+            if finished and disconnect_delay_hours is not None and finished_time is not None:
+                elapsed_h = (ts - finished_time).total_seconds() / 3600.0
+                if elapsed_h >= disconnect_delay_hours:
+                    disconnect_allowed = True
+
+            if departed or disconnect_allowed:
+                chargers[c] = None
+
+        # --------------------------------------------------------
+        # 7.0b) Neue Ankünfte in FIFO-Warteschlange aufnehmen
+        # --------------------------------------------------------
+        # Alle Sessions, deren Ankunft <= aktueller Zeitschritt, werden „angekommen“.
+        # Sie gehen zuerst in die Warteschlange und werden dann FIFO ggf. auf freie Ladepunkte gesteckt.
+        while next_arrival_idx < len(all_charging_sessions) and all_charging_sessions[next_arrival_idx]["arrival_time"] <= ts:
+            waiting_queue.append(all_charging_sessions[next_arrival_idx])
+            next_arrival_idx += 1
+
+        # --------------------------------------------------------
+        # 7.0c) FIFO-Zuweisung auf freie Ladepunkte (physisches „Stecken“)
+        # --------------------------------------------------------
+        # Freie Ladepunkte werden in fixer Reihenfolge gefüllt (FIFO).
+        # Dadurch kann ein später ankommendes Fahrzeug keinen bereits belegten Punkt verdrängen.
+        for c in range(len(chargers)):
+            if chargers[c] is not None:
+                continue
+            if not waiting_queue:
+                break
+
+            s = waiting_queue.popleft()
+
+            # Fahrzeuge ohne Ladebedarf werden nicht gesteckt (oder werden sofort als „fertig“ betrachtet).
+            if float(s.get("energy_required_kwh", 0.0)) <= 1e-9:
+                continue
+
+            chargers[c] = s
+            s["_charger_id"] = c
+            s["_plug_in_time"] = ts
+
+        # --------------------------------------------------------
+        # 7.0d) „Anwesende Sessions“ = physisch angeschlossene Sessions
+        # --------------------------------------------------------
+        # In diesem Modell sind nur Fahrzeuge aktiv steuerbar, die physisch eingesteckt sind.
+        plugged_sessions = [s for s in chargers if s is not None]
+
+        # Nur angeschlossene Sessions mit Restbedarf sind relevant fürs Scheduling.
         present_sessions = [
-            s for s in all_charging_sessions
+            s for s in plugged_sessions
             if s["arrival_time"] <= ts < s["departure_time"]
-            and s["energy_required_kwh"] > 0.0
+            and float(s.get("energy_required_kwh", 0.0)) > 0.0
         ]
 
         if not present_sessions:
             load_profile_kw[i] = 0.0
             charging_count_series.append(0)
             continue
+
 
         # --------------------------------------------------------
         # 7.1) Auswahl der zu ladenden Sessions
@@ -1696,6 +1819,10 @@ def simulate_load_profile(
                         energy_delivered = energy_needed
                         s["energy_required_kwh"] = 0.0
                         actual_power_kw = energy_delivered / (time_step_hours * charger_efficiency)
+                        # Zeitpunkt merken, ab dem Abstecken erlaubt ist
+                    if "finished_charging_time" not in s:
+                        s["finished_charging_time"] = ts
+
                     else:
                         energy_delivered = possible_energy_kwh
                         s["energy_required_kwh"] = energy_needed - possible_energy_kwh
