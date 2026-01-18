@@ -25,12 +25,12 @@ site:
   charging_strategy: "generation"                              # Lademanagementstrategie: "immediate" (default), "market", "generation"
   
   # CSV-Datei: PV-Erzeugung (generation)
-  generation_strategy_csv: "../data/strategies/latest.csv"     # Pfad bei vorhandenen Daten zur Stromgeneration: "../data/strategies//generation/latest.csv"
+  generation_strategy_csv: "../data/strategies/generation/latest.csv"     # Pfad bei vorhandenen Daten zur Stromgeneration: "../data/strategies//generation/latest.csv"
   generation_strategy_value_col: 3                             # Spalte, die entsprechende Werte ("MWh", "kWh", o.ä.) enthalten, woran sich die Lademanagementstrategie richtet (1-basierter Code: 1 = erste Spalte)
   generation_strategy_unit: "kW"                               # Einheit, die für den Wert im Lademanagement verwendet wird ("MWh", "kWh", "kW", "€/MWh")
   
   # CSV-Datei: Marktpreise (market)
-  market_strategy_csv: "../data/strategies/latest.csv"         # Pfad bei vorhandenen Daten zu Strompreisen: "../data/strategies//market/latest.csv"
+  market_strategy_csv: "../data/strategies/market/latest.csv"         # Pfad bei vorhandenen Daten zu Strompreisen: "../data/strategies//market/latest.csv"
   market_strategy_value_col: 3                                 # Spalte, die entsprechende Werte ("€/MWh", "€/kWh", o.ä.) enthalten, woran sich die Lademanagementstrategie richtet (1-basierter Code: 1 = erste Spalte)
   market_strategy_unit: "€/MWh"                                   # Einheit, die für den Wert im Lademanagement verwendet wird (€/kWh", "€/MWh")
 
