@@ -626,8 +626,9 @@ def build_charging_sessions_for_day(
                 "soc_grid": vehicle_profile.soc_grid,
                 "power_grid_kw": vehicle_profile.power_grid_kw,
 
-                "preferred_slot_indices": [],
-                "preferred_ptr": 0,
+                "preferred_market_slot_indices": [],
+                "preferred_market_ptr": 0,
+
             }
         )
 
@@ -883,7 +884,7 @@ def _build_preferred_slots_for_all_sessions(
     strategy_unit: str,
     step_hours: float,
 ) -> None:
-    if charging_strategy not in ("market", "generation"):
+    if charging_strategy != "market":
         return
     if not strategy_map or not time_index:
         return
