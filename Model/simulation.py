@@ -1047,7 +1047,7 @@ def _plan_pv_commitments_for_present_sessions(
     return pv_commit_kw, grid_needed_session_ids
 
 # =============================================================================
-# 7d) Reporting Helper: Strategy signal series (aligned)
+# 8c) Reporting Helper: Strategy signal series (aligned)
 # =============================================================================
 
 def build_strategy_signal_series(
@@ -1117,6 +1117,163 @@ def build_strategy_signal_series(
         y_label = f"{strat.upper()} [{strategy_unit}]"
 
     return series, y_label
+
+# =============================================================================
+# 8d) Reporting / KPI Helper (Notebook-freundlich, ohne Plotting)
+# =============================================================================
+
+def summarize_sessions(
+    sessions: list[dict[str, Any]],
+    eps_kwh: float = 1e-6,
+) -> dict[str, Any]:
+    """
+    Liefert eine kompakte KPI-Zusammenfassung + Datenbasis für Tabellen.
+
+    Rückgabe-Keys:
+      - num_sessions_total
+      - num_sessions_plugged
+      - num_sessions_rejected
+      - not_reached_rows: Liste[dict] (nur plugged, aber Ziel-SoC nicht erreicht)
+    """
+    if sessions is None:
+        return {
+            "num_sessions_total": 0,
+            "num_sessions_plugged": 0,
+            "num_sessions_rejected": 0,
+            "not_reached_rows": [],
+        }
+
+    plugged = [s for s in sessions if s.get("_plug_in_time") is not None]
+    rejected = [s for s in sessions if bool(s.get("_rejected", False))]
+
+    not_reached_rows: list[dict[str, Any]] = []
+    for s in plugged:
+        if float(s.get("energy_required_kwh", 0.0)) > float(eps_kwh):
+            arrival = s["arrival_time"]
+            departure = s["departure_time"]
+            not_reached_rows.append(
+                {
+                    "vehicle_name": s.get("vehicle_name", ""),
+                    "arrival_time": arrival,
+                    "departure_time": departure,
+                    "parking_hours": (departure - arrival).total_seconds() / 3600.0,
+                    "delivered_energy_kwh": float(s.get("delivered_energy_kwh", 0.0)),
+                    "remaining_energy_kwh": float(s.get("energy_required_kwh", 0.0)),
+                }
+            )
+
+    return {
+        "num_sessions_total": len(sessions),
+        "num_sessions_plugged": len(plugged),
+        "num_sessions_rejected": len(rejected),
+        "not_reached_rows": not_reached_rows,
+    }
+
+
+def get_daytype_calendar(
+    start_datetime: datetime,
+    horizon_days: int,
+    holiday_dates: set[date],
+) -> dict[str, list[date]]:
+    """
+    Baut eine calendarische Liste der Tage je Tagtyp:
+      working_day / saturday / sunday_holiday
+
+    Nutzt die gleiche Logik wie die Simulation (determine_day_type_with_holidays).
+    """
+    out: dict[str, list[date]] = {
+        "working_day": [],
+        "saturday": [],
+        "sunday_holiday": [],
+    }
+
+    for i in range(int(horizon_days)):
+        d = start_datetime.date() + timedelta(days=i)
+        dt_mid = datetime(d.year, d.month, d.day, 12, 0)
+        dt_type = determine_day_type_with_holidays(dt_mid, holiday_dates)
+        out.setdefault(dt_type, []).append(d)
+
+    return out
+
+
+def group_sessions_by_day(
+    sessions: list[dict[str, Any]],
+    only_plugged: bool = False,
+) -> dict[date, list[dict[str, Any]]]:
+    """
+    Gruppiert Sessions nach Ankunftsdatum (arrival_time.date()).
+
+    only_plugged=True -> nur Sessions, die mindestens einmal physisch angesteckt wurden.
+    """
+    out: dict[date, list[dict[str, Any]]] = {}
+
+    if not sessions:
+        return out
+
+    for s in sessions:
+        if only_plugged and s.get("_plug_in_time") is None:
+            continue
+        d = s["arrival_time"].date()
+        out.setdefault(d, []).append(s)
+
+    return out
+
+
+def build_pv_unused_table(
+    debug_rows: list[dict[str, Any]],
+):
+    """
+    Baut eine Tabelle der Zeitschritte, in denen PV-Überschuss vorhanden war,
+    aber nicht vollständig genutzt wurde.
+
+    Rückgabe: pandas.DataFrame (oder leeres DF, wenn nicht möglich).
+    Hinweis: pandas wird nur hier importiert (Notebook-freundlich).
+    """
+    try:
+        import pandas as pd
+        import numpy as np
+    except Exception:
+        # Falls pandas/numpy in einem Umfeld fehlen, lieber sauber zurückgeben
+        return None
+
+    if not debug_rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(debug_rows).copy()
+    if "ts" not in df.columns:
+        return pd.DataFrame()
+
+    df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
+
+    required = {"ts", "pv_surplus_kw", "site_total_power_kw"}
+    if not required.issubset(df.columns):
+        return pd.DataFrame()
+
+    # Nur Schritte mit PV-Überschuss
+    df_pv = df[df["pv_surplus_kw"] > 1e-6].copy()
+    if len(df_pv) == 0:
+        return pd.DataFrame()
+
+    grid_col = "grid_import_kw_site" if "grid_import_kw_site" in df_pv.columns else None
+
+    agg = {
+        "pv_surplus_kw": ("pv_surplus_kw", "first"),
+        "site_power_kw": ("site_total_power_kw", "first"),
+        "n_rows": ("vehicle_name", "count") if "vehicle_name" in df_pv.columns else ("pv_surplus_kw", "size"),
+    }
+    if grid_col:
+        agg["grid_import_kw"] = (grid_col, "first")
+
+    pv_steps = df_pv.groupby("ts", as_index=False).agg(**agg)
+
+    # PV-nutzbar für EV = min(PV surplus, site power)
+    pv_steps["pv_used_kw"] = np.minimum(pv_steps["pv_surplus_kw"], pv_steps["site_power_kw"])
+    pv_steps["pv_unused_kw"] = (pv_steps["pv_surplus_kw"] - pv_steps["pv_used_kw"]).clip(lower=0.0)
+
+    pv_unused_steps = pv_steps[pv_steps["pv_unused_kw"] > 1e-3].copy()
+    pv_unused_steps = pv_unused_steps.sort_values(["pv_unused_kw", "ts"], ascending=[False, True])
+
+    return pv_unused_steps
 
 
 # =============================================================================
