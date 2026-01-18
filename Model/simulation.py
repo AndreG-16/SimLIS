@@ -936,6 +936,72 @@ def _build_preferred_slots_for_all_sessions(
         s["preferred_slot_indices"] = [idx for _, idx in scored]
         s["preferred_ptr"] = 0
 
+def _build_preferred_market_slots_for_generation_fallback(
+    all_sessions: list[dict[str, Any]],
+    time_index: list[datetime],
+    time_to_idx: dict[datetime, int],
+    market_map: dict[datetime, float] | None,
+    market_resolution_min: int,
+    market_unit: str,
+    step_hours: float,
+) -> None:
+    """
+    Baut pro Session eine nach günstigen Preisen sortierte Slot-Liste
+    (nur für Grid-Fallback innerhalb der Generation-Strategie).
+    Ergebnis in:
+      - s["preferred_market_slot_indices"]
+      - s["preferred_market_ptr"]
+    """
+    if not market_map or not time_index:
+        return
+
+    for s in all_sessions:
+        if float(s.get("energy_required_kwh", 0.0)) <= 0.0:
+            continue
+
+        a = floor_to_resolution(s["arrival_time"], market_resolution_min)
+        d = floor_to_resolution(s["departure_time"], market_resolution_min)
+
+        while a not in time_to_idx and a < time_index[-1]:
+            a += timedelta(minutes=market_resolution_min)
+        while d not in time_to_idx and d > time_index[0]:
+            d -= timedelta(minutes=market_resolution_min)
+
+        if a not in time_to_idx or d not in time_to_idx:
+            s["preferred_market_slot_indices"] = []
+            s["preferred_market_ptr"] = 0
+            continue
+
+        start_idx = time_to_idx[a]
+        end_idx = time_to_idx[d]
+        if end_idx <= start_idx:
+            s["preferred_market_slot_indices"] = []
+            s["preferred_market_ptr"] = 0
+            continue
+
+        idxs = list(range(start_idx, end_idx))
+
+        scored: list[tuple[float, int]] = []
+        for idx in idxs:
+            t = time_index[idx]
+            raw = lookup_signal(market_map, t, market_resolution_min)
+            if raw is None:
+                score = 1e30
+            else:
+                price_eur_per_kwh = convert_strategy_value_to_internal(
+                    charging_strategy="market",
+                    raw_value=float(raw),
+                    strategy_unit=market_unit,  # "€/MWh" oder "€/kWh"
+                    step_hours=step_hours,
+                )
+                score = float(price_eur_per_kwh)
+
+            scored.append((score, idx))
+
+        scored.sort(key=lambda x: x[0])
+        s["preferred_market_slot_indices"] = [idx for _, idx in scored]
+        s["preferred_market_ptr"] = 0
+
 
 # =============================================================================
 # 8b) GENERATION – Rolling-Horizon PV-Reservation
@@ -1060,63 +1126,79 @@ def build_strategy_signal_series(
     """
     Baut eine Signal-Zeitreihe aligned auf 'timestamps' (für Plot/Reporting).
 
-    Rückgabe:
-      - series: np.ndarray der Länge len(timestamps), np.nan wenn kein Wert gefunden
-      - y_label: passende Achsenbeschriftung
+    - market: nutzt site.market_strategy_*
+    - generation: nutzt site.generation_strategy_*
     """
     strat = (charging_strategy or "immediate").lower()
     if strat not in ("market", "generation"):
         return None, None
-
     if not timestamps:
         return None, None
 
     site_cfg = scenario.get("site", {}) or {}
 
-    strategy_unit = str(site_cfg.get("strategy_unit", "") or "").strip()
-    if not strategy_unit:
-        raise ValueError(
-            "❌ Abbruch: Für market/generation muss 'site.strategy_unit' gesetzt sein "
-            "(market: '€/MWh' oder '€/kWh' | generation: 'MWh' oder 'kWh' oder 'kW')."
+    if strat == "market":
+        unit = str(site_cfg.get("market_strategy_unit", "") or "").strip()
+        csv_rel = site_cfg.get("market_strategy_csv", None)
+        col_1_based = site_cfg.get("market_strategy_value_col", None)
+
+        if unit not in ("€/MWh", "€/kWh"):
+            raise ValueError("❌ Abbruch: 'site.market_strategy_unit' muss '€/MWh' oder '€/kWh' sein.")
+        if not csv_rel or not isinstance(col_1_based, int) or col_1_based < 2:
+            raise ValueError("❌ Abbruch: 'site.market_strategy_csv' oder 'site.market_strategy_value_col' fehlt/ungültig.")
+
+        csv_path = resolve_path_relative_to_scenario(scenario, str(csv_rel))
+        strat_map = read_strategy_series_from_csv_first_col_time(
+            csv_path=csv_path,
+            value_col_1_based=int(col_1_based),
+            delimiter=";",
         )
 
-    strategy_csv = site_cfg.get("strategy_csv", None)
-    col_1_based = site_cfg.get("strategy_value_col", None)
-    if not strategy_csv or not isinstance(col_1_based, int) or col_1_based < 2:
-        raise ValueError("❌ Abbruch: 'site.strategy_csv' oder 'site.strategy_value_col' fehlt/ungültig.")
+        step_hours = strategy_resolution_min / 60.0
+        series = np.full(len(timestamps), np.nan, dtype=float)
+        for i, ts in enumerate(timestamps):
+            v = lookup_signal(strat_map, ts, strategy_resolution_min)
+            if v is None:
+                continue
+            series[i] = (
+                convert_strategy_value_to_internal("market", float(v), unit, step_hours)
+                if normalize_to_internal else float(v)
+            )
 
-    csv_path = resolve_path_relative_to_scenario(scenario, str(strategy_csv))
+        y_label = "Preis [€/kWh]" if normalize_to_internal else f"MARKET [{unit}]"
+        return series, y_label
 
-    strategy_map = read_strategy_series_from_csv_first_col_time(
+    # generation
+    unit = str(site_cfg.get("generation_strategy_unit", "") or "").strip()
+    csv_rel = site_cfg.get("generation_strategy_csv", None)
+    col_1_based = site_cfg.get("generation_strategy_value_col", None)
+
+    if unit not in ("kW", "kWh", "MWh"):
+        raise ValueError("❌ Abbruch: 'site.generation_strategy_unit' muss 'kW', 'kWh' oder 'MWh' sein.")
+    if not csv_rel or not isinstance(col_1_based, int) or col_1_based < 2:
+        raise ValueError("❌ Abbruch: 'site.generation_strategy_csv' oder 'site.generation_strategy_value_col' fehlt/ungültig.")
+
+    csv_path = resolve_path_relative_to_scenario(scenario, str(csv_rel))
+    strat_map = read_strategy_series_from_csv_first_col_time(
         csv_path=csv_path,
         value_col_1_based=int(col_1_based),
         delimiter=";",
     )
 
     step_hours = strategy_resolution_min / 60.0
-
     series = np.full(len(timestamps), np.nan, dtype=float)
     for i, ts in enumerate(timestamps):
-        v = lookup_signal(strategy_map, ts, strategy_resolution_min)
+        v = lookup_signal(strat_map, ts, strategy_resolution_min)
         if v is None:
             continue
+        series[i] = (
+            convert_strategy_value_to_internal("generation", float(v), unit, step_hours)
+            if normalize_to_internal else float(v)
+        )
 
-        if normalize_to_internal:
-            series[i] = convert_strategy_value_to_internal(
-                charging_strategy=strat,
-                raw_value=float(v),
-                strategy_unit=strategy_unit,
-                step_hours=step_hours,
-            )
-        else:
-            series[i] = float(v)
-
-    if normalize_to_internal:
-        y_label = "Preis [€/kWh]" if strat == "market" else "Erzeugung [kW]"
-    else:
-        y_label = f"{strat.upper()} [{strategy_unit}]"
-
+    y_label = "Erzeugung [kW]" if normalize_to_internal else f"GENERATION [{unit}]"
     return series, y_label
+
 
 # =============================================================================
 # 8d) Reporting / KPI Helper (Notebook-freundlich, ohne Plotting)
@@ -1317,7 +1399,7 @@ def simulate_load_profile(
     vehicle_profiles = load_vehicle_profiles_from_csv(vehicle_csv_path)
 
     # ------------------------------------------------------------
-    # 4) Strategie-Initialisierung
+    # 4) Strategie-Initialisierung (NEU: getrennte CSVs für market & generation)
     # ------------------------------------------------------------
     site_cfg = scenario.get("site", {}) or {}
     charging_strategy = (site_cfg.get("charging_strategy") or "immediate").lower()
@@ -1325,42 +1407,112 @@ def simulate_load_profile(
     STRATEGY_RESOLUTION_MIN = 15
     strategy_step_hours = STRATEGY_RESOLUTION_MIN / 60.0
 
-    strategy_map: dict[datetime, float] | None = None
-    strategy_csv_path: str | None = None
-    strategy_unit = str(site_cfg.get("strategy_unit", "") or "").strip()
+    # generation (PV/Erzeugung)
+    generation_map: dict[datetime, float] | None = None
+    generation_csv_path: str | None = None
+    generation_unit: str | None = None
 
-    if charging_strategy in ("market", "generation"):
-        if not strategy_unit:
-            raise ValueError(
-                "❌ Abbruch: Für charging_strategy 'market' oder 'generation' muss 'site.strategy_unit' gesetzt sein "
-                "(market: '€/MWh' oder '€/kWh' | generation: 'MWh' oder 'kWh' oder 'kW')."
-            )
+    # market (Preis)
+    market_map: dict[datetime, float] | None = None
+    market_csv_path: str | None = None
+    market_unit: str | None = None
 
-        strategy_csv = site_cfg.get("strategy_csv", None)
-        if not strategy_csv:
-            raise ValueError(
-                "❌ Abbruch: Für charging_strategy 'market' oder 'generation' muss in der YAML 'site.strategy_csv' gesetzt sein."
-            )
+    # -----------------------------
+    # A) Market-Strategie: nur Market CSV
+    # -----------------------------
+    if charging_strategy == "market":
+        market_unit = str(site_cfg.get("market_strategy_unit", "") or "").strip()
+        if market_unit not in ("€/MWh", "€/kWh"):
+            raise ValueError("❌ Abbruch: 'site.market_strategy_unit' muss '€/MWh' oder '€/kWh' sein.")
 
-        col_1_based = site_cfg.get("strategy_value_col", None)
-        if col_1_based is None or not isinstance(col_1_based, int) or col_1_based < 2:
-            raise ValueError("❌ Abbruch: 'site.strategy_value_col' muss int >= 2 sein (1=Zeitspalte).")
+        market_csv = site_cfg.get("market_strategy_csv", None)
+        market_col = site_cfg.get("market_strategy_value_col", None)
+        if not market_csv:
+            raise ValueError("❌ Abbruch: Für charging_strategy='market' muss 'site.market_strategy_csv' gesetzt sein.")
+        if not isinstance(market_col, int) or market_col < 2:
+            raise ValueError("❌ Abbruch: 'site.market_strategy_value_col' muss int >= 2 sein (1=Zeitspalte).")
 
-        strategy_csv_path = resolve_path_relative_to_scenario(scenario, strategy_csv)
-
-        strategy_map = read_strategy_series_from_csv_first_col_time(
-            csv_path=strategy_csv_path,
-            value_col_1_based=int(col_1_based),
+        market_csv_path = resolve_path_relative_to_scenario(scenario, str(market_csv))
+        market_map = read_strategy_series_from_csv_first_col_time(
+            csv_path=market_csv_path,
+            value_col_1_based=int(market_col),
             delimiter=";",
         )
 
         assert_strategy_csv_covers_simulation(
-            strategy_map=strategy_map,
+            strategy_map=market_map,
             time_index=time_index,
             strategy_resolution_min=STRATEGY_RESOLUTION_MIN,
-            charging_strategy=charging_strategy,
-            strategy_csv_path=strategy_csv_path,
+            charging_strategy="market",
+            strategy_csv_path=market_csv_path,
         )
+
+    # -----------------------------
+    # B) Generation-Strategie: Generation CSV + Market CSV (Fallback)
+    # -----------------------------
+    elif charging_strategy == "generation":
+        # 1) Generation (PV)
+        generation_unit = str(site_cfg.get("generation_strategy_unit", "") or "").strip()
+        if generation_unit not in ("kW", "kWh", "MWh"):
+            raise ValueError("❌ Abbruch: 'site.generation_strategy_unit' muss 'kW', 'kWh' oder 'MWh' sein.")
+
+        gen_csv = site_cfg.get("generation_strategy_csv", None)
+        gen_col = site_cfg.get("generation_strategy_value_col", None)
+        if not gen_csv:
+            raise ValueError("❌ Abbruch: Für charging_strategy='generation' muss 'site.generation_strategy_csv' gesetzt sein.")
+        if not isinstance(gen_col, int) or gen_col < 2:
+            raise ValueError("❌ Abbruch: 'site.generation_strategy_value_col' muss int >= 2 sein (1=Zeitspalte).")
+
+        generation_csv_path = resolve_path_relative_to_scenario(scenario, str(gen_csv))
+        generation_map = read_strategy_series_from_csv_first_col_time(
+            csv_path=generation_csv_path,
+            value_col_1_based=int(gen_col),
+            delimiter=";",
+        )
+
+        assert_strategy_csv_covers_simulation(
+            strategy_map=generation_map,
+            time_index=time_index,
+            strategy_resolution_min=STRATEGY_RESOLUTION_MIN,
+            charging_strategy="generation",
+            strategy_csv_path=generation_csv_path,
+        )
+
+        # 2) Market (Fallback)
+        market_unit = str(site_cfg.get("market_strategy_unit", "") or "").strip()
+        if market_unit not in ("€/MWh", "€/kWh"):
+            raise ValueError("❌ Abbruch: generation + Market-Fallback: 'site.market_strategy_unit' muss '€/MWh' oder '€/kWh' sein.")
+
+        market_csv = site_cfg.get("market_strategy_csv", None)
+        market_col = site_cfg.get("market_strategy_value_col", None)
+        if not market_csv:
+            raise ValueError("❌ Abbruch: generation + Market-Fallback: 'site.market_strategy_csv' fehlt.")
+        if not isinstance(market_col, int) or market_col < 2:
+            raise ValueError("❌ Abbruch: generation + Market-Fallback: 'site.market_strategy_value_col' muss int >= 2 sein.")
+
+        market_csv_path = resolve_path_relative_to_scenario(scenario, str(market_csv))
+        market_map = read_strategy_series_from_csv_first_col_time(
+            csv_path=market_csv_path,
+            value_col_1_based=int(market_col),
+            delimiter=";",
+        )
+
+        assert_strategy_csv_covers_simulation(
+            strategy_map=market_map,
+            time_index=time_index,
+            strategy_resolution_min=STRATEGY_RESOLUTION_MIN,
+            charging_strategy="market_fallback_for_generation",
+            strategy_csv_path=market_csv_path,
+        )
+
+    # -----------------------------
+    # C) Immediate: nichts laden
+    # -----------------------------
+    elif charging_strategy == "immediate":
+        pass
+    else:
+        raise ValueError(f"❌ Abbruch: Unbekannte charging_strategy='{charging_strategy}'")
+
 
     # ------------------------------------------------------------
     # 5) Parameter & Ergebniscontainer
@@ -1396,9 +1548,9 @@ def simulate_load_profile(
     def _generation_kw_at(ts: datetime) -> float:
         if charging_strategy != "generation":
             return 0.0
-        if not strategy_map:
+        if not generation_map or not generation_unit:
             return 0.0
-        raw = lookup_signal(strategy_map, ts, STRATEGY_RESOLUTION_MIN)
+        raw = lookup_signal(generation_map, ts, STRATEGY_RESOLUTION_MIN)
         if raw is None:
             return 0.0
         return max(
@@ -1407,11 +1559,12 @@ def simulate_load_profile(
                 convert_strategy_value_to_internal(
                     charging_strategy="generation",
                     raw_value=float(raw),
-                    strategy_unit=strategy_unit,
+                    strategy_unit=str(generation_unit),
                     step_hours=strategy_step_hours,
                 )
             ),
         )
+
 
     # ------------------------------------------------------------
     # 5c) PV-Überschuss-Zeitreihe (Rolling-Horizon Input)
@@ -1453,19 +1606,33 @@ def simulate_load_profile(
             )
 
     # ------------------------------------------------------------
-    # 6b) Präferenzlisten (market/generation)
+    # 6b) Präferenzlisten (nur MARKET nutzt Preis-Slots direkt)
     # ------------------------------------------------------------
     time_to_idx = {t: idx for idx, t in enumerate(time_index)} if time_index else {}
-    _build_preferred_slots_for_all_sessions(
-        all_sessions=all_charging_sessions,
-        time_index=time_index,
-        time_to_idx=time_to_idx,
-        charging_strategy=charging_strategy,
-        strategy_map=strategy_map,
-        strategy_resolution_min=STRATEGY_RESOLUTION_MIN,
-        strategy_unit=strategy_unit,
-        step_hours=strategy_step_hours,
-    )
+
+    if charging_strategy == "market":
+        _build_preferred_slots_for_all_sessions(
+            all_sessions=all_charging_sessions,
+            time_index=time_index,
+            time_to_idx=time_to_idx,
+            charging_strategy="market",
+            strategy_map=market_map,
+            strategy_resolution_min=STRATEGY_RESOLUTION_MIN,
+            strategy_unit=str(market_unit),
+            step_hours=strategy_step_hours,
+        )
+
+    # Für generation: Market-Fallback-Slots separat (siehe Block darunter)
+    if charging_strategy == "generation" and market_map is not None and market_unit is not None:
+        _build_preferred_market_slots_for_generation_fallback(
+            all_sessions=all_charging_sessions,
+            time_index=time_index,
+            time_to_idx=time_to_idx,
+            market_map=market_map,
+            market_resolution_min=STRATEGY_RESOLUTION_MIN,
+            market_unit=str(market_unit),
+            step_hours=strategy_step_hours,
+        )
 
     # ------------------------------------------------------------
     # 6c) Arrival-Blocking-Policy + Belegung vorbereiten
@@ -1583,6 +1750,9 @@ def simulate_load_profile(
                 rated_power_kw=rated_power_kw,
             )
 
+            # PV-Überschuss im aktuellen Zeitschritt (für Auswahl PV-only)
+            pv_budget_kw_now = max(0.0, _generation_kw_at(ts) - _base_load_kw_at(i))
+
             pv_only_candidates: list[dict[str, Any]] = []
             grid_needed_candidates: list[dict[str, Any]] = []
 
@@ -1604,19 +1774,60 @@ def simulate_load_profile(
                 else:
                     pv_only_candidates.append(s)
 
-            grid_needed_candidates.sort(
-                key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"])
-            )
-            pv_only_candidates.sort(
-                key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"])
-            )
+            # Marktpreis-Fallback aktiv, weil wir market_map bei generation laden
+            has_market_fallback = (market_map is not None and market_unit is not None)
+
+            emergency: list[dict[str, Any]] = []
+            market_slot: list[dict[str, Any]] = []
+            grid_other: list[dict[str, Any]] = []
+
+            for s in grid_needed_candidates:
+                if float(s.get("_slack_minutes", 1e9)) <= emergency_slack_minutes:
+                    emergency.append(s)
+                    continue
+
+                if has_market_fallback:
+                    pref = s.get("preferred_market_slot_indices", [])
+                    ptr = int(s.get("preferred_market_ptr", 0))
+
+                    while ptr < len(pref) and pref[ptr] < i:
+                        ptr += 1
+                    s["preferred_market_ptr"] = ptr
+
+                    if pref and ptr < len(pref) and pref[ptr] == i:
+                        market_slot.append(s)
+                    else:
+                        grid_other.append(s)
+                else:
+                    grid_other.append(s)
+
+            # Sortierungen: immer nach Slack/Departure
+            emergency.sort(key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"]))
+            market_slot.sort(key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"]))
+            grid_other.sort(key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"]))
+            pv_only_candidates.sort(key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"]))
 
             charging_sessions = []
-            charging_sessions.extend(grid_needed_candidates[:number_of_chargers])
 
+            # (1) Emergency immer
+            charging_sessions.extend(emergency[:number_of_chargers])
+
+            # (2) Dann günstige Market-Slots (für den Grid-Anteil)
+            remaining = number_of_chargers - len(charging_sessions)
+            if remaining > 0 and has_market_fallback:
+                charging_sessions.extend(market_slot[:remaining])
+
+            # (3) PV-only nur wenn PV aktuell > 0 (sonst sinnlos)
+            remaining = number_of_chargers - len(charging_sessions)
+            if remaining > 0 and pv_budget_kw_now > 1e-9:
+                charging_sessions.extend(pv_only_candidates[:remaining])
+
+            # (4) Rest auffüllen:
+            # Mit Market-Fallback lassen wir als letzte Stufe dennoch slack-sortiert laden,
+            # damit Feasibility gegeben ist (sonst könnten Sessions "verhungern").
             remaining = number_of_chargers - len(charging_sessions)
             if remaining > 0:
-                charging_sessions.extend(pv_only_candidates[:remaining])
+                charging_sessions.extend(grid_other[:remaining])
 
         else:
             # market / sonstige
@@ -1928,8 +2139,11 @@ def simulate_load_profile(
     # ============================================================
     if charging_strategy == "immediate":
         strategy_status = "IMMEDIATE"
-    elif charging_strategy in ("market", "generation"):
-        strategy_status = "ACTIVE" if strategy_map else "INACTIVE"
+    elif charging_strategy == "market":
+        strategy_status = "ACTIVE" if market_map else "INACTIVE"
+    elif charging_strategy == "generation":
+        # generation gilt als ACTIVE nur wenn PV-CSV da ist (Market-Fallback ist optional, aber bei dir Pflicht)
+        strategy_status = "ACTIVE" if generation_map else "INACTIVE"
     else:
         raise ValueError(f"❌ Abbruch: Unbekannte charging_strategy='{charging_strategy}'")
 
