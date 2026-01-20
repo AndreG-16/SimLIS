@@ -1,7 +1,7 @@
 site_type: office      # Standort des Ladepunkts
 
 time_resolution_min: 15          # Zeitschritt, in der die Simulation berechnet wird
-simulation_horizon_days: 7       # gewünschter Analysehorizont in Tagen
+simulation_horizon_days: 2       # gewünschter Analysehorizont in Tagen
 
 start_datetime: "2025-12-01 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen soll
 holidays:
@@ -11,7 +11,7 @@ holidays:
      
 
 site:
-  number_chargers: 60                                         # Anzahl der Ladepunkte am Standort
+  number_chargers: 15                                         # Anzahl der Ladepunkte am Standort
   rated_power_kw: 50                                         # Verfügbare Leistung pro Ladepunkt
   grid_limit_p_avb_kw: 300                                    # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
   expected_sessions_per_charger_per_day: [2.0, 4.0]           # erwartete Ladevorgänge pro LP und Tag

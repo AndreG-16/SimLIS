@@ -8,7 +8,7 @@ from typing import Any
 
 
 # =============================================================================
-# Modulüberblick (Erläuterung in 3. Person)
+# Modulüberblick 
 # =============================================================================
 # Dieses Modul simuliert den Lastgang eines Ladepark-Standorts über einen konfigurierten Zeithorizont.
 # Es trennt bewusst:
@@ -1463,7 +1463,7 @@ def run_step_generation_with_fallbacks(
     """
     Diese Funktion führt einen Generation-Zeitschritt aus (PV zuerst, dann Fallbacks).
 
-    Physik/Limit-Definition (wie gewünscht):
+    Physik/Limit-Definition:
       - grid_limit_p_avb_kw ist ein Import-Limit.
       - PV kommt zusätzlich und reduziert den Grid-Import physikalisch.
       - Damit gilt: grid_import = max(0, total_power - pv_surplus_kw_now) <= grid_limit_p_avb_kw
@@ -1594,7 +1594,7 @@ def run_step_generation_with_fallbacks(
 
 
 # =============================================================================
-# 14) Hauptsimulation (sauber getrennt: Grundmodell vs. Lademanagement)
+# 14) Hauptsimulation
 # =============================================================================
 
 def simulate_load_profile(
@@ -1918,41 +1918,283 @@ def simulate_load_profile(
     )
 
 # =============================================================================
-# 15) KPI Helper / Reporting (Notebook)
+# Reporting / KPI Helper (Notebook)
 # =============================================================================
+# Dieser Abschnitt bündelt ausschließlich Notebook-Helfer:
+#   - KPI-Zusammenfassungen über Sessions
+#   - Kalender-/Gruppierungsfunktionen für Histogramme
+#   - PV-unused-Auswertung aus debug_rows
+#   - Signalreihen für Plotting (Generation/Market)
 
-def summarize_sessions_by_charging_mode(
-    sessions: list[dict[str, Any]],
+
+def summarize_sessions(
+    sessions: list[dict[str, Any]] | None,
     eps_kwh: float = 1e-6,
 ) -> dict[str, Any]:
     """
-    Diese Funktion zählt, wie viele Sessions mindestens einmal mit generation, market
-    oder immediate geladen wurden.
+    Diese Funktion erzeugt eine KPI-Zusammenfassung über alle Sessions.
 
-    Wichtig:
-      - Eine Session kann in mehreren Modi gezählt werden (z.B. PV + Market-Fallback).
-      - Gezählt wird nur, wenn tatsächlich Energie > eps_kwh im jeweiligen Modus geliefert wurde.
+    Rückgabe (notebook-kompatibel):
+      - num_sessions_total: alle Sessions (mit Ladebedarf im Grundmodell)
+      - num_sessions_plugged: Sessions, die physisch eingesteckt wurden
+      - num_sessions_rejected: Sessions, die wegen fehlender Ladepunkte abgewiesen wurden
+      - not_reached_rows: Liste der Sessions, die ihr Ziel-SoC nicht erreicht haben (Restenergie > eps_kwh)
+    """
+    if not sessions:
+        return {
+            "num_sessions_total": 0,
+            "num_sessions_plugged": 0,
+            "num_sessions_rejected": 0,
+            "not_reached_rows": [],
+        }
+
+    plugged = [s for s in sessions if s.get("_plug_in_time") is not None]
+    rejected = [s for s in sessions if bool(s.get("_rejected", False))]
+
+    not_reached_rows: list[dict[str, Any]] = []
+    for s in plugged:
+        remaining = float(s.get("energy_required_kwh", 0.0))
+        if remaining <= float(eps_kwh):
+            continue
+
+        arrival = s["arrival_time"]
+        departure = s["departure_time"]
+
+        not_reached_rows.append(
+            {
+                "vehicle_name": s.get("vehicle_name", ""),
+                "arrival_time": arrival,
+                "departure_time": departure,
+                "parking_hours": (departure - arrival).total_seconds() / 3600.0,
+                "delivered_energy_kwh": float(s.get("delivered_energy_kwh", 0.0)),
+                "remaining_energy_kwh": remaining,
+            }
+        )
+
+    return {
+        "num_sessions_total": len(sessions),
+        "num_sessions_plugged": len(plugged),
+        "num_sessions_rejected": len(rejected),
+        "not_reached_rows": not_reached_rows,
+    }
+
+
+def get_daytype_calendar(
+    start_datetime: datetime,
+    horizon_days: int,
+    holiday_dates: set[date],
+) -> dict[str, list[date]]:
+    """
+    Diese Funktion erzeugt eine Liste der Tage je Tagtyp.
+
+    Sie nutzt die zentrale Logik determine_day_type_with_holidays(...) aus dem Modul,
+    damit die Kalenderklassifikation konsistent zur Simulation bleibt.
+    """
+    out: dict[str, list[date]] = {"working_day": [], "saturday": [], "sunday_holiday": []}
+
+    for i in range(int(horizon_days)):
+        d = start_datetime.date() + timedelta(days=i)
+
+        # Für die Tagesklassifikation wird bewusst eine fixe Tagesmitte verwendet.
+        dt_mid = datetime(d.year, d.month, d.day, 12, 0)
+        dt_type = determine_day_type_with_holidays(dt_mid, holiday_dates)
+
+        out.setdefault(dt_type, []).append(d)
+
+    return out
+
+
+def group_sessions_by_day(
+    sessions: list[dict[str, Any]] | None,
+    only_plugged: bool = False,
+) -> dict[date, list[dict[str, Any]]]:
+    """
+    Diese Funktion gruppiert Sessions nach dem Ankunftsdatum.
+
+    Parameter:
+      - only_plugged=True filtert auf Sessions, die physisch eingesteckt wurden.
+    """
+    out: dict[date, list[dict[str, Any]]] = {}
+    if not sessions:
+        return out
+
+    for s in sessions:
+        if only_plugged and s.get("_plug_in_time") is None:
+            continue
+        d = s["arrival_time"].date()
+        out.setdefault(d, []).append(s)
+
+    return out
+
+
+def build_pv_unused_table(debug_rows: list[dict[str, Any]] | None):
+    """
+    Diese Funktion erstellt eine Tabelle für Zeitpunkte mit ungenutztem PV-Überschuss.
+
+    Erwartete Felder in debug_rows (generation-Strategie):
+      - ts
+      - pv_surplus_kw
+      - site_total_power_kw
+      - optional: grid_import_kw_site
 
     Rückgabe:
-      - Dictionary mit Session-Anzahlen je Modus sowie Overlap-Informationen.
+      - pandas.DataFrame (kann leer sein)
+      - None, wenn pandas nicht verfügbar ist
     """
-    modes = ["generation", "market", "immediate"]
+    try:
+        import pandas as pd
+        import numpy as np
+    except Exception:
+        return None
+
+    if not debug_rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(debug_rows).copy()
+    if "ts" not in df.columns:
+        return pd.DataFrame()
+
+    df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
+
+    required = {"ts", "pv_surplus_kw", "site_total_power_kw"}
+    if not required.issubset(df.columns):
+        return pd.DataFrame()
+
+    df_pv = df[df["pv_surplus_kw"] > 1e-6].copy()
+    if len(df_pv) == 0:
+        return pd.DataFrame()
+
+    agg: dict[str, tuple[str, str]] = {
+        "pv_surplus_kw": ("pv_surplus_kw", "first"),
+        "site_power_kw": ("site_total_power_kw", "first"),
+        "n_rows": ("pv_surplus_kw", "size"),
+    }
+    if "grid_import_kw_site" in df_pv.columns:
+        agg["grid_import_kw"] = ("grid_import_kw_site", "first")
+
+    pv_steps = df_pv.groupby("ts", as_index=False).agg(**agg)
+
+    pv_steps["pv_used_kw"] = np.minimum(pv_steps["pv_surplus_kw"], pv_steps["site_power_kw"])
+    pv_steps["pv_unused_kw"] = (pv_steps["pv_surplus_kw"] - pv_steps["pv_used_kw"]).clip(lower=0.0)
+
+    pv_unused_steps = pv_steps[pv_steps["pv_unused_kw"] > 1e-3].copy()
+    pv_unused_steps = pv_unused_steps.sort_values(["pv_unused_kw", "ts"], ascending=[False, True])
+
+    return pv_unused_steps
+
+
+def build_strategy_signal_series(
+    scenario: dict[str, Any],
+    timestamps: list[datetime],
+    charging_strategy: str,
+    normalize_to_internal: bool = True,
+    strategy_resolution_min: int = 15,
+) -> tuple[np.ndarray | None, str | None]:
+    """
+    Diese Funktion erstellt eine an die Simulationstimestamps ausgerichtete Strategie-Zeitreihe
+    für Plotting im Notebook.
+
+    Verhalten:
+      - "market": Marktpreise (optional normalisiert zu €/kWh)
+      - "generation": Erzeugung (optional normalisiert zu kW)
+
+    Rückgabe:
+      - series (numpy array) oder None
+      - y_label (Achsenbeschriftung) oder None
+    """
+    strat = (charging_strategy or "").strip().lower()
+    if strat not in ("market", "generation") or not timestamps:
+        return None, None
+
+    site_cfg = scenario.get("site", {}) or {}
+    step_hours = float(strategy_resolution_min) / 60.0
+
+    def _load_cfg(prefix: str, allowed_units: set[str]) -> tuple[str, str, int]:
+        unit = str(site_cfg.get(f"{prefix}_strategy_unit", "") or "").strip()
+        csv_rel = site_cfg.get(f"{prefix}_strategy_csv", None)
+        col = site_cfg.get(f"{prefix}_strategy_value_col", None)
+
+        if unit not in allowed_units:
+            raise ValueError(f"❌ Abbruch: 'site.{prefix}_strategy_unit' ungültig (erlaubt: {sorted(allowed_units)}).")
+        if not csv_rel or not isinstance(col, int) or col < 2:
+            raise ValueError(f"❌ Abbruch: 'site.{prefix}_strategy_csv' oder 'site.{prefix}_strategy_value_col' fehlt/ungültig.")
+        return unit, str(csv_rel), int(col)
+
+    if strat == "market":
+        unit, csv_rel, col_1_based = _load_cfg("market", {"€/MWh", "€/kWh"})
+        csv_path = resolve_path_relative_to_scenario(scenario, csv_rel)
+        strat_map = read_strategy_series_from_csv_first_col_time(csv_path, col_1_based, delimiter=";")
+
+        series = np.full(len(timestamps), np.nan, dtype=float)
+        for i, ts in enumerate(timestamps):
+            v = lookup_signal(strat_map, ts, strategy_resolution_min)
+            if v is None:
+                continue
+            series[i] = (
+                convert_strategy_value_to_internal("market", float(v), unit, step_hours)
+                if normalize_to_internal else float(v)
+            )
+
+        y_label = "Preis [€/kWh]" if normalize_to_internal else f"MARKET [{unit}]"
+        return series, y_label
+
+    # generation
+    unit, csv_rel, col_1_based = _load_cfg("generation", {"kW", "kWh", "MWh"})
+    csv_path = resolve_path_relative_to_scenario(scenario, csv_rel)
+    strat_map = read_strategy_series_from_csv_first_col_time(csv_path, col_1_based, delimiter=";")
+
+    series = np.full(len(timestamps), np.nan, dtype=float)
+    for i, ts in enumerate(timestamps):
+        v = lookup_signal(strat_map, ts, strategy_resolution_min)
+        if v is None:
+            continue
+        series[i] = (
+            convert_strategy_value_to_internal("generation", float(v), unit, step_hours)
+            if normalize_to_internal else float(v)
+        )
+
+    y_label = "Erzeugung [kW]" if normalize_to_internal else f"GENERATION [{unit}]"
+    return series, y_label
+
+
+def summarize_sessions_by_charging_mode(
+    sessions: list[dict[str, Any]] | None,
+    eps_kwh: float = 1e-6,
+) -> dict[str, Any]:
+    """
+    Diese Funktion zählt, wie viele Sessions mindestens einmal Energie in den Modi
+    generation, market oder immediate erhalten haben.
+
+    Hinweis:
+      - Eine Session kann in mehreren Modi gezählt werden (z.B. PV + Market-Fallback).
+      - Gezählt wird nur, wenn tatsächlich Energie > eps_kwh im jeweiligen Modus geliefert wurde.
+    """
+    modes = ("generation", "market", "immediate")
+
+    if not sessions:
+        return {
+            "sessions_with_any_charging": 0,
+            "sessions_charged_with_generation": 0,
+            "sessions_charged_with_market": 0,
+            "sessions_charged_with_immediate": 0,
+            "sessions_with_multiple_modes": 0,
+        }
 
     counts = {m: 0 for m in modes}
     sessions_with_any = 0
     sessions_multi_mode = 0
 
-    for s in sessions or []:
+    for s in sessions:
         energy_by_mode = s.get("_energy_by_mode_kwh", {}) or {}
-        used_modes = [m for m in modes if float(energy_by_mode.get(m, 0.0)) > eps_kwh]
+        used = [m for m in modes if float(energy_by_mode.get(m, 0.0)) > float(eps_kwh)]
 
-        if not used_modes:
+        if not used:
             continue
 
         sessions_with_any += 1
-        for m in used_modes:
+        for m in used:
             counts[m] += 1
-        if len(used_modes) > 1:
+        if len(used) > 1:
             sessions_multi_mode += 1
 
     return {
@@ -1965,21 +2207,21 @@ def summarize_sessions_by_charging_mode(
 
 
 def summarize_energy_by_charging_mode(
-    sessions: list[dict[str, Any]],
+    sessions: list[dict[str, Any]] | None,
 ) -> dict[str, float]:
     """
-    Diese Funktion summiert die geladene Energie (kWh) getrennt nach Modus
-    über alle Sessions.
+    Diese Funktion summiert die geladene Energie (kWh) getrennt nach Modus über alle Sessions.
 
     Voraussetzung:
       - apply_energy_update(...) hat pro Session _energy_by_mode_kwh geschrieben.
     """
     total = {"generation": 0.0, "market": 0.0, "immediate": 0.0}
+    if not sessions:
+        return total
 
-    for s in sessions or []:
+    for s in sessions:
         energy_by_mode = s.get("_energy_by_mode_kwh", {}) or {}
         for mode in total.keys():
             total[mode] += float(energy_by_mode.get(mode, 0.0))
 
     return total
-
