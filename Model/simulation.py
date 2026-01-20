@@ -1,7 +1,7 @@
 import yaml
 import numpy as np
 from pathlib import Path
-import csv  # CSV-Dateien werden genutzt (Fahrzeug-Ladekurven, Erzeugungssignal, Marktpreise)
+import csv
 from dataclasses import dataclass
 from datetime import datetime, timedelta, date
 from typing import Any
@@ -11,14 +11,14 @@ from typing import Any
 # Modulüberblick (Erläuterung in 3. Person)
 # =============================================================================
 # Dieses Modul simuliert den Lastgang eines Ladepark-Standorts über einen konfigurierten Zeithorizont.
-# Es kombiniert:
-#   1) eine stochastische Session-Generierung (Ankunftszeiten, Parkdauer, SoC bei Ankunft),
-#   2) fahrzeugspezifische Ladekurven (max. Ladeleistung abhängig vom SoC),
-#   3) Standortgrenzen (Anzahl Ladepunkte, Leistung pro Ladepunkt, Netzanschlusslimit),
-#   4) optionales Lademanagement (immediate, market, generation),
-#   5) optionales Debug-Logging für Auswertungen im Notebook.
+# Es trennt bewusst:
+#   (1) Grundmodell / Session-Modellierung (Flotte, Ankünfte, Standzeiten, Energiebedarf),
+#   (2) Lademanagement (immediate, market, generation inkl. Fallbacks).
 #
-# Ziel ist ein Zeitprofil der EV-Ladeleistung (kW) sowie Session-Details für KPI-Analysen.
+# Ziel ist:
+#   - Zeitprofil der EV-Ladeleistung (kW)
+#   - Session-Details für KPI-Analysen
+#   - optional Debug-Zeitreihen für Notebook-Auswertungen
 
 
 # =============================================================================
@@ -33,13 +33,12 @@ def resolve_path_relative_to_scenario(scenario: dict[str, Any], p: str) -> str:
       - absolute Pfade unverändert bleiben,
       - relative Pfade relativ zum YAML-Ordner interpretiert werden.
 
-    Dadurch können Szenario-YAMLs portable gehalten werden (z.B. in Git),
+    Dadurch können Szenario-YAMLs portable gehalten werden,
     ohne dass der Nutzer absolute Pfade hardcoden muss.
     """
     pp = Path(p).expanduser()
     if pp.is_absolute():
         return str(pp)
-
     base = Path(scenario.get("_scenario_dir", "."))
     return str((base / pp).resolve())
 
@@ -56,8 +55,6 @@ def parse_number_de_or_en(raw: str) -> float:
       - deutsches Format:  "1.234,56"
       - englisches Format: "1,234.56" oder "90.91"
       - deutsches Dezimalkomma ohne Tausender: "90,91"
-
-    Sie wird in mehreren CSV-Ladern verwendet, um typische Excel-/Exportformate abzufangen.
     """
     s = (raw or "").strip().replace(" ", "")
     if s == "" or s == "-":
@@ -83,7 +80,6 @@ def parse_number_de_or_en(raw: str) -> float:
         s = s.replace(",", ".")
         return float(s)
 
-    # nur '.' oder kein Separator
     return float(s)
 
 
@@ -95,14 +91,11 @@ def show_strategy_status_html(strategy: str, status: str) -> None:
     """
     Diese Funktion zeigt im Notebook eine farbige Statuszeile an.
 
-    Sie wird genutzt, um dem Anwender schnell zu visualisieren:
+    Sie visualisiert:
       - welche Strategie aktiv ist,
       - ob die Strategie aktiv (Signal geladen) oder inaktiv ist.
 
-    Falls IPython nicht verfügbar ist, fällt sie auf einen normalen print zurück.
-
-    Erwartete status-Werte:
-      - "ACTIVE" | "INACTIVE" | "IMMEDIATE"
+    Falls IPython nicht verfügbar ist, fällt sie auf print zurück.
     """
     status = (status or "IMMEDIATE").upper()
     strategy = (strategy or "immediate").upper()
@@ -135,17 +128,7 @@ def show_strategy_status_html(strategy: str, status: str) -> None:
 @dataclass
 class VehicleProfile:
     """
-    Diese Datenklasse repräsentiert ein Fahrzeugprofil.
-
-    Enthalten sind:
-      - Name/Modell,
-      - Batteriekapazität (kWh),
-      - Fahrzeugklasse (z.B. PKW / Transporter),
-      - SoC-Stützstellen (0..1),
-      - zugehörige maximale Ladeleistung (kW) pro SoC-Stützstelle.
-
-    Die Arrays soc_grid und power_grid_kw bilden gemeinsam eine Ladekurve ab,
-    die per Interpolation genutzt werden kann.
+    Diese Datenklasse repräsentiert ein Fahrzeugprofil (Ladekurve + Kapazität).
     """
     name: str
     battery_capacity_kwh: float
@@ -156,47 +139,39 @@ class VehicleProfile:
 
 def load_vehicle_profiles_from_csv(path: str) -> list[VehicleProfile]:
     """
-    Diese Funktion lädt Fahrzeugprofile aus einer CSV-Datei.
+    Diese Funktion lädt Fahrzeugprofile aus einer CSV-Datei (Delimiter ';').
 
-    Erwartete Struktur (Delimiter ';'):
-      Zeile 1: Hersteller (wird ignoriert)
+    Erwartete Struktur:
+      Zeile 1: Hersteller (ignoriert)
       Zeile 2: Modellnamen
       Zeile 3: Fahrzeugklasse
       Zeile 4: Kapazität (kWh)
-      Zeile 5: "SoC [%]" (Header)
-      ab Zeile 6: SoC-Werte in % + Ladeleistungen je Fahrzeug
-
-    Die Funktion gibt eine Liste von VehicleProfile zurück.
-    Fahrzeuge ohne gültige Kapazität oder ohne Ladekurve werden verworfen.
+      Zeile 5: "SoC [%]" Header
+      ab Zeile 6: SoC in % + Ladeleistungen je Fahrzeug
     """
     vehicle_profiles: list[VehicleProfile] = []
 
     with open(path, "r", encoding="utf-8-sig") as f:
         reader = csv.reader(f, delimiter=";")
 
-        # Zeile 1: Hersteller (nicht benötigt)
-        _brands_row = next(reader, None)
+        _ = next(reader, None)  # Hersteller
 
-        # Zeile 2: Modelle
         model_row = next(reader, None)
         if not model_row or len(model_row) < 2:
             return []
         model_names = [m.strip() for m in model_row[1:]]
 
-        # Zeile 3: Klassen
         class_row = next(reader, None)
         if not class_row or len(class_row) < 2:
             return []
         vehicle_classes = [c.strip() if c.strip() != "" else "PKW" for c in class_row[1:]]
 
-        # Zeile 4: Kapazitäten
         capacity_row = next(reader, None)
         if not capacity_row or len(capacity_row) < 2:
             return []
         raw_capacities = capacity_row[1:]
 
-        # Zeile 5: SoC-Header (nur überspringen)
-        _soc_header_row = next(reader, None)
+        _ = next(reader, None)  # SoC Header
 
         capacities_kwh: list[float] = []
         for val in raw_capacities:
@@ -210,17 +185,14 @@ def load_vehicle_profiles_from_csv(path: str) -> list[VehicleProfile]:
             except ValueError:
                 capacities_kwh.append(np.nan)
 
-        # Konsistenz: Arrays auf gleiche Länge schneiden
         num_vehicles = min(len(model_names), len(vehicle_classes), len(capacities_kwh))
         model_names = model_names[:num_vehicles]
         vehicle_classes = vehicle_classes[:num_vehicles]
         capacities_kwh = capacities_kwh[:num_vehicles]
 
-        # Pro Fahrzeug werden SoC- und Power-Punkte gesammelt
         soc_lists: list[list[float]] = [[] for _ in range(num_vehicles)]
         power_lists: list[list[float]] = [[] for _ in range(num_vehicles)]
 
-        # Ab Zeile 6: SoC + Ladeleistung
         for row in reader:
             if not row:
                 continue
@@ -233,7 +205,6 @@ def load_vehicle_profiles_from_csv(path: str) -> list[VehicleProfile]:
                 soc_val_percent = parse_number_de_or_en(soc_str)
             except ValueError:
                 continue
-
             soc_val = soc_val_percent / 100.0
 
             for idx in range(num_vehicles):
@@ -246,32 +217,26 @@ def load_vehicle_profiles_from_csv(path: str) -> list[VehicleProfile]:
                     power_kw = parse_number_de_or_en(cell)
                 except ValueError:
                     continue
-
                 soc_lists[idx].append(soc_val)
                 power_lists[idx].append(power_kw)
 
-        # Profile finalisieren
         for i in range(num_vehicles):
-            name = model_names[i]
-            vclass = vehicle_classes[i]
             cap = capacities_kwh[i]
-
             if np.isnan(cap) or len(soc_lists[i]) == 0:
                 continue
 
             soc_grid = np.array(soc_lists[i], dtype=float)
             power_grid = np.array(power_lists[i], dtype=float)
 
-            # Sortierung stellt sicher, dass Interpolation korrekt funktioniert
             sort_idx = np.argsort(soc_grid)
             soc_grid = soc_grid[sort_idx]
             power_grid = power_grid[sort_idx]
 
             vehicle_profiles.append(
                 VehicleProfile(
-                    name=name,
+                    name=model_names[i],
                     battery_capacity_kwh=float(cap),
-                    vehicle_class=vclass,
+                    vehicle_class=vehicle_classes[i],
                     soc_grid=soc_grid,
                     power_grid_kw=power_grid,
                 )
@@ -283,12 +248,7 @@ def load_vehicle_profiles_from_csv(path: str) -> list[VehicleProfile]:
 def vehicle_power_at_soc(session: dict[str, Any]) -> float:
     """
     Diese Funktion berechnet die maximal mögliche Ladeleistung (kW) eines Fahrzeugs
-    bei aktuellem SoC.
-
-    Der aktuelle SoC ergibt sich aus:
-      SoC bei Ankunft + (bisher geladene Energie / Batteriekapazität)
-
-    Anschließend wird die Ladekurve (soc_grid, power_grid_kw) linear interpoliert.
+    bei aktuellem SoC per Interpolation der Ladekurve.
     """
     soc_grid = session["soc_grid"]
     power_grid = session["power_grid_kw"]
@@ -310,29 +270,21 @@ def vehicle_power_at_soc(session: dict[str, Any]) -> float:
 
 def load_scenario(path: str) -> dict[str, Any]:
     """
-    Diese Funktion lädt ein YAML-Szenario und ergänzt einen internen Kontextpfad.
-
-    Der Schlüssel scenario["_scenario_dir"] wird gesetzt, damit spätere Pfade
-    relativ zum YAML-Standort aufgelöst werden können.
+    Diese Funktion lädt ein YAML-Szenario und ergänzt den internen Kontextpfad.
     """
     with open(path, "r", encoding="utf-8") as file:
         scenario = yaml.safe_load(file)
-
     scenario["_scenario_dir"] = str(Path(path).resolve().parent)
     return scenario
 
 
 # =============================================================================
-# 3) Hilfsfunktionen: Ranges, Feiertage, Zeitindex, Disconnect
+# 3) Hilfsfunktionen: Ranges, Feiertage, Zeitindex
 # =============================================================================
 
 def sample_from_range(value_definition: Any) -> float:
     """
-    Diese Funktion interpretiert YAML-Werte, die entweder:
-      - als fester Wert (Skalar) angegeben sind, oder
-      - als Bereich [min, max] für eine Uniform-Ziehung.
-
-    Dadurch lassen sich Unsicherheiten in Parametern stochastisch modellieren.
+    Diese Funktion interpretiert YAML-Werte als Skalar oder Bereich [min, max].
     """
     if isinstance(value_definition, (list, tuple)):
         if len(value_definition) == 1:
@@ -341,7 +293,6 @@ def sample_from_range(value_definition: Any) -> float:
             lower_bound, upper_bound = value_definition
             return float(np.random.uniform(lower_bound, upper_bound))
         raise ValueError(f"Ungültiges Range-Format: {value_definition}")
-
     return float(value_definition)
 
 
@@ -350,14 +301,7 @@ def parse_holiday_dates_from_scenario(
     simulation_start_datetime: datetime,
 ) -> set[date]:
     """
-    Diese Funktion berechnet eine Menge an Feiertagen für den Simulationszeitraum.
-
-    Sie unterstützt:
-      - automatische Feiertage via Paket 'holidays' (Land + optionales Bundesland),
-      - zusätzlich manuell definierte Feiertage über YAML.
-
-    Das Ergebnis ist ein set[date], das später für die Tagesklassifikation
-    (working_day/saturday/sunday_holiday) verwendet wird.
+    Diese Funktion berechnet Feiertage für den Simulationszeitraum.
     """
     holidays_cfg = scenario.get("holidays", {}) or {}
     holiday_dates: set[date] = set()
@@ -394,13 +338,7 @@ def determine_day_type_with_holidays(
     holiday_dates: set[date],
 ) -> str:
     """
-    Diese Funktion klassifiziert einen Zeitpunkt als:
-      - working_day
-      - saturday
-      - sunday_holiday
-
-    Feiertage werden als sunday_holiday behandelt, weil in vielen Use-Cases
-    das Betriebsverhalten an Feiertagen einem Sonntag ähnelt.
+    Diese Funktion klassifiziert einen Zeitpunkt als working_day/saturday/sunday_holiday.
     """
     current_date = current_datetime.date()
 
@@ -418,13 +356,6 @@ def determine_day_type_with_holidays(
 def create_time_index(scenario: dict, start_datetime: datetime | None = None) -> list[datetime]:
     """
     Diese Funktion erzeugt die Simulationszeitachse als Liste von datetime.
-
-    Der Startpunkt wird gesetzt durch:
-      - explizit übergebene start_datetime (Parameter),
-      - oder scenario["start_datetime"],
-      - sonst: aktueller Tag 00:00.
-
-    Der Zeitschritt wird über scenario["time_resolution_min"] gesteuert.
     """
     if start_datetime is not None:
         simulation_start_datetime = start_datetime
@@ -444,41 +375,6 @@ def create_time_index(scenario: dict, start_datetime: datetime | None = None) ->
     return [simulation_start_datetime + step_index * time_step_delta for step_index in range(number_of_time_steps)]
 
 
-def sample_disconnect_delay_hours(cfg_value: Any) -> float | None:
-    """
-    Diese Funktion interpretiert Konfigurationswerte für eine optionale Verzögerung
-    (in Stunden), wann ein Fahrzeug nach Erreichen des Ziel-SoC abgesteckt wird.
-
-    Sie unterstützt:
-      - None: kein Disconnect
-      - bool: True => 0h, False => kein Disconnect
-      - Zahl: fixe Stunden
-      - [min, max]: Uniform-Ziehung in Stunden
-
-    Hinweis: In der aktuell hart kodierten "drive_off"-Variante wird diese Logik
-    nicht genutzt, kann aber für spätere Policies reaktiviert werden.
-    """
-    if cfg_value is None:
-        return None
-
-    if isinstance(cfg_value, bool):
-        return 0.0 if cfg_value else None
-
-    if isinstance(cfg_value, (int, float)):
-        return max(0.0, float(cfg_value))
-
-    if isinstance(cfg_value, (list, tuple)):
-        if len(cfg_value) == 1:
-            return max(0.0, float(cfg_value[0]))
-        if len(cfg_value) == 2:
-            return max(0.0, float(np.random.uniform(cfg_value[0], cfg_value[1])))
-
-    raise ValueError(
-        "❌ Ungültiger Wert für site.disconnect_when_full. "
-        "Erlaubt: true | false | Zahl | [min, max]"
-    )
-
-
 # =============================================================================
 # 4) Zufallsverteilungen / Mischungen
 # =============================================================================
@@ -490,15 +386,7 @@ def sample_mixture(
     unit_description: str = "generic",
 ) -> np.ndarray:
     """
-    Diese Funktion zieht Stichproben aus einer Mischverteilung.
-
-    Jede Komponente besitzt:
-      - weight (Gewicht),
-      - distribution (Typ),
-      - Parameter (mu/sigma, alpha/beta, low/high),
-      - optional shift_minutes (z.B. Umrechnung Stunden->Minuten in Arrival-Peaks).
-
-    Das Ergebnis ist ein numpy-Array mit Samples.
+    Diese Funktion zieht Samples aus einer Mischverteilung.
     """
     if number_of_samples <= 0:
         return np.array([])
@@ -519,25 +407,13 @@ def sample_mixture(
         dist_type = component.get("distribution", "lognormal").lower()
 
         if dist_type == "lognormal":
-            mu_value = float(component["mu"])
-            sigma_value = float(component["sigma"])
-            value = np.random.lognormal(mean=mu_value, sigma=sigma_value)
-
+            value = np.random.lognormal(mean=float(component["mu"]), sigma=float(component["sigma"]))
         elif dist_type == "normal":
-            mu_value = float(component["mu"])
-            sigma_value = float(component["sigma"])
-            value = np.random.normal(loc=mu_value, scale=sigma_value)
-
+            value = np.random.normal(loc=float(component["mu"]), scale=float(component["sigma"]))
         elif dist_type == "beta":
-            alpha = float(component["alpha"])
-            beta_param = float(component["beta"])
-            value = np.random.beta(a=alpha, b=beta_param)
-
+            value = np.random.beta(a=float(component["alpha"]), b=float(component["beta"]))
         elif dist_type == "uniform":
-            low = float(component["low"])
-            high = float(component["high"])
-            value = np.random.uniform(low, high)
-
+            value = np.random.uniform(float(component["low"]), float(component["high"]))
         else:
             raise ValueError(f"Unbekannte Verteilung: {dist_type}")
 
@@ -557,11 +433,7 @@ def realize_mixture_components(
     allow_shift: bool = False,
 ) -> list[dict[str, Any]]:
     """
-    Diese Funktion realisiert stochastische YAML-Templates von Mischkomponenten.
-
-    YAML kann Parameter als Bereiche angeben (z.B. mu: [7.5, 9.0]).
-    Diese Funktion zieht daraus konkrete Werte, sodass sample_mixture
-    anschließend mit festen Parametern arbeiten kann.
+    Diese Funktion realisiert stochastische YAML-Templates (Ranges -> konkrete Werte).
     """
     realized: list[dict[str, Any]] = []
 
@@ -601,15 +473,9 @@ def choose_vehicle_profile(
     scenario: dict[str, Any],
 ) -> VehicleProfile:
     """
-    Diese Funktion wählt ein Fahrzeugprofil aus der Flotte aus.
-
-    Wenn scenario["vehicles"]["fleet_mix"] definiert ist, wird die Ziehung
-    entsprechend der Klassengewichte durchgeführt (z.B. 98% PKW, 2% Transporter).
-
-    Ist keine Gewichtung vorhanden oder passt keine Klasse, wird uniform gewählt.
+    Diese Funktion wählt ein Fahrzeugprofil aus der Flotte.
     """
     fleet_mix = scenario.get("vehicles", {}).get("fleet_mix", None)
-
     if not fleet_mix:
         return np.random.choice(vehicle_profiles)
 
@@ -626,7 +492,7 @@ def choose_vehicle_profile(
 
 
 # =============================================================================
-# 6) Session-Generierung
+# 6) Grundmodell: Session-Generierung (Ankunft, Standzeit, SoC, Energiebedarf)
 # =============================================================================
 
 def sample_arrival_times_for_day(
@@ -636,21 +502,17 @@ def sample_arrival_times_for_day(
 ) -> list[datetime]:
     """
     Diese Funktion erzeugt Ankunftszeiten für einen Tag.
-
-    Schritte:
-      1) Tagesart bestimmen (working_day/saturday/sunday_holiday).
-      2) Erwartete Anzahl Sessions berechnen (Ladepunkte * Sessions/LP * Tagesgewicht).
-      3) Ankunftszeiten aus einer Mischverteilung (Peak-Struktur) ziehen.
-      4) Ergebnisse auf [0..24h) begrenzen und sortieren.
     """
     day_type = determine_day_type_with_holidays(day_start_datetime, holiday_dates)
 
     number_of_chargers = scenario["site"]["number_chargers"]
-    expected_sessions_per_charger_range = scenario["site"]["expected_sessions_per_charger_per_day"]
-    expected_sessions_per_charger = sample_from_range(expected_sessions_per_charger_range)
+    expected_sessions_per_charger = sample_from_range(
+        scenario["site"]["expected_sessions_per_charger_per_day"]
+    )
 
-    weekday_weight_range = scenario["arrival_time_distribution"]["weekday_weight"][day_type]
-    weekday_weight = sample_from_range(weekday_weight_range)
+    weekday_weight = sample_from_range(
+        scenario["arrival_time_distribution"]["weekday_weight"][day_type]
+    )
 
     number_of_sessions_today = int(number_of_chargers * expected_sessions_per_charger * weekday_weight)
     if number_of_sessions_today <= 0:
@@ -679,16 +541,12 @@ def sample_arrival_times_for_day(
 def sample_parking_durations(scenario: dict, number_of_sessions: int) -> np.ndarray:
     """
     Diese Funktion zieht Parkdauern (in Minuten) aus einer Mischverteilung.
-
-    Das Ergebnis wird auf [min_duration_minutes, max_duration_minutes] geclippt,
-    damit keine unrealistischen Extremwerte entstehen.
     """
     cfg = scenario["parking_duration_distribution"]
     max_minutes = cfg["max_duration_minutes"]
     min_minutes = cfg.get("min_duration_minutes", 10.0)
 
-    templates = cfg["components"]
-    mixture_components = realize_mixture_components(templates, allow_shift=False)
+    mixture_components = realize_mixture_components(cfg["components"], allow_shift=False)
 
     durations = sample_mixture(
         number_of_samples=number_of_sessions,
@@ -703,14 +561,11 @@ def sample_parking_durations(scenario: dict, number_of_sessions: int) -> np.ndar
 def sample_soc_upon_arrival(scenario: dict, number_of_sessions: int) -> np.ndarray:
     """
     Diese Funktion zieht SoC-Werte bei Ankunft aus einer Mischverteilung.
-
-    Der SoC wird nach unten bei 0 begrenzt und nach oben durch max_soc.
     """
     cfg = scenario["soc_at_arrival_distribution"]
     max_soc = cfg["max_soc"]
 
-    templates = cfg["components"]
-    mixture_components = realize_mixture_components(templates, allow_shift=False)
+    mixture_components = realize_mixture_components(cfg["components"], allow_shift=False)
 
     soc_values = sample_mixture(
         number_of_samples=number_of_sessions,
@@ -729,13 +584,7 @@ def build_charging_sessions_for_day(
     holiday_dates: set[date],
 ) -> list[dict[str, Any]]:
     """
-    Diese Funktion erzeugt Sessions (Ankunft/Abfahrt + Fahrzeugdaten) für einen Tag.
-
-    Für jede Session werden:
-      - Ankunft und Abfahrt gesetzt,
-      - ein Fahrzeugprofil gezogen,
-      - der Energiebedarf bis zum Ziel-SoC berechnet,
-      - initiale Session-Felder für die Simulation vorbereitet.
+    Diese Funktion baut Session-Objekte (Ankunft/Abfahrt + Fahrzeug + Energiebedarf).
     """
     arrivals = sample_arrival_times_for_day(scenario, day_start_datetime, holiday_dates)
     n = len(arrivals)
@@ -749,7 +598,6 @@ def build_charging_sessions_for_day(
     allow_cross_day = scenario["site"].get("allow_cross_day_charging", True)
 
     sessions: list[dict[str, Any]] = []
-
     for i in range(n):
         arrival_time = arrivals[i]
         raw_departure = arrival_time + timedelta(minutes=float(parking_minutes[i]))
@@ -769,27 +617,33 @@ def build_charging_sessions_for_day(
         if required_energy_kwh <= 0.0:
             continue
 
-        max_vehicle_power_kw = float(vehicle_profile.power_grid_kw.max())
-
         sessions.append(
             {
                 "session_id": f"{day_start_datetime.date()}_{i}",
                 "arrival_time": arrival_time,
                 "departure_time": departure_time,
+
                 "soc_arrival": soc_at_arrival,
                 "soc_target": target_soc,
                 "battery_capacity_kwh": battery_capacity_kwh,
 
-                "energy_required_kwh": required_energy_kwh,
+                "energy_required_kwh": float(required_energy_kwh),
                 "delivered_energy_kwh": 0.0,
 
-                "max_charging_power_kw": max_vehicle_power_kw,
+                "max_charging_power_kw": float(vehicle_profile.power_grid_kw.max()),
                 "vehicle_name": vehicle_profile.name,
                 "vehicle_class": vehicle_profile.vehicle_class,
                 "soc_grid": vehicle_profile.soc_grid,
                 "power_grid_kw": vehicle_profile.power_grid_kw,
 
-                # Diese Felder werden von der Generation-Strategie (Market-Fallback) genutzt:
+                # Management-Bookkeeping:
+                "_plug_in_time": None,
+                "_charger_id": None,
+                "_rejected": False,
+
+                # Market/Geneation-Fallback Präferenzen:
+                "preferred_slot_indices": [],
+                "preferred_ptr": 0,
                 "preferred_market_slot_indices": [],
                 "preferred_market_ptr": 0,
             }
@@ -798,8 +652,65 @@ def build_charging_sessions_for_day(
     return sessions
 
 
+def build_base_model(
+    scenario: dict[str, Any],
+    start_datetime: datetime | None = None,
+) -> tuple[list[datetime], list[dict[str, Any]], set[date], list[VehicleProfile]]:
+    """
+    Diese Funktion erzeugt das Grundmodell der Simulation.
+
+    Sie übernimmt explizit die Aufgaben:
+      - Ermittlung Anzahl Ladevorgänge (Session-Count aus Distributionen),
+      - Ermittlung Start Ladevorgang (Arrival-Time-Verteilung),
+      - Ermittlung Standzeit (Parking-Duration),
+      - Ermittlung Start-SOC & benötigte Energie,
+      - Ermittlung Flotte (Vehicle Mix + Ladekurven).
+
+    Rückgabe:
+      - time_index
+      - all_sessions (ungepluggt, später per Arrival-Policy belegt)
+      - holiday_dates
+      - vehicle_profiles (für Transparenz/Debug)
+    """
+    time_index = create_time_index(scenario, start_datetime)
+
+    simulation_start_datetime = time_index[0] if time_index else (
+        start_datetime if start_datetime is not None else
+        datetime.fromisoformat(scenario["start_datetime"]) if "start_datetime" in scenario else
+        datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    )
+
+    holiday_dates = parse_holiday_dates_from_scenario(
+        scenario=scenario,
+        simulation_start_datetime=simulation_start_datetime,
+    )
+
+    vehicle_csv_path = resolve_path_relative_to_scenario(scenario, scenario["vehicles"]["vehicle_curve_csv"])
+    vehicle_profiles = load_vehicle_profiles_from_csv(vehicle_csv_path)
+    if not vehicle_profiles:
+        raise ValueError("❌ Abbruch: Keine gültigen Fahrzeugprofile aus CSV geladen.")
+
+    all_sessions: list[dict[str, Any]] = []
+    if time_index:
+        first_day_start = time_index[0].replace(hour=0, minute=0, second=0, microsecond=0)
+        horizon_days = int(scenario["simulation_horizon_days"])
+        for day_offset in range(horizon_days):
+            day_start = first_day_start + timedelta(days=day_offset)
+            all_sessions.extend(
+                build_charging_sessions_for_day(
+                    scenario=scenario,
+                    day_start_datetime=day_start,
+                    vehicle_profiles=vehicle_profiles,
+                    holiday_dates=holiday_dates,
+                )
+            )
+
+    all_sessions.sort(key=lambda s: s["arrival_time"])
+    return time_index, all_sessions, holiday_dates, vehicle_profiles
+
+
 # =============================================================================
-# 7) Strategie-Signal aus CSV (Market / Generation)
+# 7) Strategie-Signale (Market / Generation) aus CSV
 # =============================================================================
 
 CSV_DT_FORMATS = ("%d.%m.%Y %H:%M", "%d.%m.%y %H:%M")
@@ -811,21 +722,12 @@ def read_strategy_series_from_csv_first_col_time(
     delimiter: str = ";",
 ) -> dict[datetime, float]:
     """
-    Diese Funktion liest eine Zeitreihe aus einer CSV-Datei.
-
-    Annahmen:
-      - Spalte 1 enthält Zeitstempel (dd.mm.YYYY HH:MM oder dd.mm.YY HH:MM).
-      - value_col_1_based gibt die 1-basierte Spalte für den Signalwert an.
-      - delimiter ist standardmäßig ';'.
-
-    Ergebnis:
-      - dict[datetime, float] mit Zeitstempel -> Rohwert
+    Diese Funktion liest eine Zeitreihe aus einer CSV-Datei:
+      - Spalte 1: Timestamp
+      - value_col_1_based: Wertespalte (1-basiert)
     """
     if not isinstance(value_col_1_based, int) or value_col_1_based < 2:
-        raise ValueError(
-            "value_col_1_based muss eine ganze Zahl >= 2 sein "
-            "(1 = Zeitspalte, 2..n = Signalspalte)."
-        )
+        raise ValueError("value_col_1_based muss int >= 2 sein.")
 
     data: dict[datetime, float] = {}
 
@@ -833,9 +735,7 @@ def read_strategy_series_from_csv_first_col_time(
         reader = csv.reader(f, delimiter=delimiter)
 
         for row in reader:
-            if not row:
-                continue
-            if len(row) < value_col_1_based:
+            if not row or len(row) < value_col_1_based:
                 continue
 
             t_raw = (row[0] or "").strip()
@@ -851,7 +751,6 @@ def read_strategy_series_from_csv_first_col_time(
                     break
                 except ValueError:
                     pass
-
             if ts is None:
                 continue
 
@@ -863,7 +762,7 @@ def read_strategy_series_from_csv_first_col_time(
             data[ts] = float(val)
 
     if not data:
-        raise ValueError(f"Keine gültigen Datenzeilen im Strategie-CSV gefunden: {csv_path}")
+        raise ValueError(f"Keine gültigen Datenzeilen im CSV gefunden: {csv_path}")
 
     return data
 
@@ -871,7 +770,6 @@ def read_strategy_series_from_csv_first_col_time(
 def floor_to_resolution(dt: datetime, resolution_min: int) -> datetime:
     """
     Diese Funktion rundet einen Zeitstempel auf das Raster der Auflösung ab.
-    Beispiel: resolution_min=15, 10:07 -> 10:00.
     """
     discard = dt.minute % resolution_min
     return dt.replace(minute=dt.minute - discard, second=0, microsecond=0)
@@ -879,15 +777,10 @@ def floor_to_resolution(dt: datetime, resolution_min: int) -> datetime:
 
 def lookup_signal(strategy_map: dict[datetime, float], ts: datetime, resolution_min: int) -> float | None:
     """
-    Diese Funktion sucht einen Signalwert, indem sie ts vorher auf das Raster abrundet.
-    Ist kein Wert vorhanden, wird None geliefert.
+    Diese Funktion sucht einen Signalwert, indem ts vorher auf das Raster abgerundet wird.
     """
     return strategy_map.get(floor_to_resolution(ts, resolution_min), None)
 
-
-# =============================================================================
-# 7b) Harte Validierung
-# =============================================================================
 
 def assert_strategy_csv_covers_simulation(
     strategy_map: dict[datetime, float],
@@ -898,12 +791,6 @@ def assert_strategy_csv_covers_simulation(
 ) -> None:
     """
     Diese Funktion prüft, ob ein Strategie-CSV den kompletten Simulationszeitraum abdeckt.
-
-    Es werden zwei Fälle geprüft:
-      1) CSV beginnt zu spät oder endet zu früh (Zeitraumabdeckung).
-      2) Es fehlen einzelne Zeitstempel innerhalb des Zeitraums (Lücken).
-
-    Bei Fehler wird ein ValueError mit konkreten Hinweisen ausgelöst.
     """
     if not time_index:
         raise ValueError("Simulationszeitachse ist leer – Strategie-CSV kann nicht geprüft werden.")
@@ -918,21 +805,12 @@ def assert_strategy_csv_covers_simulation(
     sim_end = max(expected_set)
 
     if csv_start > sim_start or csv_end < sim_end:
-        covered_minutes = int((csv_end - sim_start).total_seconds() / 60)
-        covered_days = max(0.0, covered_minutes / (24 * 60))
-
-        last_day = csv_end.date()
-        first_day = sim_start.date()
-        suggested_days = (last_day - first_day).days + 1
-
         raise ValueError(
             "❌ Abbruch: Strategie-CSV deckt den Simulationszeitraum nicht vollständig ab.\n"
             f"Strategie: {charging_strategy}\n"
             f"CSV: {strategy_csv_path}\n"
             f"CSV-Zeitraum: {csv_start} bis {csv_end}\n"
             f"Simulation:   {sim_start} bis {sim_end}\n"
-            f"→ CSV deckt ab Start nur ca. {covered_days:.2f} Tage ab.\n"
-            f"✅ Vorschlag: simulation_horizon_days auf {suggested_days} setzen (oder CSV erweitern).\n"
         )
 
     missing = sorted([t for t in expected_set if t not in strategy_map])
@@ -943,13 +821,8 @@ def assert_strategy_csv_covers_simulation(
             f"Strategie: {charging_strategy}\n"
             f"CSV: {strategy_csv_path}\n"
             f"Fehlende Timestamps: {len(missing)} (erste 10):\n{preview}\n"
-            "CSV-Auflösung/Zeitraum prüfen (z.B. 15-min Raster, Sommer-/Winterzeit, fehlende Zeilen)."
         )
 
-
-# =============================================================================
-# 7c) Normalisierung der CSV-Werte
-# =============================================================================
 
 def convert_strategy_value_to_internal(
     charging_strategy: str,
@@ -958,13 +831,9 @@ def convert_strategy_value_to_internal(
     step_hours: float,
 ) -> float:
     """
-    Diese Funktion normalisiert CSV-Rohwerte auf interne Einheiten.
-
-    Intern wird verwendet:
+    Diese Funktion normalisiert CSV-Rohwerte auf interne Einheiten:
       - generation: kW
       - market: €/kWh
-
-    Damit kann die Simulation unabhängig vom Input-Format arbeiten.
     """
     unit = (strategy_unit or "").strip()
 
@@ -975,25 +844,17 @@ def convert_strategy_value_to_internal(
             return float(raw_value) / float(step_hours)
         if unit == "MWh":
             return float(raw_value) * 1000.0 / float(step_hours)
-        raise ValueError(
-            f"❌ Abbruch: Unbekannte strategy_unit='{strategy_unit}' für generation. Erlaubt: 'kW', 'kWh', 'MWh'."
-        )
+        raise ValueError("Unbekannte generation strategy_unit (erlaubt: kW, kWh, MWh).")
 
     if charging_strategy == "market":
         if unit == "€/kWh":
             return float(raw_value)
         if unit == "€/MWh":
             return float(raw_value) / 1000.0
-        raise ValueError(
-            f"❌ Abbruch: Unbekannte strategy_unit='{strategy_unit}' für market. Erlaubt: '€/kWh', '€/MWh'."
-        )
+        raise ValueError("Unbekannte market strategy_unit (erlaubt: €/kWh, €/MWh).")
 
     return float(raw_value)
 
-
-# =============================================================================
-# 7e) Optional: Basislast aus CSV (für Generation)
-# =============================================================================
 
 def build_base_load_series(
     scenario: dict[str, Any],
@@ -1004,12 +865,9 @@ def build_base_load_series(
     Diese Funktion baut eine Basislast-Zeitreihe (kW) für den Standort.
 
     Priorität:
-      1) base_load_csv (wenn gesetzt) -> CSV wird eingelesen und auf kW normiert.
-      2) base_load_kw (konstanter Wert).
-      3) sonst: None.
-
-    Die Basislast wird insbesondere in der Generation-Strategie benötigt,
-    um PV-Überschuss = PV - Basislast zu berechnen.
+      1) base_load_csv (wenn gesetzt)
+      2) base_load_kw (konstant)
+      3) sonst: None
     """
     if not timestamps:
         return None
@@ -1022,9 +880,9 @@ def build_base_load_series(
         base_load_unit = str(site_cfg.get("base_load_unit", "") or "").strip()
 
         if not isinstance(base_load_col, int) or base_load_col < 2:
-            raise ValueError("❌ Abbruch: 'site.base_load_value_col' fehlt/ungültig (muss int >= 2 sein).")
+            raise ValueError("'site.base_load_value_col' fehlt/ungültig (int >= 2).")
         if base_load_unit not in ("kW", "kWh", "MWh"):
-            raise ValueError("❌ Abbruch: 'site.base_load_unit' muss 'kW', 'kWh' oder 'MWh' sein.")
+            raise ValueError("'site.base_load_unit' muss kW, kWh oder MWh sein.")
 
         csv_path = resolve_path_relative_to_scenario(scenario, str(base_load_csv))
         base_map = read_strategy_series_from_csv_first_col_time(
@@ -1058,7 +916,7 @@ def build_base_load_series(
 
 
 # =============================================================================
-# 8) Slack & Slot-Heuristik
+# 8) Slack & (Market) Slot-Präferenzen
 # =============================================================================
 
 def _slack_minutes_for_session(
@@ -1068,12 +926,8 @@ def _slack_minutes_for_session(
     charger_efficiency: float,
 ) -> float:
     """
-    Diese Funktion berechnet den "Slack" einer Session in Minuten.
-
-    Slack ist die Zeitreserve bis zur Abfahrt:
-      Slack = (Restzeit bis Abfahrt) - (benötigte Ladezeit bei maximal möglicher Leistung)
-
-    Ein kleiner Slack bedeutet hohe Dringlichkeit (Feasibility-Absicherung).
+    Diese Funktion berechnet Slack in Minuten:
+      Slack = Restzeit - benötigte Ladezeit bei maximal möglicher Leistung.
     """
     remaining_seconds = (s["departure_time"] - ts).total_seconds()
     if remaining_seconds <= 0:
@@ -1083,7 +937,6 @@ def _slack_minutes_for_session(
 
     vehicle_limit_kw = vehicle_power_at_soc(s)
     p_max_kw = max(0.0, min(rated_power_kw, vehicle_limit_kw, float(s["max_charging_power_kw"])))
-
     if p_max_kw <= 1e-9:
         return -1e9
 
@@ -1093,97 +946,22 @@ def _slack_minutes_for_session(
     return (remaining_hours - needed_hours) * 60.0
 
 
-def _build_preferred_slots_for_all_sessions(
+def _build_preferred_slots_for_market(
     all_sessions: list[dict[str, Any]],
     time_index: list[datetime],
     time_to_idx: dict[datetime, int],
-    charging_strategy: str,
-    strategy_map: dict[datetime, float] | None,
-    strategy_resolution_min: int,
-    strategy_unit: str,
-    step_hours: float,
-) -> None:
-    """
-    Diese Funktion baut für MARKET pro Session eine priorisierte Slot-Liste.
-
-    Idee:
-      - Alle Zeitschritte im [arrival, departure) werden bewertet.
-      - Bei market wird der Score = Preis in €/kWh (niedrig = besser).
-      - Slots werden nach Score sortiert; daraus entsteht eine Präferenzliste.
-
-    In der Simulation kann dann geprüft werden, ob der aktuelle Zeitschritt
-    in der Präferenzliste vorne liegt.
-    """
-    if charging_strategy != "market":
-        return
-    if not strategy_map or not time_index:
-        return
-
-    for s in all_sessions:
-        if float(s.get("energy_required_kwh", 0.0)) <= 0.0:
-            continue
-
-        a = floor_to_resolution(s["arrival_time"], strategy_resolution_min)
-        d = floor_to_resolution(s["departure_time"], strategy_resolution_min)
-
-        while a not in time_to_idx and a < time_index[-1]:
-            a += timedelta(minutes=strategy_resolution_min)
-        while d not in time_to_idx and d > time_index[0]:
-            d -= timedelta(minutes=strategy_resolution_min)
-
-        if a not in time_to_idx or d not in time_to_idx:
-            s["preferred_slot_indices"] = []
-            s["preferred_ptr"] = 0
-            continue
-
-        start_idx = time_to_idx[a]
-        end_idx = time_to_idx[d]
-        if end_idx <= start_idx:
-            s["preferred_slot_indices"] = []
-            s["preferred_ptr"] = 0
-            continue
-
-        idxs = list(range(start_idx, end_idx))
-
-        scored: list[tuple[float, int]] = []
-        for idx in idxs:
-            t = time_index[idx]
-            sig_raw = lookup_signal(strategy_map, t, strategy_resolution_min)
-
-            if sig_raw is None:
-                score = 1e30
-            else:
-                sig_internal = convert_strategy_value_to_internal(
-                    charging_strategy=charging_strategy,
-                    raw_value=float(sig_raw),
-                    strategy_unit=strategy_unit,
-                    step_hours=step_hours,
-                )
-                score = float(sig_internal)
-
-            scored.append((score, idx))
-
-        scored.sort(key=lambda x: x[0])
-        s["preferred_slot_indices"] = [idx for _, idx in scored]
-        s["preferred_ptr"] = 0
-
-
-def _build_preferred_market_slots_for_generation_fallback(
-    all_sessions: list[dict[str, Any]],
-    time_index: list[datetime],
-    time_to_idx: dict[datetime, int],
-    market_map: dict[datetime, float] | None,
+    market_map: dict[datetime, float],
     market_resolution_min: int,
     market_unit: str,
     step_hours: float,
 ) -> None:
     """
-    Diese Funktion baut pro Session eine nach günstigen Preisen sortierte Slot-Liste,
-    die ausschließlich innerhalb der Generation-Strategie für Grid-Fallback genutzt wird.
+    Diese Funktion baut pro Session eine nach günstigen Preisen sortierte Slot-Liste.
 
-    Ergebnisfelder pro Session:
-      - preferred_market_slot_indices
-      - preferred_market_ptr
+    Konservative Variante A:
+      - Es wird nur eine Präferenzreihenfolge erstellt.
+      - Bei "verpassten" Slots wird später einfach zum nächstbesten Slot
+        (in der Preis-Rangfolge) gewechselt, jedoch nie in der Vergangenheit.
     """
     if not market_map or not time_index:
         return
@@ -1201,15 +979,15 @@ def _build_preferred_market_slots_for_generation_fallback(
             d -= timedelta(minutes=market_resolution_min)
 
         if a not in time_to_idx or d not in time_to_idx:
-            s["preferred_market_slot_indices"] = []
-            s["preferred_market_ptr"] = 0
+            s["preferred_slot_indices"] = []
+            s["preferred_ptr"] = 0
             continue
 
         start_idx = time_to_idx[a]
         end_idx = time_to_idx[d]
         if end_idx <= start_idx:
-            s["preferred_market_slot_indices"] = []
-            s["preferred_market_ptr"] = 0
+            s["preferred_slot_indices"] = []
+            s["preferred_ptr"] = 0
             continue
 
         idxs = list(range(start_idx, end_idx))
@@ -1221,396 +999,602 @@ def _build_preferred_market_slots_for_generation_fallback(
             if raw is None:
                 score = 1e30
             else:
-                price_eur_per_kwh = convert_strategy_value_to_internal(
-                    charging_strategy="market",
-                    raw_value=float(raw),
-                    strategy_unit=market_unit,
-                    step_hours=step_hours,
+                score = float(
+                    convert_strategy_value_to_internal(
+                        charging_strategy="market",
+                        raw_value=float(raw),
+                        strategy_unit=market_unit,
+                        step_hours=step_hours,
+                    )
                 )
-                score = float(price_eur_per_kwh)
-
             scored.append((score, idx))
 
         scored.sort(key=lambda x: x[0])
-        s["preferred_market_slot_indices"] = [idx for _, idx in scored]
-        s["preferred_market_ptr"] = 0
+        s["preferred_slot_indices"] = [idx for _, idx in scored]
+        s["preferred_ptr"] = 0
 
 
 # =============================================================================
-# 8b) GENERATION – Rolling-Horizon PV-Reservation
+# 9) Power Allocation: Fair-Share (Water-Filling)
 # =============================================================================
 
-def _session_power_cap_kw(s: dict[str, Any], rated_power_kw: float) -> float:
-    """
-    Diese Funktion berechnet ein Leistungs-Cap pro Session auf Basis:
-      - Ladepunktleistung (rated_power_kw)
-      - session["max_charging_power_kw"] (Fahrzeuglimit)
-    """
-    return max(0.0, min(float(rated_power_kw), float(s.get("max_charging_power_kw", rated_power_kw))))
-
-
-def _idx_of_last_step_before_departure(
-    departure_time: datetime,
-    time_index: list[datetime],
-    time_resolution_min: int,
-) -> int:
-    """
-    Diese Funktion findet den letzten Zeitschrittindex, der noch vor der Abfahrt liegt.
-
-    Dadurch kann die Generation-Planung nur in einem gültigen Ladefenster
-    (von "jetzt" bis "departure") planen.
-    """
-    if not time_index:
-        return 0
-
-    d = floor_to_resolution(departure_time, time_resolution_min)
-
-    time_to_idx = {t: i for i, t in enumerate(time_index)}
-    while d not in time_to_idx and d > time_index[0]:
-        d -= timedelta(minutes=time_resolution_min)
-
-    if d in time_to_idx:
-        return int(time_to_idx[d])
-
-    return len(time_index) - 1
-
-
-def _plan_pv_commitments_for_present_sessions(
-    present_sessions: list[dict[str, Any]],
-    i_now: int,
-    pv_surplus_series_kw: np.ndarray,
-    time_index: list[datetime],
-    time_resolution_min: int,
+def _session_step_power_cap_kw(
+    s: dict[str, Any],
+    rated_power_kw: float,
     time_step_hours: float,
     charger_efficiency: float,
+) -> float:
+    """
+    Diese Funktion bestimmt das effektive Power-Cap einer Session in diesem Zeitschritt.
+    """
+    if float(s.get("energy_required_kwh", 0.0)) <= 1e-9:
+        return 0.0
+
+    vehicle_limit_kw = vehicle_power_at_soc(s)
+    hw_limit_kw = float(s.get("max_charging_power_kw", rated_power_kw))
+    cap_kw = max(0.0, min(rated_power_kw, vehicle_limit_kw, hw_limit_kw))
+
+    # Zusätzlich wird verhindert, dass mehr Leistung zugeteilt wird als für die Restenergie nötig ist.
+    e_need = float(s.get("energy_required_kwh", 0.0))
+    p_need_for_full_step = e_need / (time_step_hours * charger_efficiency)
+    cap_kw = min(cap_kw, max(0.0, p_need_for_full_step))
+
+    return max(0.0, cap_kw)
+
+
+def allocate_power_water_filling(
+    sessions: list[dict[str, Any]],
+    total_budget_kw: float,
     rated_power_kw: float,
-) -> tuple[np.ndarray, set[int]]:
+    time_step_hours: float,
+    charger_efficiency: float,
+) -> dict[int, float]:
     """
-    Diese Funktion plant PV-Zuweisungen (commitments) für aktuell anwesende Sessions.
+    Diese Funktion verteilt eine Standort-Leistungsbudget (kW) fair auf Sessions (Water-Filling).
 
-    Vorgehen:
-      - PV-Überschuss in der Zukunft wird als Ressourcenbudget betrachtet.
-      - Sessions werden nach Dringlichkeit (Abfahrt) sortiert.
-      - Für jede Session wird versucht, so viel Energie wie möglich in die
-        Zeitfenster mit hohem PV-Überschuss zu legen.
-      - Wenn PV nicht reicht, wird die Session als "grid_needed" markiert.
+    Fair-Share bedeutet:
+      - Jede aktive Session erhält zunächst gleich viel.
+      - Falls eine Session ihr Cap erreicht, wird der Rest umverteilt.
+      - Das Verfahren wiederholt sich, bis Budget verbraucht ist oder alle Caps erreicht sind.
 
     Rückgabe:
-      - pv_commit_kw: geplante PV-Leistung pro Zeitschritt
-      - grid_needed_session_ids: Menge von Session-IDs, die Grid-Anteil benötigen
+      - Mapping id(session) -> zugewiesene Leistung (kW)
     """
-    n = len(pv_surplus_series_kw)
-    pv_commit_kw = np.zeros(n, dtype=float)
+    alloc: dict[int, float] = {}
+    if not sessions or total_budget_kw <= 1e-9:
+        return alloc
 
-    if not present_sessions or i_now >= n:
-        return pv_commit_kw, set()
+    caps = {id(s): _session_step_power_cap_kw(s, rated_power_kw, time_step_hours, charger_efficiency) for s in sessions}
+    active = [s for s in sessions if caps.get(id(s), 0.0) > 1e-9]
+    if not active:
+        return alloc
 
-    pv_available_kw = np.array(pv_surplus_series_kw, dtype=float)
-    pv_available_kw[:i_now] = 0.0
+    remaining_budget = float(total_budget_kw)
+    remaining = {id(s): float(caps[id(s)]) for s in active}
+    current = {id(s): 0.0 for s in active}
 
-    present_sorted = sorted(present_sessions, key=lambda s: (s["departure_time"], s["arrival_time"]))
+    # Iteratives Water-Filling
+    for _ in range(50):
+        active_ids = [sid for sid, cap in remaining.items() if cap > 1e-9]
+        if not active_ids or remaining_budget <= 1e-9:
+            break
 
-    grid_needed_session_ids: set[int] = set()
+        per = remaining_budget / float(len(active_ids))
+        used_this_round = 0.0
 
-    for s in present_sorted:
-        e_need_kwh = float(s.get("energy_required_kwh", 0.0))
-        if e_need_kwh <= 1e-9:
-            continue
-
-        cap_kw = _session_power_cap_kw(s, rated_power_kw)
-        if cap_kw <= 1e-9:
-            grid_needed_session_ids.add(id(s))
-            continue
-
-        end_idx = _idx_of_last_step_before_departure(
-            departure_time=s["departure_time"],
-            time_index=time_index,
-            time_resolution_min=time_resolution_min,
-        )
-        start_idx = i_now
-        if end_idx <= start_idx:
-            grid_needed_session_ids.add(id(s))
-            continue
-
-        slot_indices = list(range(start_idx, min(end_idx + 1, n)))
-        slot_indices.sort(key=lambda j: (-pv_available_kw[j], j))
-
-        e_remaining_kwh = e_need_kwh
-
-        for j in slot_indices:
-            if e_remaining_kwh <= 1e-9:
-                break
-
-            avail_kw = float(pv_available_kw[j])
-            if avail_kw <= 1e-9:
+        for sid in active_ids:
+            take = min(per, remaining[sid])
+            if take <= 1e-12:
                 continue
+            current[sid] += take
+            remaining[sid] -= take
+            used_this_round += take
 
-            max_kw_for_energy = e_remaining_kwh / (time_step_hours * charger_efficiency)
-            take_kw = min(avail_kw, cap_kw, max_kw_for_energy)
+        if used_this_round <= 1e-9:
+            break
+        remaining_budget = max(0.0, remaining_budget - used_this_round)
 
-            if take_kw <= 1e-9:
-                continue
+    for sid, p in current.items():
+        if p > 1e-9:
+            alloc[sid] = float(p)
 
-            pv_commit_kw[j] += take_kw
-            pv_available_kw[j] -= take_kw
-            e_remaining_kwh -= take_kw * time_step_hours * charger_efficiency
-
-        if e_remaining_kwh > 1e-6:
-            grid_needed_session_ids.add(id(s))
-
-    return pv_commit_kw, grid_needed_session_ids
+    return alloc
 
 
-# =============================================================================
-# 8c) Reporting Helper: Strategy signal series (aligned)
-# =============================================================================
-
-def build_strategy_signal_series(
-    scenario: dict[str, Any],
-    timestamps: list[datetime],
-    charging_strategy: str,
-    normalize_to_internal: bool = True,
-    strategy_resolution_min: int = 15,
-) -> tuple[np.ndarray | None, str | None]:
+def apply_energy_update(
+    ts: datetime,
+    sessions: list[dict[str, Any]],
+    power_alloc_kw: dict[int, float],
+    time_step_hours: float,
+    charger_efficiency: float,
+    mode_label: str,
+) -> float:
     """
-    Diese Funktion erstellt eine an die Simulationstimestamps ausgerichtete Strategie-Zeitreihe.
+    Diese Funktion überführt eine Leistungszuteilung in Energiezuwachs und aktualisiert Sessions.
 
-    Sie wird primär für Notebook-Plotting genutzt.
-
-    Verhalten:
-      - charging_strategy="market": Marktpreise werden zu €/kWh normalisiert (optional)
-      - charging_strategy="generation": Erzeugung wird zu kW normalisiert (optional)
+    Zusätzlich protokolliert sie pro Session, in welchem Modus Energie geliefert wurde.
+    Dadurch kann im Notebook später gezählt werden, wie viele Sessions mit
+    generation/market/immediate geladen wurden.
 
     Rückgabe:
-      - series (numpy array) oder None
-      - y_label (Achsenbeschriftung) oder None
+      - total_power_kw (Summe der tatsächlich gefahrenen Ladeleistung)
     """
-    strat = (charging_strategy or "immediate").lower()
-    if strat not in ("market", "generation"):
-        return None, None
-    if not timestamps:
-        return None, None
-
-    site_cfg = scenario.get("site", {}) or {}
-
-    if strat == "market":
-        unit = str(site_cfg.get("market_strategy_unit", "") or "").strip()
-        csv_rel = site_cfg.get("market_strategy_csv", None)
-        col_1_based = site_cfg.get("market_strategy_value_col", None)
-
-        if unit not in ("€/MWh", "€/kWh"):
-            raise ValueError("❌ Abbruch: 'site.market_strategy_unit' muss '€/MWh' oder '€/kWh' sein.")
-        if not csv_rel or not isinstance(col_1_based, int) or col_1_based < 2:
-            raise ValueError("❌ Abbruch: 'site.market_strategy_csv' oder 'site.market_strategy_value_col' fehlt/ungültig.")
-
-        csv_path = resolve_path_relative_to_scenario(scenario, str(csv_rel))
-        strat_map = read_strategy_series_from_csv_first_col_time(
-            csv_path=csv_path,
-            value_col_1_based=int(col_1_based),
-            delimiter=";",
-        )
-
-        step_hours = strategy_resolution_min / 60.0
-        series = np.full(len(timestamps), np.nan, dtype=float)
-        for i, ts in enumerate(timestamps):
-            v = lookup_signal(strat_map, ts, strategy_resolution_min)
-            if v is None:
-                continue
-            series[i] = (
-                convert_strategy_value_to_internal("market", float(v), unit, step_hours)
-                if normalize_to_internal else float(v)
-            )
-
-        y_label = "Preis [€/kWh]" if normalize_to_internal else f"MARKET [{unit}]"
-        return series, y_label
-
-    # generation
-    unit = str(site_cfg.get("generation_strategy_unit", "") or "").strip()
-    csv_rel = site_cfg.get("generation_strategy_csv", None)
-    col_1_based = site_cfg.get("generation_strategy_value_col", None)
-
-    if unit not in ("kW", "kWh", "MWh"):
-        raise ValueError("❌ Abbruch: 'site.generation_strategy_unit' muss 'kW', 'kWh' oder 'MWh' sein.")
-    if not csv_rel or not isinstance(col_1_based, int) or col_1_based < 2:
-        raise ValueError("❌ Abbruch: 'site.generation_strategy_csv' oder 'site.generation_strategy_value_col' fehlt/ungültig.")
-
-    csv_path = resolve_path_relative_to_scenario(scenario, str(csv_rel))
-    strat_map = read_strategy_series_from_csv_first_col_time(
-        csv_path=csv_path,
-        value_col_1_based=int(col_1_based),
-        delimiter=";",
-    )
-
-    step_hours = strategy_resolution_min / 60.0
-    series = np.full(len(timestamps), np.nan, dtype=float)
-    for i, ts in enumerate(timestamps):
-        v = lookup_signal(strat_map, ts, strategy_resolution_min)
-        if v is None:
-            continue
-        series[i] = (
-            convert_strategy_value_to_internal("generation", float(v), unit, step_hours)
-            if normalize_to_internal else float(v)
-        )
-
-    y_label = "Erzeugung [kW]" if normalize_to_internal else f"GENERATION [{unit}]"
-    return series, y_label
-
-
-# =============================================================================
-# 8d) Reporting / KPI Helper (Notebook-freundlich, ohne Plotting)
-# =============================================================================
-
-def summarize_sessions(
-    sessions: list[dict[str, Any]],
-    eps_kwh: float = 1e-6,
-) -> dict[str, Any]:
-    """
-    Diese Funktion erzeugt eine KPI-Zusammenfassung über alle Sessions.
-
-    Metriken:
-      - num_sessions_total: alle Sessions mit Ladebedarf
-      - num_sessions_plugged: Sessions, die physisch angeschlossen wurden
-      - num_sessions_rejected: Sessions, die wegen fehlender Ladepunkte abgewiesen wurden
-      - not_reached_rows: Liste der Sessions, die ihr Ziel nicht erreicht haben
-    """
-    if sessions is None:
-        return {
-            "num_sessions_total": 0,
-            "num_sessions_plugged": 0,
-            "num_sessions_rejected": 0,
-            "not_reached_rows": [],
-        }
-
-    plugged = [s for s in sessions if s.get("_plug_in_time") is not None]
-    rejected = [s for s in sessions if bool(s.get("_rejected", False))]
-
-    not_reached_rows: list[dict[str, Any]] = []
-    for s in plugged:
-        if float(s.get("energy_required_kwh", 0.0)) > float(eps_kwh):
-            arrival = s["arrival_time"]
-            departure = s["departure_time"]
-            not_reached_rows.append(
-                {
-                    "vehicle_name": s.get("vehicle_name", ""),
-                    "arrival_time": arrival,
-                    "departure_time": departure,
-                    "parking_hours": (departure - arrival).total_seconds() / 3600.0,
-                    "delivered_energy_kwh": float(s.get("delivered_energy_kwh", 0.0)),
-                    "remaining_energy_kwh": float(s.get("energy_required_kwh", 0.0)),
-                }
-            )
-
-    return {
-        "num_sessions_total": len(sessions),
-        "num_sessions_plugged": len(plugged),
-        "num_sessions_rejected": len(rejected),
-        "not_reached_rows": not_reached_rows,
-    }
-
-
-def get_daytype_calendar(
-    start_datetime: datetime,
-    horizon_days: int,
-    holiday_dates: set[date],
-) -> dict[str, list[date]]:
-    """
-    Diese Funktion erzeugt eine Liste der Tage je Tagtyp (Kalenderperspektive).
-
-    Sie wird für Notebook-Auswertungen genutzt, um Histogramme
-    nach Tagesarten (working_day/saturday/sunday_holiday) zu gruppieren.
-    """
-    out: dict[str, list[date]] = {"working_day": [], "saturday": [], "sunday_holiday": []}
-
-    for i in range(int(horizon_days)):
-        d = start_datetime.date() + timedelta(days=i)
-        dt_mid = datetime(d.year, d.month, d.day, 12, 0)
-        dt_type = determine_day_type_with_holidays(dt_mid, holiday_dates)
-        out.setdefault(dt_type, []).append(d)
-
-    return out
-
-
-def group_sessions_by_day(
-    sessions: list[dict[str, Any]],
-    only_plugged: bool = False,
-) -> dict[date, list[dict[str, Any]]]:
-    """
-    Diese Funktion gruppiert Sessions nach Ankunftsdatum.
-
-    Parameter:
-      - only_plugged=True filtert auf Sessions, die physisch geladen haben.
-    """
-    out: dict[date, list[dict[str, Any]]] = {}
-
-    if not sessions:
-        return out
+    total_power_kw = 0.0
+    mode = (mode_label or "").strip().lower()
 
     for s in sessions:
-        if only_plugged and s.get("_plug_in_time") is None:
+        p = float(power_alloc_kw.get(id(s), 0.0))
+        s["_actual_power_kw"] = float(p)
+
+        if p <= 1e-9:
             continue
-        d = s["arrival_time"].date()
-        out.setdefault(d, []).append(s)
 
-    return out
+        possible_energy_kwh = p * time_step_hours * charger_efficiency
+        e_need = float(s.get("energy_required_kwh", 0.0))
 
+        if possible_energy_kwh >= e_need:
+            e_del = e_need
+            s["energy_required_kwh"] = 0.0
+            if "finished_charging_time" not in s:
+                s["finished_charging_time"] = ts
 
-def build_pv_unused_table(debug_rows: list[dict[str, Any]]):
-    """
-    Diese Funktion erstellt eine Tabelle für Zeitpunkte mit ungenutztem PV-Überschuss.
+            p = e_del / (time_step_hours * charger_efficiency) if e_del > 0 else 0.0
+            s["_actual_power_kw"] = float(p)
+        else:
+            e_del = possible_energy_kwh
+            s["energy_required_kwh"] = e_need - possible_energy_kwh
 
-    Voraussetzung:
-      - debug_rows wurde in simulate_load_profile(record_debug=True) aufgezeichnet.
+        s["delivered_energy_kwh"] = float(s.get("delivered_energy_kwh", 0.0)) + float(e_del)
+        total_power_kw += float(p)
 
-    Rückgabe:
-      - pandas.DataFrame (kann leer sein)
-      - None, wenn pandas/numpy nicht verfügbar ist
-    """
-    try:
-        import pandas as pd
-        import numpy as np
-    except Exception:
-        return None
+        # --- NEU: Mode-Tracking pro Session ---
+        if "_energy_by_mode_kwh" not in s or not isinstance(s["_energy_by_mode_kwh"], dict):
+            s["_energy_by_mode_kwh"] = {}
+        s["_energy_by_mode_kwh"][mode] = float(s["_energy_by_mode_kwh"].get(mode, 0.0)) + float(e_del)
 
-    if not debug_rows:
-        return pd.DataFrame()
+        if "_modes_used" not in s or not isinstance(s["_modes_used"], set):
+            s["_modes_used"] = set()
+        s["_modes_used"].add(mode)
 
-    df = pd.DataFrame(debug_rows).copy()
-    if "ts" not in df.columns:
-        return pd.DataFrame()
+    return float(total_power_kw)
 
-    df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
-
-    required = {"ts", "pv_surplus_kw", "site_total_power_kw"}
-    if not required.issubset(df.columns):
-        return pd.DataFrame()
-
-    df_pv = df[df["pv_surplus_kw"] > 1e-6].copy()
-    if len(df_pv) == 0:
-        return pd.DataFrame()
-
-    grid_col = "grid_import_kw_site" if "grid_import_kw_site" in df_pv.columns else None
-
-    agg = {
-        "pv_surplus_kw": ("pv_surplus_kw", "first"),
-        "site_power_kw": ("site_total_power_kw", "first"),
-        "n_rows": ("vehicle_name", "count") if "vehicle_name" in df_pv.columns else ("pv_surplus_kw", "size"),
-    }
-    if grid_col:
-        agg["grid_import_kw"] = (grid_col, "first")
-
-    pv_steps = df_pv.groupby("ts", as_index=False).agg(**agg)
-
-    pv_steps["pv_used_kw"] = np.minimum(pv_steps["pv_surplus_kw"], pv_steps["site_power_kw"])
-    pv_steps["pv_unused_kw"] = (pv_steps["pv_surplus_kw"] - pv_steps["pv_used_kw"]).clip(lower=0.0)
-
-    pv_unused_steps = pv_steps[pv_steps["pv_unused_kw"] > 1e-3].copy()
-    pv_unused_steps = pv_unused_steps.sort_values(["pv_unused_kw", "ts"], ascending=[False, True])
-
-    return pv_unused_steps
 
 
 # =============================================================================
-# 9) Hauptsimulation
+# 10) Lademanagement: Plug-In Policy (FCFS, drive_off)
+# =============================================================================
+
+def assign_chargers_drive_off_fcfs(
+    ts: datetime,
+    chargers: list[dict[str, Any] | None],
+    all_sessions: list[dict[str, Any]],
+    next_arrival_idx: int,
+) -> int:
+    """
+    Diese Funktion verarbeitet Ankünfte nach FCFS (drive_off).
+
+    Regel:
+      - Wenn ein Ladepunkt frei ist, wird die Session eingesteckt.
+      - Wenn nicht, wird die Session abgewiesen (drive_off).
+      - Einmal eingesteckt bleibt das Fahrzeug bis zur Abfahrt eingesteckt.
+    """
+    while next_arrival_idx < len(all_sessions) and all_sessions[next_arrival_idx]["arrival_time"] <= ts:
+        s = all_sessions[next_arrival_idx]
+        next_arrival_idx += 1
+
+        if float(s.get("energy_required_kwh", 0.0)) <= 1e-9:
+            continue
+
+        s["_rejected"] = False
+        free_c = None
+        for c in range(len(chargers)):
+            if chargers[c] is None:
+                free_c = c
+                break
+
+        if free_c is not None:
+            chargers[free_c] = s
+            s["_charger_id"] = free_c
+            s["_plug_in_time"] = ts
+            continue
+
+        s["_rejected"] = True
+        s["_rejection_time"] = ts
+        s["_no_charge_reason"] = "no_free_charger_at_arrival"
+
+    return next_arrival_idx
+
+
+def release_departed_sessions(
+    ts: datetime,
+    chargers: list[dict[str, Any] | None],
+) -> None:
+    """
+    Diese Funktion gibt Ladepunkte frei, wenn die Session abgefahren ist.
+    """
+    for c in range(len(chargers)):
+        s = chargers[c]
+        if s is None:
+            continue
+        departed = not (s["arrival_time"] <= ts < s["departure_time"])
+        if departed:
+            chargers[c] = None
+
+
+def get_present_plugged_sessions(
+    ts: datetime,
+    chargers: list[dict[str, Any] | None],
+) -> list[dict[str, Any]]:
+    """
+    Diese Funktion liefert alle eingesteckten Sessions, die aktuell anwesend sind und noch Energiebedarf haben.
+    """
+    plugged_sessions = [s for s in chargers if s is not None]
+    present = [
+        s for s in plugged_sessions
+        if s["arrival_time"] <= ts < s["departure_time"]
+        and float(s.get("energy_required_kwh", 0.0)) > 1e-9
+    ]
+    for s in present:
+        s["_actual_power_kw"] = 0.0
+    return present
+
+
+# =============================================================================
+# 11) Lademanagement: Immediate
+# =============================================================================
+
+def run_step_immediate(
+    ts: datetime,
+    i: int,
+    present_sessions: list[dict[str, Any]],
+    grid_limit_p_avb_kw: float,
+    rated_power_kw: float,
+    time_step_hours: float,
+    charger_efficiency: float,
+) -> float:
+    """
+    Diese Funktion implementiert immediate nach FCFS-Plug-In + Fair-Share.
+
+    Regel:
+      - Alle anwesenden, eingesteckten Sessions werden berücksichtigt.
+      - Standort-Budget = grid_limit_p_avb_kw (import-limit, ohne PV).
+      - Verteilung per Water-Filling.
+    """
+    if not present_sessions:
+        return 0.0
+
+    total_budget_kw = max(0.0, float(grid_limit_p_avb_kw))
+    alloc = allocate_power_water_filling(
+        sessions=present_sessions,
+        total_budget_kw=total_budget_kw,
+        rated_power_kw=rated_power_kw,
+        time_step_hours=time_step_hours,
+        charger_efficiency=charger_efficiency,
+    )
+    total_power_kw = apply_energy_update(
+        ts=ts,
+        sessions=present_sessions,
+        power_alloc_kw=alloc,
+        time_step_hours=time_step_hours,
+        charger_efficiency=charger_efficiency,
+        mode_label="immediate",
+    )
+
+    return float(total_power_kw)
+
+
+# =============================================================================
+# 12) Lademanagement: Market (konservativ, vorausschauend via Slot-Präferenzen)
+# =============================================================================
+
+def select_sessions_market_or_fallback_to_immediate(
+    ts: datetime,
+    i: int,
+    present_sessions: list[dict[str, Any]],
+    rated_power_kw: float,
+    charger_efficiency: float,
+    emergency_slack_minutes: float,
+) -> tuple[list[dict[str, Any]], bool]:
+    """
+    Diese Funktion wählt Sessions für Market in einem Zeitschritt aus.
+
+    Konservative Variante A:
+      - Es wird bevorzugt in den Slot geladen, der aktuell als "nächster" in der Preis-Priorität liegt.
+      - Wenn Slots verpasst wurden, wird nur in die Zukunft gesprungen (ptr überspringt idx < i).
+      - Wenn kein Vehicle für Market "dran" ist, wird auf Immediate zurückgefallen.
+
+    Rückgabe:
+      - selected_sessions
+      - did_fallback_to_immediate (True/False)
+    """
+    if not present_sessions:
+        return [], False
+
+    emergency: list[dict[str, Any]] = []
+    slot_due: list[dict[str, Any]] = []
+
+    # Slack berechnen (für Emergency + Priorisierung)
+    for s in present_sessions:
+        slack_m = _slack_minutes_for_session(s, ts, rated_power_kw, charger_efficiency)
+        s["_slack_minutes"] = float(slack_m)
+        if slack_m <= emergency_slack_minutes:
+            emergency.append(s)
+            continue
+
+        pref = s.get("preferred_slot_indices", [])
+        ptr = int(s.get("preferred_ptr", 0))
+
+        # niemals in Vergangenheit planen
+        while ptr < len(pref) and pref[ptr] < i:
+            ptr += 1
+        s["preferred_ptr"] = ptr
+
+        # Slot ist "due", wenn der aktuelle Index der nächste bevorzugte ist
+        if pref and ptr < len(pref) and pref[ptr] == i:
+            slot_due.append(s)
+
+    candidates: list[dict[str, Any]] = []
+    seen = set()
+
+    for s in emergency:
+        sid = id(s)
+        if sid not in seen:
+            candidates.append(s)
+            seen.add(sid)
+    for s in slot_due:
+        sid = id(s)
+        if sid not in seen:
+            candidates.append(s)
+            seen.add(sid)
+
+    if not candidates:
+        # WICHTIG: Market-Fallback zu Immediate (so gewünscht)
+        return present_sessions, True
+
+    candidates.sort(key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"]))
+    return candidates, False
+
+
+def run_step_market(
+    ts: datetime,
+    i: int,
+    present_sessions: list[dict[str, Any]],
+    grid_limit_p_avb_kw: float,
+    rated_power_kw: float,
+    time_step_hours: float,
+    charger_efficiency: float,
+    emergency_slack_minutes: float,
+) -> tuple[float, bool]:
+    """
+    Diese Funktion führt einen Market-Zeitschritt aus.
+
+    Ablauf:
+      1) Auswahl der Sessions, die jetzt laden sollen (Market-Slots + Emergency).
+      2) Falls niemand dran ist: Fallback zu Immediate (für alle Present).
+      3) Fair-Share (Water-Filling) auf dem Grid-Budget.
+    """
+    if not present_sessions:
+        return 0.0, False
+
+    selected, fell_back = select_sessions_market_or_fallback_to_immediate(
+        ts=ts,
+        i=i,
+        present_sessions=present_sessions,
+        rated_power_kw=rated_power_kw,
+        charger_efficiency=charger_efficiency,
+        emergency_slack_minutes=emergency_slack_minutes,
+    )
+
+    total_budget_kw = max(0.0, float(grid_limit_p_avb_kw))
+    alloc = allocate_power_water_filling(
+        sessions=selected,
+        total_budget_kw=total_budget_kw,
+        rated_power_kw=rated_power_kw,
+        time_step_hours=time_step_hours,
+        charger_efficiency=charger_efficiency,
+    )
+    mode_for_energy = "immediate" if fell_back else "market"
+    total_power_kw = apply_energy_update(
+        ts=ts,
+        sessions=selected,
+        power_alloc_kw=alloc,
+        time_step_hours=time_step_hours,
+        charger_efficiency=charger_efficiency,
+        mode_label=mode_for_energy,
+    )
+
+    return float(total_power_kw), bool(fell_back)
+
+
+# =============================================================================
+# 13) Lademanagement: Generation (PV) + Fallback PV -> Market -> Immediate
+# =============================================================================
+
+def compute_pv_surplus_kw(
+    ts: datetime,
+    i: int,
+    generation_map: dict[datetime, float],
+    generation_unit: str,
+    base_load_series_kw: np.ndarray | None,
+    strategy_resolution_min: int,
+    step_hours_strategy: float,
+) -> float:
+    """
+    Diese Funktion berechnet den PV-Überschuss (kW) als:
+      pv_surplus = PV_generation - base_load
+    """
+    raw = lookup_signal(generation_map, ts, strategy_resolution_min)
+    pv_kw = 0.0
+    if raw is not None:
+        pv_kw = max(
+            0.0,
+            float(
+                convert_strategy_value_to_internal(
+                    charging_strategy="generation",
+                    raw_value=float(raw),
+                    strategy_unit=str(generation_unit),
+                    step_hours=step_hours_strategy,
+                )
+            ),
+        )
+
+    base_kw = 0.0
+    if base_load_series_kw is not None:
+        v = float(base_load_series_kw[i])
+        base_kw = 0.0 if np.isnan(v) else max(0.0, v)
+
+    return max(0.0, pv_kw - base_kw)
+
+
+def run_step_generation_with_fallbacks(
+    ts: datetime,
+    i: int,
+    present_sessions: list[dict[str, Any]],
+    pv_surplus_kw_now: float,
+    grid_limit_p_avb_kw: float,
+    rated_power_kw: float,
+    time_step_hours: float,
+    charger_efficiency: float,
+    emergency_slack_minutes: float,
+    # Market fallback signals:
+    market_enabled: bool,
+    # Für Market-Fallback wird dasselbe Auswahlverhalten wie in "market" genutzt.
+) -> tuple[float, str, bool]:
+    """
+    Diese Funktion führt einen Generation-Zeitschritt aus (PV zuerst, dann Fallbacks).
+
+    Physik/Limit-Definition (wie gewünscht):
+      - grid_limit_p_avb_kw ist ein Import-Limit.
+      - PV kommt zusätzlich und reduziert den Grid-Import physikalisch.
+      - Damit gilt: grid_import = max(0, total_power - pv_surplus_kw_now) <= grid_limit_p_avb_kw
+      - also: total_power <= pv_surplus_kw_now + grid_limit_p_avb_kw
+      - zusätzlich gelten Charger-Limits pro Session.
+
+    Fallback-Logik:
+      1) Zuerst PV-Allocation (priorisiert nach Slack)
+      2) Wenn PV nicht reicht und (Market aktiv), wird Market-Fallback angewendet
+      3) Wenn Market niemanden lädt (oder Market nicht aktiv), Fallback zu Immediate
+
+    Rückgabe:
+      - total_power_kw
+      - mode_label: "PV" | "MARKET_FALLBACK" | "IMMEDIATE_FALLBACK"
+      - did_fallback_to_immediate
+    """
+    if not present_sessions:
+        return 0.0, "PV", False
+
+    # --- Slack berechnen, da PV bei Mangel nach Slack priorisiert ---
+    for s in present_sessions:
+        s["_slack_minutes"] = float(_slack_minutes_for_session(s, ts, rated_power_kw, charger_efficiency))
+
+    present_sorted = sorted(
+        present_sessions,
+        key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"])
+    )
+
+    # --- 1) PV-only Allocation (greedy nach Slack, um PV maximal "sicher" zu nutzen) ---
+    pv_remaining = float(max(0.0, pv_surplus_kw_now))
+    pv_alloc: dict[int, float] = {}
+
+    for s in present_sorted:
+        if pv_remaining <= 1e-9:
+            break
+        cap = _session_step_power_cap_kw(s, rated_power_kw, time_step_hours, charger_efficiency)
+        if cap <= 1e-9:
+            continue
+        take = min(cap, pv_remaining)
+        if take > 1e-9:
+            pv_alloc[id(s)] = float(take)
+            pv_remaining -= float(take)
+
+    # PV-Leistung anwenden (nur auf Sessions, die PV bekommen)
+    pv_sessions = [s for s in present_sorted if id(s) in pv_alloc]
+    pv_power_kw = apply_energy_update(
+        ts=ts,
+        sessions=pv_sessions,
+        power_alloc_kw=pv_alloc,
+        time_step_hours=time_step_hours,
+        charger_efficiency=charger_efficiency,
+        mode_label="generation",
+    )
+
+
+    # --- 2) Prüfen, ob noch Bedarf besteht und ob Grid-Fallback nötig ist ---
+    still_need = [s for s in present_sessions if float(s.get("energy_required_kwh", 0.0)) > 1e-9]
+
+    if not still_need:
+        return float(pv_power_kw), "PV", False
+
+    # Maximal erlaubte zusätzliche Gesamtleistung aufgrund Import-Limit:
+    # grid_import = max(0, total_power - pv_surplus_kw_now) <= grid_limit
+    # => total_power <= pv_surplus_kw_now + grid_limit
+    total_power_upper = float(max(0.0, pv_surplus_kw_now + float(grid_limit_p_avb_kw)))
+
+    # In dieser Stufe ist bereits pv_power_kw gefahren.
+    remaining_total_power_budget = max(0.0, total_power_upper - float(pv_power_kw))
+    if remaining_total_power_budget <= 1e-9:
+        # Keine Grid-Leistung möglich (Import-Limit bereits ausgeschöpft)
+        return float(pv_power_kw), "PV", False
+
+    # --- 3) Market-Fallback oder Immediate-Fallback ---
+    if market_enabled:
+        # Market-Fallback wird wie Market im Schritt gewählt.
+        selected, fell_back = select_sessions_market_or_fallback_to_immediate(
+            ts=ts,
+            i=i,
+            present_sessions=still_need,
+            rated_power_kw=rated_power_kw,
+            charger_efficiency=charger_efficiency,
+            emergency_slack_minutes=emergency_slack_minutes,
+        )
+
+        # Hier wird nur das verbleibende Import-abhängige Budget verteilt.
+        alloc = allocate_power_water_filling(
+            sessions=selected,
+            total_budget_kw=remaining_total_power_budget,
+            rated_power_kw=rated_power_kw,
+            time_step_hours=time_step_hours,
+            charger_efficiency=charger_efficiency,
+        )
+        mode_for_energy = "immediate" if fell_back else "market"
+        add_power = apply_energy_update(
+            ts=ts,
+            sessions=selected,
+            power_alloc_kw=alloc,
+            time_step_hours=time_step_hours,
+            charger_efficiency=charger_efficiency,
+            mode_label=mode_for_energy,
+        )
+
+
+        mode = "MARKET_FALLBACK"
+        if fell_back:
+            mode = "IMMEDIATE_FALLBACK"
+
+        return float(pv_power_kw + add_power), mode, bool(fell_back)
+
+    # Wenn Market nicht aktiv ist: Immediate-Fallback
+    alloc = allocate_power_water_filling(
+        sessions=still_need,
+        total_budget_kw=remaining_total_power_budget,
+        rated_power_kw=rated_power_kw,
+        time_step_hours=time_step_hours,
+        charger_efficiency=charger_efficiency,
+    )
+    add_power = apply_energy_update(
+        ts=ts,
+        sessions=still_need,
+        power_alloc_kw=alloc,
+        time_step_hours=time_step_hours,
+        charger_efficiency=charger_efficiency,
+        mode_label="immediate",
+    )
+
+    return float(pv_power_kw + add_power), "IMMEDIATE_FALLBACK", True
+
+
+# =============================================================================
+# 14) Hauptsimulation (sauber getrennt: Grundmodell vs. Lademanagement)
 # =============================================================================
 
 def simulate_load_profile(
@@ -1619,98 +1603,61 @@ def simulate_load_profile(
     record_debug: bool = False,
 ):
     """
-    Diese Funktion führt die eigentliche Lastgangsimulation aus.
+    Diese Funktion führt die Lastgangsimulation aus.
 
-    Sie liefert:
-      - time_index: Zeitachse (datetime-Liste)
-      - load_profile_kw: EV-Ladeleistung über der Zeit
-      - all_charging_sessions: Session-Objekte mit Ladeergebnis
-      - charging_count_series: Anzahl aktiv ladender Sessions pro Zeitschritt
-      - holiday_dates: verwendete Feiertage
-      - charging_strategy: verwendete Strategie ("immediate", "market", "generation")
-      - strategy_status: "ACTIVE"/"INACTIVE"/"IMMEDIATE"
-      - debug_rows: optional detaillierte Zeitschrittinfos
+    Trennung:
+      - Teil A: Grundmodell erzeugen (Sessions/Flotte/Bedarf)
+      - Teil B: Lademanagementstrategie anwenden (immediate/market/generation inkl. Fallbacks)
+
+    Rückgabe:
+      - time_index
+      - load_profile_kw
+      - all_charging_sessions (inkl. Ergebnis)
+      - charging_count_series
+      - holiday_dates
+      - charging_strategy
+      - strategy_status
+      - debug_rows (optional)
     """
 
     # ------------------------------------------------------------
-    # Fixe Heuristik-Parameter
+    # A) Grundmodell
     # ------------------------------------------------------------
-    # EMERGENCY_SLACK_MINUTES definiert, ab wann eine Session als "kritisch" gilt.
-    # MARKET_TOP_K_SLOTS ist ein optionales Konzept (hier aktuell nicht genutzt).
-    EMERGENCY_SLACK_MINUTES = 60.0
-    MARKET_TOP_K_SLOTS = 4
-
-    # ------------------------------------------------------------
-    # 1) Zeitindex
-    # ------------------------------------------------------------
-    # Die Simulation arbeitet auf einer festen Zeitachse (z.B. 15-Minuten-Schritte).
-    time_index = create_time_index(scenario, start_datetime)
-
-    # ------------------------------------------------------------
-    # 2) Feiertage
-    # ------------------------------------------------------------
-    # Feiertage werden einmalig bestimmt, um Tagesarten korrekt zu klassifizieren.
-    simulation_start_datetime = time_index[0] if time_index else (
-        start_datetime if start_datetime is not None else
-        datetime.fromisoformat(scenario["start_datetime"]) if "start_datetime" in scenario else
-        datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    )
-
-    holiday_dates = parse_holiday_dates_from_scenario(
+    time_index, all_charging_sessions, holiday_dates, _vehicle_profiles = build_base_model(
         scenario=scenario,
-        simulation_start_datetime=simulation_start_datetime,
+        start_datetime=start_datetime,
     )
 
-    # ------------------------------------------------------------
-    # 3) Fahrzeuge
-    # ------------------------------------------------------------
-    # Die Fahrzeugprofile bestimmen, welche Ladeleistungen bei welchem SoC möglich sind.
-    vehicle_csv_path = resolve_path_relative_to_scenario(scenario, scenario["vehicles"]["vehicle_curve_csv"])
-    vehicle_profiles = load_vehicle_profiles_from_csv(vehicle_csv_path)
+    if not time_index:
+        return ([], np.array([]), [], [], holiday_dates, "immediate", "IMMEDIATE", [] if record_debug else None)
 
     # ------------------------------------------------------------
-    # 4) Strategie-Initialisierung (getrennte CSVs für market & generation)
+    # B) Strategie-Initialisierung (Signale laden)
     # ------------------------------------------------------------
-    # Je nach Ladestrategie werden unterschiedliche Signale geladen:
-    #   - market: Marktpreise
-    #   - generation: PV/Erzeugung + Marktpreise als Fallback
     site_cfg = scenario.get("site", {}) or {}
     charging_strategy = (site_cfg.get("charging_strategy") or "immediate").lower()
 
     STRATEGY_RESOLUTION_MIN = 15
     strategy_step_hours = STRATEGY_RESOLUTION_MIN / 60.0
 
-    # Interne Container für Signalzeitreihen (maps)
     generation_map: dict[datetime, float] | None = None
-    generation_csv_path: str | None = None
     generation_unit: str | None = None
 
     market_map: dict[datetime, float] | None = None
-    market_csv_path: str | None = None
     market_unit: str | None = None
 
-    # -----------------------------
-    # A) Market-Strategie: nur Market CSV
-    # -----------------------------
     if charging_strategy == "market":
         market_unit = str(site_cfg.get("market_strategy_unit", "") or "").strip()
         if market_unit not in ("€/MWh", "€/kWh"):
-            raise ValueError("❌ Abbruch: 'site.market_strategy_unit' muss '€/MWh' oder '€/kWh' sein.")
+            raise ValueError("'site.market_strategy_unit' muss '€/MWh' oder '€/kWh' sein.")
 
         market_csv = site_cfg.get("market_strategy_csv", None)
         market_col = site_cfg.get("market_strategy_value_col", None)
-        if not market_csv:
-            raise ValueError("❌ Abbruch: Für charging_strategy='market' muss 'site.market_strategy_csv' gesetzt sein.")
-        if not isinstance(market_col, int) or market_col < 2:
-            raise ValueError("❌ Abbruch: 'site.market_strategy_value_col' muss int >= 2 sein (1=Zeitspalte).")
+        if not market_csv or not isinstance(market_col, int) or market_col < 2:
+            raise ValueError("Für market müssen 'market_strategy_csv' und 'market_strategy_value_col'(>=2) gesetzt sein.")
 
         market_csv_path = resolve_path_relative_to_scenario(scenario, str(market_csv))
-        market_map = read_strategy_series_from_csv_first_col_time(
-            csv_path=market_csv_path,
-            value_col_1_based=int(market_col),
-            delimiter=";",
-        )
-
+        market_map = read_strategy_series_from_csv_first_col_time(market_csv_path, int(market_col), ";")
         assert_strategy_csv_covers_simulation(
             strategy_map=market_map,
             time_index=time_index,
@@ -1719,187 +1666,56 @@ def simulate_load_profile(
             strategy_csv_path=market_csv_path,
         )
 
-    # -----------------------------
-    # B) Generation-Strategie: Generation CSV + Market CSV (Fallback)
-    # -----------------------------
     elif charging_strategy == "generation":
         generation_unit = str(site_cfg.get("generation_strategy_unit", "") or "").strip()
         if generation_unit not in ("kW", "kWh", "MWh"):
-            raise ValueError("❌ Abbruch: 'site.generation_strategy_unit' muss 'kW', 'kWh' oder 'MWh' sein.")
+            raise ValueError("'site.generation_strategy_unit' muss 'kW', 'kWh' oder 'MWh' sein.")
 
         gen_csv = site_cfg.get("generation_strategy_csv", None)
         gen_col = site_cfg.get("generation_strategy_value_col", None)
-        if not gen_csv:
-            raise ValueError("❌ Abbruch: Für charging_strategy='generation' muss 'site.generation_strategy_csv' gesetzt sein.")
-        if not isinstance(gen_col, int) or gen_col < 2:
-            raise ValueError("❌ Abbruch: 'site.generation_strategy_value_col' muss int >= 2 sein (1=Zeitspalte).")
+        if not gen_csv or not isinstance(gen_col, int) or gen_col < 2:
+            raise ValueError("Für generation müssen 'generation_strategy_csv' und 'generation_strategy_value_col'(>=2) gesetzt sein.")
 
-        generation_csv_path = resolve_path_relative_to_scenario(scenario, str(gen_csv))
-        generation_map = read_strategy_series_from_csv_first_col_time(
-            csv_path=generation_csv_path,
-            value_col_1_based=int(gen_col),
-            delimiter=";",
-        )
-
+        gen_csv_path = resolve_path_relative_to_scenario(scenario, str(gen_csv))
+        generation_map = read_strategy_series_from_csv_first_col_time(gen_csv_path, int(gen_col), ";")
         assert_strategy_csv_covers_simulation(
             strategy_map=generation_map,
             time_index=time_index,
             strategy_resolution_min=STRATEGY_RESOLUTION_MIN,
             charging_strategy="generation",
-            strategy_csv_path=generation_csv_path,
+            strategy_csv_path=gen_csv_path,
         )
 
-        # Market-Fallback ist bei diesem Setup verpflichtend
-        market_unit = str(site_cfg.get("market_strategy_unit", "") or "").strip()
-        if market_unit not in ("€/MWh", "€/kWh"):
-            raise ValueError("❌ Abbruch: generation + Market-Fallback: 'site.market_strategy_unit' muss '€/MWh' oder '€/kWh' sein.")
-
+        # Market-Fallback für Generation ist in diesem Setup erlaubt/typisch:
         market_csv = site_cfg.get("market_strategy_csv", None)
         market_col = site_cfg.get("market_strategy_value_col", None)
-        if not market_csv:
-            raise ValueError("❌ Abbruch: generation + Market-Fallback: 'site.market_strategy_csv' fehlt.")
-        if not isinstance(market_col, int) or market_col < 2:
-            raise ValueError("❌ Abbruch: generation + Market-Fallback: 'site.market_strategy_value_col' muss int >= 2 sein.")
+        market_unit = str(site_cfg.get("market_strategy_unit", "") or "").strip()
 
-        market_csv_path = resolve_path_relative_to_scenario(scenario, str(market_csv))
-        market_map = read_strategy_series_from_csv_first_col_time(
-            csv_path=market_csv_path,
-            value_col_1_based=int(market_col),
-            delimiter=";",
-        )
+        if market_csv and isinstance(market_col, int) and market_col >= 2 and market_unit in ("€/MWh", "€/kWh"):
+            market_csv_path = resolve_path_relative_to_scenario(scenario, str(market_csv))
+            market_map = read_strategy_series_from_csv_first_col_time(market_csv_path, int(market_col), ";")
+            assert_strategy_csv_covers_simulation(
+                strategy_map=market_map,
+                time_index=time_index,
+                strategy_resolution_min=STRATEGY_RESOLUTION_MIN,
+                charging_strategy="market_fallback_for_generation",
+                strategy_csv_path=market_csv_path,
+            )
+        else:
+            market_map = None
+            market_unit = None
 
-        assert_strategy_csv_covers_simulation(
-            strategy_map=market_map,
-            time_index=time_index,
-            strategy_resolution_min=STRATEGY_RESOLUTION_MIN,
-            charging_strategy="market_fallback_for_generation",
-            strategy_csv_path=market_csv_path,
-        )
-
-    # -----------------------------
-    # C) Immediate: kein Signal erforderlich
-    # -----------------------------
     elif charging_strategy == "immediate":
         pass
     else:
-        raise ValueError(f"❌ Abbruch: Unbekannte charging_strategy='{charging_strategy}'")
+        raise ValueError(f"Unbekannte charging_strategy='{charging_strategy}'")
 
     # ------------------------------------------------------------
-    # 5) Parameter & Ergebniscontainer
+    # C) Präferenzlisten für Market aufbauen (auch für PV->Market Fallback)
     # ------------------------------------------------------------
-    # Hier werden Simulationseinstellungen aus dem Szenario übernommen und Ergebnisarrays vorbereitet.
-    time_resolution_min = scenario["time_resolution_min"]
-    time_step_hours = time_resolution_min / 60.0
-
-    n_steps = len(time_index)
-    load_profile_kw = np.zeros(n_steps, dtype=float)
-
-    grid_limit_p_avb_kw = float(scenario["site"]["grid_limit_p_avb_kw"])
-    rated_power_kw = float(scenario["site"]["rated_power_kw"])
-    number_of_chargers = int(scenario["site"]["number_chargers"])
-    charger_efficiency = float(scenario["site"]["charger_efficiency"])
-
-    # ------------------------------------------------------------
-    # 5b) Basislast (nur relevant für generation)
-    # ------------------------------------------------------------
-    base_load_series = None
-    if charging_strategy == "generation":
-        base_load_series = build_base_load_series(
-            scenario=scenario,
-            timestamps=time_index,
-            base_load_resolution_min=STRATEGY_RESOLUTION_MIN,
-        )
-
-    def _base_load_kw_at(i: int) -> float:
-        """Diese Hilfsfunktion liefert die Basislast am Zeitschritt i (NaN -> 0)."""
-        if base_load_series is None:
-            return 0.0
-        v = float(base_load_series[i])
-        return 0.0 if np.isnan(v) else max(0.0, v)
-
-    def _generation_kw_at(ts: datetime) -> float:
-        """Diese Hilfsfunktion liefert die normierte Erzeugungsleistung (kW) zum Zeitpunkt ts."""
-        if charging_strategy != "generation":
-            return 0.0
-        if not generation_map or not generation_unit:
-            return 0.0
-        raw = lookup_signal(generation_map, ts, STRATEGY_RESOLUTION_MIN)
-        if raw is None:
-            return 0.0
-        return max(
-            0.0,
-            float(
-                convert_strategy_value_to_internal(
-                    charging_strategy="generation",
-                    raw_value=float(raw),
-                    strategy_unit=str(generation_unit),
-                    step_hours=strategy_step_hours,
-                )
-            ),
-        )
-
-    # ------------------------------------------------------------
-    # 5c) PV-Überschuss-Zeitreihe (nur generation)
-    # ------------------------------------------------------------
-    pv_surplus_series_kw = None
-    if charging_strategy == "generation":
-        pv_surplus_series_kw = np.zeros(len(time_index), dtype=float)
-        for ii, tts in enumerate(time_index):
-            pv_kw = _generation_kw_at(tts)
-            base_kw = _base_load_kw_at(ii)
-            pv_surplus_series_kw[ii] = max(0.0, pv_kw - base_kw)
-
-    # ------------------------------------------------------------
-    # 5d) Strategieparameter
-    # ------------------------------------------------------------
-    # emergency_slack_minutes kann im YAML überschrieben werden.
-    strategy_params = site_cfg.get("strategy_params", {}) or {}
-    emergency_slack_minutes = float(strategy_params.get("emergency_slack_minutes", 60.0))
-
-    charging_count_series: list[int] = []
-    all_charging_sessions: list[dict[str, Any]] = []
-    debug_rows: list[dict[str, Any]] = []
-
-    # ------------------------------------------------------------
-    # 6) Sessions erzeugen
-    # ------------------------------------------------------------
-    # Die Sessions werden tagesweise erzeugt und anschließend als Event-Liste simuliert.
-    if time_index:
-        first_day_start = time_index[0].replace(hour=0, minute=0, second=0, microsecond=0)
-        horizon_days = int(scenario["simulation_horizon_days"])
-
-        for day_offset in range(horizon_days):
-            day_start = first_day_start + timedelta(days=day_offset)
-            all_charging_sessions.extend(
-                build_charging_sessions_for_day(
-                    scenario=scenario,
-                    day_start_datetime=day_start,
-                    vehicle_profiles=vehicle_profiles,
-                    holiday_dates=holiday_dates,
-                )
-            )
-
-    # ------------------------------------------------------------
-    # 6b) Präferenzlisten aufbauen
-    # ------------------------------------------------------------
-    # MARKET: nutzt preferred_slot_indices
-    # GENERATION: nutzt preferred_market_slot_indices für Grid-Fallback
-    time_to_idx = {t: idx for idx, t in enumerate(time_index)} if time_index else {}
-
-    if charging_strategy == "market":
-        _build_preferred_slots_for_all_sessions(
-            all_sessions=all_charging_sessions,
-            time_index=time_index,
-            time_to_idx=time_to_idx,
-            charging_strategy="market",
-            strategy_map=market_map,
-            strategy_resolution_min=STRATEGY_RESOLUTION_MIN,
-            strategy_unit=str(market_unit),
-            step_hours=strategy_step_hours,
-        )
-
-    if charging_strategy == "generation" and market_map is not None and market_unit is not None:
-        _build_preferred_market_slots_for_generation_fallback(
+    time_to_idx = {t: idx for idx, t in enumerate(time_index)}
+    if market_map is not None and market_unit is not None:
+        _build_preferred_slots_for_market(
             all_sessions=all_charging_sessions,
             time_index=time_index,
             time_to_idx=time_to_idx,
@@ -1910,484 +1726,177 @@ def simulate_load_profile(
         )
 
     # ------------------------------------------------------------
-    # 6c) Ankunfts-Policy / Belegung
+    # D) Parameter & Ergebniscontainer
     # ------------------------------------------------------------
-    # In dieser Implementierung ist die Policy hart kodiert:
-    #   - Wenn kein Ladepunkt frei ist: Session wird abgewiesen (drive_off).
-    #   - Fahrzeuge bleiben bis zur Abfahrt eingesteckt (kein disconnect_when_full).
-    all_charging_sessions.sort(key=lambda s: s["arrival_time"])
-    arrival_policy = "drive_off"
+    time_resolution_min = scenario["time_resolution_min"]
+    time_step_hours = time_resolution_min / 60.0
+    n_steps = len(time_index)
 
+    load_profile_kw = np.zeros(n_steps, dtype=float)
+    charging_count_series: list[int] = []
+    debug_rows: list[dict[str, Any]] = []
+
+    grid_limit_p_avb_kw = float(scenario["site"]["grid_limit_p_avb_kw"])
+    rated_power_kw = float(scenario["site"]["rated_power_kw"])
+    number_of_chargers = int(scenario["site"]["number_chargers"])
+    charger_efficiency = float(scenario["site"]["charger_efficiency"])
+
+    strategy_params = site_cfg.get("strategy_params", {}) or {}
+    emergency_slack_minutes = float(strategy_params.get("emergency_slack_minutes", 60.0))
+
+    # Basislast nur für generation
+    base_load_series_kw = None
+    if charging_strategy == "generation":
+        base_load_series_kw = build_base_load_series(
+            scenario=scenario,
+            timestamps=time_index,
+            base_load_resolution_min=STRATEGY_RESOLUTION_MIN,
+        )
+
+    # ------------------------------------------------------------
+    # E) Plug-In Policy (FCFS, drive_off)
+    # ------------------------------------------------------------
     chargers: list[dict[str, Any] | None] = [None] * number_of_chargers
     next_arrival_idx = 0
 
-    plugged_session_ids = set()
-    rejected_session_ids = set()
-
-    # ============================================================
-    # 7) Zeitschrittweise Simulation
-    # ============================================================
+    # ------------------------------------------------------------
+    # F) Zeitschritt-Simulation
+    # ------------------------------------------------------------
     for i, ts in enumerate(time_index):
+        release_departed_sessions(ts, chargers)
+        next_arrival_idx = assign_chargers_drive_off_fcfs(
+            ts=ts,
+            chargers=chargers,
+            all_sessions=all_charging_sessions,
+            next_arrival_idx=next_arrival_idx,
+        )
 
-        # --------------------------------------------------------
-        # 7.0) Ladepunkte freigeben (nur bei Abfahrt)
-        # --------------------------------------------------------
-        for c in range(len(chargers)):
-            s = chargers[c]
-            if s is None:
-                continue
-            departed = not (s["arrival_time"] <= ts < s["departure_time"])
-            if departed:
-                chargers[c] = None
-
-        # --------------------------------------------------------
-        # 7.1) Neue Ankünfte verarbeiten (drive_off)
-        # --------------------------------------------------------
-        while (
-            next_arrival_idx < len(all_charging_sessions)
-            and all_charging_sessions[next_arrival_idx]["arrival_time"] <= ts
-        ):
-            s = all_charging_sessions[next_arrival_idx]
-            next_arrival_idx += 1
-
-            if float(s.get("energy_required_kwh", 0.0)) <= 1e-9:
-                continue
-
-            s["_rejected"] = False
-
-            free_c = None
-            for c in range(len(chargers)):
-                if chargers[c] is None:
-                    free_c = c
-                    break
-
-            if free_c is not None:
-                chargers[free_c] = s
-                s["_charger_id"] = free_c
-                s["_plug_in_time"] = ts
-                plugged_session_ids.add(s["session_id"])
-                continue
-
-            # Kein Ladepunkt frei -> Abweisung
-            s["_rejected"] = True
-            s["_rejection_time"] = ts
-            s["_no_charge_reason"] = "no_free_charger_at_arrival"
-            rejected_session_ids.add(s["session_id"])
-            continue
-
-        # --------------------------------------------------------
-        # 7.3) Anwesende Sessions bestimmen
-        # --------------------------------------------------------
-        plugged_sessions = [s for s in chargers if s is not None]
-        present_sessions = [
-            s for s in plugged_sessions
-            if s["arrival_time"] <= ts < s["departure_time"]
-            and float(s.get("energy_required_kwh", 0.0)) > 1e-9
-        ]
-
-        for s in present_sessions:
-            s["_actual_power_kw"] = 0.0
+        present_sessions = get_present_plugged_sessions(ts, chargers)
+        charging_count_series.append(len(present_sessions))
 
         if not present_sessions:
             load_profile_kw[i] = 0.0
-            charging_count_series.append(0)
             continue
 
-        # --------------------------------------------------------
-        # 7.4) Auswahl der ladenden Sessions (strategiespezifisch)
-        # --------------------------------------------------------
-        charging_sessions: list[dict[str, Any]] = []
-
+        # --- Strategien anwenden ---
         if charging_strategy == "immediate":
-            present_sessions.sort(key=lambda s: (s["departure_time"], s["arrival_time"]))
-            charging_sessions = present_sessions[:number_of_chargers]
-
-        elif charging_strategy == "generation":
-            if pv_surplus_series_kw is None:
-                pv_surplus_series_kw = np.zeros(len(time_index), dtype=float)
-
-            _pv_commit_kw, grid_needed_ids = _plan_pv_commitments_for_present_sessions(
+            total_power_kw = run_step_immediate(
+                ts=ts,
+                i=i,
                 present_sessions=present_sessions,
-                i_now=i,
-                pv_surplus_series_kw=pv_surplus_series_kw,
-                time_index=time_index,
-                time_resolution_min=time_resolution_min,
+                grid_limit_p_avb_kw=grid_limit_p_avb_kw,
+                rated_power_kw=rated_power_kw,
                 time_step_hours=time_step_hours,
                 charger_efficiency=charger_efficiency,
-                rated_power_kw=rated_power_kw,
             )
-
-            pv_budget_kw_now = max(0.0, _generation_kw_at(ts) - _base_load_kw_at(i))
-
-            pv_only_candidates: list[dict[str, Any]] = []
-            grid_needed_candidates: list[dict[str, Any]] = []
-
-            for s in present_sessions:
-                slack_m = _slack_minutes_for_session(
-                    s=s,
-                    ts=ts,
-                    rated_power_kw=rated_power_kw,
-                    charger_efficiency=charger_efficiency,
-                )
-                s["_slack_minutes"] = float(slack_m)
-
-                is_grid_needed = (id(s) in grid_needed_ids)
-                s["_grid_needed"] = bool(is_grid_needed)
-                s["_grid_forbidden"] = bool(not is_grid_needed)
-
-                if is_grid_needed:
-                    grid_needed_candidates.append(s)
-                else:
-                    pv_only_candidates.append(s)
-
-            has_market_fallback = (market_map is not None and market_unit is not None)
-
-            emergency: list[dict[str, Any]] = []
-            market_slot: list[dict[str, Any]] = []
-            grid_other: list[dict[str, Any]] = []
-
-            for s in grid_needed_candidates:
-                if float(s.get("_slack_minutes", 1e9)) <= emergency_slack_minutes:
-                    emergency.append(s)
-                    continue
-
-                if has_market_fallback:
-                    pref = s.get("preferred_market_slot_indices", [])
-                    ptr = int(s.get("preferred_market_ptr", 0))
-
-                    while ptr < len(pref) and pref[ptr] < i:
-                        ptr += 1
-                    s["preferred_market_ptr"] = ptr
-
-                    if pref and ptr < len(pref) and pref[ptr] == i:
-                        market_slot.append(s)
-                    else:
-                        grid_other.append(s)
-                else:
-                    grid_other.append(s)
-
-            emergency.sort(key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"]))
-            market_slot.sort(key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"]))
-            grid_other.sort(key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"]))
-            pv_only_candidates.sort(key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"]))
-
-            charging_sessions = []
-            charging_sessions.extend(emergency[:number_of_chargers])
-
-            remaining = number_of_chargers - len(charging_sessions)
-            if remaining > 0 and has_market_fallback:
-                charging_sessions.extend(market_slot[:remaining])
-
-            remaining = number_of_chargers - len(charging_sessions)
-            if remaining > 0 and pv_budget_kw_now > 1e-9:
-                charging_sessions.extend(pv_only_candidates[:remaining])
-
-            remaining = number_of_chargers - len(charging_sessions)
-            if remaining > 0:
-                charging_sessions.extend(grid_other[:remaining])
-
-        else:
-            # market
-            emergency: list[dict[str, Any]] = []
-            slot_candidates: list[dict[str, Any]] = []
-
-            for s in present_sessions:
-                slack_m = _slack_minutes_for_session(
-                    s=s,
-                    ts=ts,
-                    rated_power_kw=rated_power_kw,
-                    charger_efficiency=charger_efficiency,
-                )
-                s["_slack_minutes"] = float(slack_m)
-
-                if slack_m <= emergency_slack_minutes:
-                    emergency.append(s)
-                    continue
-
-                pref = s.get("preferred_slot_indices", [])
-                ptr = int(s.get("preferred_ptr", 0))
-
-                while ptr < len(pref) and pref[ptr] < i:
-                    ptr += 1
-                s["preferred_ptr"] = ptr
-
-                if pref and ptr < len(pref) and pref[ptr] == i:
-                    slot_candidates.append(s)
-
-            seen = set()
-            candidates: list[dict[str, Any]] = []
-
-            for s in emergency:
-                sid = id(s)
-                if sid not in seen:
-                    candidates.append(s)
-                    seen.add(sid)
-
-            for s in slot_candidates:
-                sid = id(s)
-                if sid not in seen:
-                    candidates.append(s)
-                    seen.add(sid)
-
-            if candidates:
-                candidates.sort(key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"]))
-                charging_sessions = candidates[:number_of_chargers]
-            else:
-                charging_sessions = []
-
-        charging_count_series.append(len(charging_sessions))
-
-        if not charging_sessions:
-            load_profile_kw[i] = 0.0
-            continue
-
-        # ---------------------------------------------------------------
-        # 7.5) Leistungsverteilung / Energieupdate
-        # ---------------------------------------------------------------
-        total_power_kw = 0.0
-
-        if charging_strategy == "generation":
-            charger_budget_kw = len(charging_sessions) * rated_power_kw
-            grid_budget_kw = max(0.0, float(grid_limit_p_avb_kw))
-            pv_budget_kw = max(0.0, _generation_kw_at(ts) - _base_load_kw_at(i))
-
-            grid_needed_sessions = [s for s in charging_sessions if bool(s.get("_grid_needed", False))]
-            pv_only_sessions = [s for s in charging_sessions if not bool(s.get("_grid_needed", False))]
-
-            # Grid-needed: PV + Grid (gemeinsamer Budgettopf)
-            grid_needed_used_kw = 0.0
-            if grid_needed_sessions and charger_budget_kw > 1e-9:
-                usable_budget_kw = min(charger_budget_kw, pv_budget_kw + grid_budget_kw)
-                per_session_kw = usable_budget_kw / len(grid_needed_sessions)
-
-                for s in grid_needed_sessions:
-                    vehicle_power_limit_kw = vehicle_power_at_soc(s)
-
-                    allowed_power_kw = min(
-                        per_session_kw,
-                        rated_power_kw,
-                        vehicle_power_limit_kw,
-                        float(s.get("max_charging_power_kw", rated_power_kw)),
-                    )
-
-                    energy_delivered = 0.0
-                    actual_power_kw = 0.0
-
-                    if allowed_power_kw > 1e-9:
-                        possible_energy_kwh = allowed_power_kw * time_step_hours * charger_efficiency
-                        energy_needed = float(s.get("energy_required_kwh", 0.0))
-
-                        if possible_energy_kwh >= energy_needed:
-                            energy_delivered = energy_needed
-                            s["energy_required_kwh"] = 0.0
-                            actual_power_kw = (
-                                energy_delivered / (time_step_hours * charger_efficiency)
-                                if energy_delivered > 0.0 else 0.0
-                            )
-                            if "finished_charging_time" not in s:
-                                s["finished_charging_time"] = ts
-                        else:
-                            energy_delivered = possible_energy_kwh
-                            s["energy_required_kwh"] = energy_needed - possible_energy_kwh
-                            actual_power_kw = allowed_power_kw
-
-                    s["delivered_energy_kwh"] = float(s.get("delivered_energy_kwh", 0.0)) + float(energy_delivered)
-                    s["_actual_power_kw"] = float(actual_power_kw)
-
-                    grid_needed_used_kw += actual_power_kw
-                    total_power_kw += actual_power_kw
-
-                pv_used_by_grid_needed_kw = min(pv_budget_kw, grid_needed_used_kw)
-                pv_budget_kw = max(0.0, pv_budget_kw - pv_used_by_grid_needed_kw)
-                charger_budget_kw = max(0.0, charger_budget_kw - grid_needed_used_kw)
-
-            # PV-only: nur PV-Rest (work-conserving)
-            if pv_only_sessions and pv_budget_kw > 1e-9 and charger_budget_kw > 1e-9:
-                pv_only_budget_kw = min(pv_budget_kw, charger_budget_kw)
-
-                remaining_budget_kw = float(pv_only_budget_kw)
-                pv_only_used_kw = 0.0
-
-                active = [s for s in pv_only_sessions if float(s.get("energy_required_kwh", 0.0)) > 1e-9]
-                iter_guard = 0
-
-                while remaining_budget_kw > 1e-9 and active and iter_guard < 20:
-                    iter_guard += 1
-                    per_kw = remaining_budget_kw / len(active)
-
-                    used_round_kw = 0.0
-                    next_active: list[dict[str, Any]] = []
-
-                    for s in active:
-                        vehicle_power_limit_kw = vehicle_power_at_soc(s)
-
-                        allowed_power_kw = min(
-                            per_kw,
-                            rated_power_kw,
-                            vehicle_power_limit_kw,
-                            float(s.get("max_charging_power_kw", rated_power_kw)),
-                        )
-
-                        if allowed_power_kw <= 1e-9:
-                            s["_actual_power_kw"] = 0.0
-                            next_active.append(s)
-                            continue
-
-                        possible_energy_kwh = allowed_power_kw * time_step_hours * charger_efficiency
-                        energy_needed = float(s.get("energy_required_kwh", 0.0))
-
-                        energy_delivered = 0.0
-                        actual_power_kw = 0.0
-
-                        if possible_energy_kwh >= energy_needed:
-                            energy_delivered = energy_needed
-                            s["energy_required_kwh"] = 0.0
-                            actual_power_kw = (
-                                energy_delivered / (time_step_hours * charger_efficiency)
-                                if energy_delivered > 0.0 else 0.0
-                            )
-                            if "finished_charging_time" not in s:
-                                s["finished_charging_time"] = ts
-                        else:
-                            energy_delivered = possible_energy_kwh
-                            s["energy_required_kwh"] = energy_needed - possible_energy_kwh
-                            actual_power_kw = allowed_power_kw
-
-                        s["delivered_energy_kwh"] = float(s.get("delivered_energy_kwh", 0.0)) + float(energy_delivered)
-                        s["_actual_power_kw"] = float(actual_power_kw)
-
-                        used_round_kw += actual_power_kw
-                        pv_only_used_kw += actual_power_kw
-                        total_power_kw += actual_power_kw
-
-                        if float(s.get("energy_required_kwh", 0.0)) > 1e-9:
-                            next_active.append(s)
-
-                    if used_round_kw <= 1e-9:
-                        break
-
-                    used_round_kw = min(used_round_kw, remaining_budget_kw)
-                    remaining_budget_kw = max(0.0, remaining_budget_kw - used_round_kw)
-                    active = next_active
-
-                pv_budget_kw = max(0.0, pv_budget_kw - pv_only_used_kw)
-                charger_budget_kw = max(0.0, charger_budget_kw - pv_only_used_kw)
-
             load_profile_kw[i] = float(total_power_kw)
 
-        else:
-            # immediate/market: klassische Fair-Share-Logik unter Netz- und Ladepunktlimits
-            max_site_power_kw = min(grid_limit_p_avb_kw, len(charging_sessions) * rated_power_kw)
-            available_power_per_session_kw = max_site_power_kw / len(charging_sessions)
-
-            for s in charging_sessions:
-                vehicle_power_limit_kw = vehicle_power_at_soc(s)
-
-                allowed_power_kw = min(
-                    available_power_per_session_kw,
-                    rated_power_kw,
-                    vehicle_power_limit_kw,
-                    float(s.get("max_charging_power_kw", rated_power_kw)),
-                )
-
-                energy_delivered = 0.0
-                actual_power_kw = 0.0
-
-                if allowed_power_kw > 1e-9:
-                    possible_energy_kwh = allowed_power_kw * time_step_hours * charger_efficiency
-                    energy_needed = float(s.get("energy_required_kwh", 0.0))
-
-                    if possible_energy_kwh >= energy_needed:
-                        energy_delivered = energy_needed
-                        s["energy_required_kwh"] = 0.0
-                        actual_power_kw = (
-                            energy_delivered / (time_step_hours * charger_efficiency)
-                            if energy_delivered > 0.0 else 0.0
-                        )
-                        if "finished_charging_time" not in s:
-                            s["finished_charging_time"] = ts
-                    else:
-                        energy_delivered = possible_energy_kwh
-                        s["energy_required_kwh"] = energy_needed - possible_energy_kwh
-                        actual_power_kw = allowed_power_kw
-
-                s["delivered_energy_kwh"] = float(s.get("delivered_energy_kwh", 0.0)) + float(energy_delivered)
-                s["_actual_power_kw"] = float(actual_power_kw)
-
-                total_power_kw += actual_power_kw
-
-            load_profile_kw[i] = float(total_power_kw)
-
-        # ---------------------------------------------------------------
-        # 7.6) Debug loggen
-        # ---------------------------------------------------------------
-        if record_debug:
-            if charging_strategy == "generation":
-                pv_kw = _generation_kw_at(ts)
-                base_kw = _base_load_kw_at(i)
-                pv_surplus_kw = max(0.0, pv_kw - base_kw)
-            else:
-                pv_kw = 0.0
-                base_kw = 0.0
-                pv_surplus_kw = 0.0
-
-            has_any_emergency_this_step = any(
-                float(s.get("_slack_minutes", 1e9)) <= emergency_slack_minutes
-                for s in charging_sessions
-            )
-
-            if charging_strategy == "generation":
-                site_grid_import_kw = max(0.0, total_power_kw - pv_surplus_kw)
-            else:
-                site_grid_import_kw = max(0.0, total_power_kw)
-
-            emergency_power_kw = sum(
-                float(s.get("_actual_power_kw", 0.0))
-                for s in charging_sessions
-                if float(s.get("_slack_minutes", 1e9)) <= emergency_slack_minutes
-            )
-
-            for s in charging_sessions:
-                arrival_time = s["arrival_time"]
-                departure_time = s["departure_time"]
-                parking_hours = (departure_time - arrival_time).total_seconds() / 3600.0
-                slack_minutes = float(s.get("_slack_minutes", np.nan))
-                is_emergency = bool(slack_minutes <= emergency_slack_minutes)
-
-                session_power_kw = float(s.get("_actual_power_kw", 0.0))
-
-                grid_import_kw_session_physical = 0.0
-                if charging_strategy == "generation" and total_power_kw > 1e-9:
-                    grid_import_kw_session_physical = site_grid_import_kw * (session_power_kw / float(total_power_kw))
-
-                grid_import_kw_session_policy = 0.0
-                if charging_strategy == "generation" and is_emergency and emergency_power_kw > 1e-9:
-                    grid_import_kw_session_policy = site_grid_import_kw * (session_power_kw / emergency_power_kw)
-
+            if record_debug:
                 debug_rows.append(
                     {
                         "ts": ts,
-                        "vehicle_name": s.get("vehicle_name", ""),
-                        "vehicle_class": s.get("vehicle_class", ""),
-                        "arrival_time": arrival_time,
-                        "departure_time": departure_time,
-                        "parking_hours": parking_hours,
-                        "slack_minutes": slack_minutes,
-                        "is_emergency": is_emergency,
-                        "pv_kw": float(pv_kw),
-                        "base_kw": float(base_kw),
-                        "pv_surplus_kw": float(pv_surplus_kw),
+                        "mode": "IMMEDIATE",
                         "site_total_power_kw": float(total_power_kw),
-                        "grid_import_kw_site": float(site_grid_import_kw),
-                        "grid_import_kw_session_physical": float(grid_import_kw_session_physical),
-                        "grid_import_kw_session_policy": float(grid_import_kw_session_policy),
-                        "has_any_emergency_this_step": bool(has_any_emergency_this_step),
+                        "grid_import_kw_site": float(max(0.0, total_power_kw)),
+                    }
+                )
+            continue
+
+        if charging_strategy == "market":
+            total_power_kw, fell_back = run_step_market(
+                ts=ts,
+                i=i,
+                present_sessions=present_sessions,
+                grid_limit_p_avb_kw=grid_limit_p_avb_kw,
+                rated_power_kw=rated_power_kw,
+                time_step_hours=time_step_hours,
+                charger_efficiency=charger_efficiency,
+                emergency_slack_minutes=emergency_slack_minutes,
+            )
+            load_profile_kw[i] = float(total_power_kw)
+
+            if record_debug:
+                debug_rows.append(
+                    {
+                        "ts": ts,
+                        "mode": "MARKET" if not fell_back else "MARKET->IMMEDIATE",
+                        "site_total_power_kw": float(total_power_kw),
+                        "grid_import_kw_site": float(max(0.0, total_power_kw)),
+                    }
+                )
+            continue
+
+        # generation
+        if charging_strategy == "generation":
+            if generation_map is None or generation_unit is None:
+                # Wenn PV-Signal nicht verfügbar ist: als Immediate behandeln
+                total_power_kw = run_step_immediate(
+                    ts=ts,
+                    i=i,
+                    present_sessions=present_sessions,
+                    grid_limit_p_avb_kw=grid_limit_p_avb_kw,
+                    rated_power_kw=rated_power_kw,
+                    time_step_hours=time_step_hours,
+                    charger_efficiency=charger_efficiency,
+                )
+                load_profile_kw[i] = float(total_power_kw)
+
+                if record_debug:
+                    debug_rows.append(
+                        {
+                            "ts": ts,
+                            "mode": "GENERATION_MISSING_SIGNAL->IMMEDIATE",
+                            "pv_surplus_kw": 0.0,
+                            "site_total_power_kw": float(total_power_kw),
+                            "grid_import_kw_site": float(max(0.0, total_power_kw)),
+                        }
+                    )
+                continue
+
+            pv_surplus_kw_now = compute_pv_surplus_kw(
+                ts=ts,
+                i=i,
+                generation_map=generation_map,
+                generation_unit=str(generation_unit),
+                base_load_series_kw=base_load_series_kw,
+                strategy_resolution_min=STRATEGY_RESOLUTION_MIN,
+                step_hours_strategy=strategy_step_hours,
+            )
+
+            total_power_kw, mode_label, fell_back_immediate = run_step_generation_with_fallbacks(
+                ts=ts,
+                i=i,
+                present_sessions=present_sessions,
+                pv_surplus_kw_now=pv_surplus_kw_now,
+                grid_limit_p_avb_kw=grid_limit_p_avb_kw,
+                rated_power_kw=rated_power_kw,
+                time_step_hours=time_step_hours,
+                charger_efficiency=charger_efficiency,
+                emergency_slack_minutes=emergency_slack_minutes,
+                market_enabled=(market_map is not None and market_unit is not None),
+            )
+            load_profile_kw[i] = float(total_power_kw)
+
+            # Physikalischer Grid-Import:
+            grid_import_kw_site = max(0.0, float(total_power_kw) - float(pv_surplus_kw_now))
+
+            if record_debug:
+                debug_rows.append(
+                    {
+                        "ts": ts,
+                        "mode": mode_label,
+                        "pv_surplus_kw": float(pv_surplus_kw_now),
+                        "site_total_power_kw": float(total_power_kw),
+                        "grid_import_kw_site": float(grid_import_kw_site),
+                        "fell_back_immediate": bool(fell_back_immediate),
                     }
                 )
 
-    # ============================================================
-    # 8) Strategie-Status bestimmen
-    # ============================================================
+            continue
+
+    # ------------------------------------------------------------
+    # G) Strategie-Status
+    # ------------------------------------------------------------
     if charging_strategy == "immediate":
         strategy_status = "IMMEDIATE"
     elif charging_strategy == "market":
@@ -2395,11 +1904,8 @@ def simulate_load_profile(
     elif charging_strategy == "generation":
         strategy_status = "ACTIVE" if generation_map else "INACTIVE"
     else:
-        raise ValueError(f"❌ Abbruch: Unbekannte charging_strategy='{charging_strategy}'")
+        strategy_status = "INACTIVE"
 
-    # ============================================================
-    # 9) Rückgabe
-    # ============================================================
     return (
         time_index,
         load_profile_kw,
@@ -2410,3 +1916,70 @@ def simulate_load_profile(
         strategy_status,
         debug_rows if record_debug else None,
     )
+
+# =============================================================================
+# 15) KPI Helper / Reporting (Notebook)
+# =============================================================================
+
+def summarize_sessions_by_charging_mode(
+    sessions: list[dict[str, Any]],
+    eps_kwh: float = 1e-6,
+) -> dict[str, Any]:
+    """
+    Diese Funktion zählt, wie viele Sessions mindestens einmal mit generation, market
+    oder immediate geladen wurden.
+
+    Wichtig:
+      - Eine Session kann in mehreren Modi gezählt werden (z.B. PV + Market-Fallback).
+      - Gezählt wird nur, wenn tatsächlich Energie > eps_kwh im jeweiligen Modus geliefert wurde.
+
+    Rückgabe:
+      - Dictionary mit Session-Anzahlen je Modus sowie Overlap-Informationen.
+    """
+    modes = ["generation", "market", "immediate"]
+
+    counts = {m: 0 for m in modes}
+    sessions_with_any = 0
+    sessions_multi_mode = 0
+
+    for s in sessions or []:
+        energy_by_mode = s.get("_energy_by_mode_kwh", {}) or {}
+        used_modes = [m for m in modes if float(energy_by_mode.get(m, 0.0)) > eps_kwh]
+
+        if not used_modes:
+            continue
+
+        sessions_with_any += 1
+        for m in used_modes:
+            counts[m] += 1
+        if len(used_modes) > 1:
+            sessions_multi_mode += 1
+
+    return {
+        "sessions_with_any_charging": sessions_with_any,
+        "sessions_charged_with_generation": counts["generation"],
+        "sessions_charged_with_market": counts["market"],
+        "sessions_charged_with_immediate": counts["immediate"],
+        "sessions_with_multiple_modes": sessions_multi_mode,
+    }
+
+
+def summarize_energy_by_charging_mode(
+    sessions: list[dict[str, Any]],
+) -> dict[str, float]:
+    """
+    Diese Funktion summiert die geladene Energie (kWh) getrennt nach Modus
+    über alle Sessions.
+
+    Voraussetzung:
+      - apply_energy_update(...) hat pro Session _energy_by_mode_kwh geschrieben.
+    """
+    total = {"generation": 0.0, "market": 0.0, "immediate": 0.0}
+
+    for s in sessions or []:
+        energy_by_mode = s.get("_energy_by_mode_kwh", {}) or {}
+        for mode in total.keys():
+            total[mode] += float(energy_by_mode.get(mode, 0.0))
+
+    return total
+
