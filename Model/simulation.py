@@ -1534,7 +1534,7 @@ def run_step_immediate(
 
 
 # =============================================================================
-# 12) Lademanagement: Market (konservativ, vorausschauend via Slot-Präferenzen)
+# 12) Lademanagement: Market
 # =============================================================================
 
 def select_sessions_market_or_fallback_to_immediate(
@@ -1546,7 +1546,7 @@ def select_sessions_market_or_fallback_to_immediate(
     emergency_slack_minutes: float,
 ) -> tuple[list[dict[str, Any]], bool]:
     """
-    Auswahlregeln (angepasst):
+    Auswahlregeln:
       - Immediate-Fallback NUR, wenn kritische Sessions existieren (Slack <= emergency_slack_minutes).
       - Wenn keine kritischen Sessions existieren und niemand im preferred Slot "dran" ist:
         -> niemand lädt (leere Liste), um teure Zeiten zu vermeiden.
@@ -1642,7 +1642,7 @@ def run_step_market(
     emergency_slack_minutes: float,
 ) -> tuple[float, bool]:
     """
-    Ablauf (angepasst):
+    Ablauf:
       1) Auswahl: kritische Sessions -> Immediate-Fallback (nur diese), sonst preferred-slot Sessions.
       2) Wenn niemand dran ist (keine kritischen, kein preferred Slot): 0 kW.
       3) Wenn mehrere gleichzeitig laden wollen und Budget knapp ist: Slack-Priorität (kein Fair-Share).
