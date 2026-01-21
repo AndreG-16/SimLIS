@@ -8,7 +8,7 @@ from typing import Any
 
 
 # =============================================================================
-# Modulüberblick 
+# Modulüberblick
 # =============================================================================
 # Dieses Modul simuliert den Lastgang eines Ladepark-Standorts über einen konfigurierten Zeithorizont.
 # Es trennt bewusst:
@@ -469,9 +469,9 @@ def realize_mixture_components(
 # =============================================================================
 
 def choose_vehicle_profile(
-    vehicle_profiles: list[VehicleProfile],
+    vehicle_profiles: list["VehicleProfile"],
     scenario: dict[str, Any],
-) -> VehicleProfile:
+) -> "VehicleProfile":
     """
     Diese Funktion wählt ein Fahrzeugprofil aus der Flotte.
     """
@@ -641,11 +641,14 @@ def build_charging_sessions_for_day(
                 "_charger_id": None,
                 "_rejected": False,
 
-                # Market/Geneation-Fallback Präferenzen:
+                # Market Präferenzen:
                 "preferred_slot_indices": [],
                 "preferred_ptr": 0,
-                "preferred_market_slot_indices": [],
-                "preferred_market_ptr": 0,
+
+                # Generation/PV Plan (Option 1: Event-basiert):
+                "pv_plan_kw_by_idx": {},              # idx -> reservierte kW (nur PV)
+                "_pv_planned_energy_kwh": 0.0,
+                "_pv_remaining_after_plan_kwh": float(required_energy_kwh),
             }
         )
 
@@ -1073,7 +1076,6 @@ def allocate_power_water_filling(
     remaining = {id(s): float(caps[id(s)]) for s in active}
     current = {id(s): 0.0 for s in active}
 
-    # Iteratives Water-Filling
     for _ in range(50):
         active_ids = [sid for sid, cap in remaining.items() if cap > 1e-9]
         if not active_ids or remaining_budget <= 1e-9:
@@ -1147,7 +1149,6 @@ def apply_energy_update(
         s["delivered_energy_kwh"] = float(s.get("delivered_energy_kwh", 0.0)) + float(e_del)
         total_power_kw += float(p)
 
-        # --- NEU: Mode-Tracking pro Session ---
         if "_energy_by_mode_kwh" not in s or not isinstance(s["_energy_by_mode_kwh"], dict):
             s["_energy_by_mode_kwh"] = {}
         s["_energy_by_mode_kwh"][mode] = float(s["_energy_by_mode_kwh"].get(mode, 0.0)) + float(e_del)
@@ -1158,6 +1159,249 @@ def apply_energy_update(
 
     return float(total_power_kw)
 
+
+# =============================================================================
+# 9b) PV-Planung: Reservierung über den Horizont (Option 1: event-basiert)
+# =============================================================================
+
+def _departure_index_exclusive(
+    s: dict[str, Any],
+    time_index: list[datetime],
+    start_idx: int,
+) -> int:
+    """
+    Diese Funktion bestimmt den exklusiven Endindex für die Anwesenheit einer Session.
+
+    Definition:
+      - Die Session gilt als anwesend, solange time_index[idx] < departure_time gilt.
+      - Der Rückgabewert ist somit der erste Index, der nicht mehr im Fenster liegt.
+    """
+    dep_ts = s["departure_time"]
+    j = start_idx
+    n = len(time_index)
+    while j < n and time_index[j] < dep_ts:
+        j += 1
+    return j
+
+
+def unreserve_pv_plan_for_sessions(
+    sessions: list[dict[str, Any]],
+    pv_reserved_kw: np.ndarray,
+    from_idx_inclusive: int = 0,
+) -> None:
+    """
+    Diese Funktion entfernt (de-reserviert) die PV-Reservierungen der angegebenen Sessions aus pv_reserved_kw.
+
+    Zweck:
+      - Das event-basierte Replanning ersetzt alte Pläne vollständig.
+      - Damit pv_reserved_kw konsistent bleibt, werden vorherige Reservierungen abgezogen.
+
+    Parameter:
+      - from_idx_inclusive erlaubt das selektive Entfernen (z.B. nur Zukunft ab i+1).
+    """
+    if pv_reserved_kw is None or len(pv_reserved_kw) == 0:
+        return
+
+    start = max(0, int(from_idx_inclusive))
+
+    for s in sessions:
+        plan = s.get("pv_plan_kw_by_idx", None)
+        if not plan or not isinstance(plan, dict):
+            s["pv_plan_kw_by_idx"] = {}
+            continue
+
+        for idx, p in plan.items():
+            try:
+                j = int(idx)
+            except Exception:
+                continue
+            if j < start:
+                continue
+            if 0 <= j < len(pv_reserved_kw):
+                pv_reserved_kw[j] = max(0.0, float(pv_reserved_kw[j]) - float(p))
+
+        # Der Plan wird nach dem Unreserve geleert (Replanning schreibt neu).
+        s["pv_plan_kw_by_idx"] = {k: v for k, v in (plan.items() if isinstance(plan, dict) else []) if int(k) < start}
+        s["_pv_planned_energy_kwh"] = float(s.get("_pv_planned_energy_kwh", 0.0))
+
+
+def plan_and_reserve_pv_for_session_from_now(
+    s: dict[str, Any],
+    now_idx: int,
+    time_index: list[datetime],
+    pv_available_kw: np.ndarray,
+    pv_reserved_kw: np.ndarray,
+    rated_power_kw: float,
+    time_step_hours: float,
+    charger_efficiency: float,
+) -> None:
+    """
+    Diese Funktion plant und reserviert PV-Leistung (kW) für eine Session ab now_idx bis zur Abfahrt.
+
+    Planungsprinzip:
+      - Sobald PV in einem Zeitschritt verfügbar ist, wird sie genutzt (kein Preisziel).
+      - Bei Knappheit entscheidet die Aufrufreihenfolge (Slack-Priorisierung im Replanner).
+      - Es wird konservativ mit einem Plan-Cap gearbeitet (Rated/Hardware), ohne SoC-Forecast.
+
+    Ergebnis:
+      - s["pv_plan_kw_by_idx"][idx] enthält reservierte PV-kW für idx.
+      - pv_reserved_kw[idx] wird entsprechend erhöht.
+    """
+    e_need = float(s.get("energy_required_kwh", 0.0))
+    if e_need <= 1e-9:
+        s["pv_plan_kw_by_idx"] = {}
+        s["_pv_planned_energy_kwh"] = 0.0
+        s["_pv_remaining_after_plan_kwh"] = 0.0
+        return
+
+    end_idx = _departure_index_exclusive(s, time_index, now_idx)
+    if end_idx <= now_idx:
+        s["pv_plan_kw_by_idx"] = {}
+        s["_pv_planned_energy_kwh"] = 0.0
+        s["_pv_remaining_after_plan_kwh"] = e_need
+        return
+
+    # Konservatives Plan-Cap (ohne SoC-Projektion)
+    hw_limit_kw = float(s.get("max_charging_power_kw", rated_power_kw))
+    plan_cap_kw = max(0.0, min(float(rated_power_kw), hw_limit_kw))
+
+    pv_plan: dict[int, float] = {}
+    e_left = float(e_need)
+
+    for idx in range(now_idx, end_idx):
+        pv_free = max(0.0, float(pv_available_kw[idx]) - float(pv_reserved_kw[idx]))
+        if pv_free <= 1e-9:
+            continue
+        if plan_cap_kw <= 1e-9:
+            break
+
+        p_need = e_left / (time_step_hours * charger_efficiency)
+        p_take = min(plan_cap_kw, pv_free, p_need)
+
+        if p_take > 1e-9:
+            pv_plan[idx] = float(p_take)
+            pv_reserved_kw[idx] += float(p_take)
+            e_left -= float(p_take) * time_step_hours * charger_efficiency
+            if e_left <= 1e-6:
+                break
+
+    s["pv_plan_kw_by_idx"] = pv_plan
+    planned = e_need - max(0.0, e_left)
+    s["_pv_planned_energy_kwh"] = float(planned)
+    s["_pv_remaining_after_plan_kwh"] = float(max(0.0, e_left))
+
+
+def replan_pv_for_plugged_sessions_on_event(
+    ts: datetime,
+    now_idx: int,
+    time_index: list[datetime],
+    chargers: list[dict[str, Any] | None],
+    pv_available_kw: np.ndarray,
+    pv_reserved_kw: np.ndarray,
+    rated_power_kw: float,
+    time_step_hours: float,
+    charger_efficiency: float,
+) -> None:
+    """
+    Diese Funktion replanted PV-Pläne event-basiert (Option 1).
+
+    Auslöser:
+      - Plug-In eines neuen Fahrzeugs (FCFS),
+      - Departure/Unplug,
+      - Finish-Events oder Netznachladung, die Reservierungen freimachen sollte.
+
+    Vorgehen:
+      1) Alle aktuell eingesteckten Sessions sammeln.
+      2) Alle bestehenden PV-Reservierungen ab now_idx aus pv_reserved_kw entfernen.
+      3) Sessions nach Slack sortieren (kleiner Slack zuerst).
+      4) In dieser Reihenfolge PV ab now_idx bis Abfahrt reservieren.
+
+    Damit gilt:
+      - Slack-Priorisierung beeinflusst ausschließlich die PV-Planung innerhalb der eingesteckten Sessions.
+      - Die FCFS Plug-In Policy bleibt unangetastet.
+    """
+    plugged = [s for s in chargers if s is not None]
+    if not plugged:
+        return
+
+    # Alte Reservierungen für die Zukunft ab now_idx entfernen
+    unreserve_pv_plan_for_sessions(plugged, pv_reserved_kw, from_idx_inclusive=now_idx)
+
+    for s in plugged:
+        if not (s["arrival_time"] <= ts < s["departure_time"]):
+            s["_slack_minutes"] = -1e9
+        else:
+            s["_slack_minutes"] = float(_slack_minutes_for_session(s, ts, rated_power_kw, charger_efficiency))
+
+    plugged_sorted = sorted(
+        plugged,
+        key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"])
+    )
+
+    for s in plugged_sorted:
+        if not (s["arrival_time"] <= ts < s["departure_time"]):
+            continue
+        if float(s.get("energy_required_kwh", 0.0)) <= 1e-9:
+            s["pv_plan_kw_by_idx"] = {}
+            s["_pv_planned_energy_kwh"] = 0.0
+            s["_pv_remaining_after_plan_kwh"] = 0.0
+            continue
+
+        plan_and_reserve_pv_for_session_from_now(
+            s=s,
+            now_idx=now_idx,
+            time_index=time_index,
+            pv_available_kw=pv_available_kw,
+            pv_reserved_kw=pv_reserved_kw,
+            rated_power_kw=rated_power_kw,
+            time_step_hours=time_step_hours,
+            charger_efficiency=charger_efficiency,
+        )
+
+
+def clear_future_pv_plan_if_finished(
+    sessions: list[dict[str, Any]],
+    current_idx: int,
+    pv_reserved_kw: np.ndarray,
+) -> bool:
+    """
+    Diese Funktion entfernt zukünftige PV-Reservierungen für Sessions, die bereits fertig geladen sind.
+
+    Hintergrund:
+      - Bei event-basierter Planung kann eine Session durch PV oder Grid (Market/Immediate) schneller fertig werden.
+      - Ohne Cleanup würden Reservierungen die PV-Verfügbarkeit künstlich reduzieren.
+
+    Rückgabe:
+      - True, wenn mindestens eine Reservierung entfernt wurde (Event für Replanning).
+    """
+    changed = False
+    if pv_reserved_kw is None or len(pv_reserved_kw) == 0:
+        return False
+
+    start = max(0, int(current_idx) + 1)
+
+    for s in sessions:
+        if float(s.get("energy_required_kwh", 0.0)) > 1e-9:
+            continue
+
+        plan = s.get("pv_plan_kw_by_idx", {}) or {}
+        if not isinstance(plan, dict) or not plan:
+            continue
+
+        # Zukunft ab start entfernen
+        for idx, p in list(plan.items()):
+            try:
+                j = int(idx)
+            except Exception:
+                continue
+            if j >= start and 0 <= j < len(pv_reserved_kw):
+                pv_reserved_kw[j] = max(0.0, float(pv_reserved_kw[j]) - float(p))
+                del plan[idx]
+                changed = True
+
+        s["pv_plan_kw_by_idx"] = plan
+
+    return changed
 
 
 # =============================================================================
@@ -1208,10 +1452,14 @@ def assign_chargers_drive_off_fcfs(
 def release_departed_sessions(
     ts: datetime,
     chargers: list[dict[str, Any] | None],
-) -> None:
+) -> int:
     """
     Diese Funktion gibt Ladepunkte frei, wenn die Session abgefahren ist.
+
+    Rückgabe:
+      - Anzahl der freigegebenen Ladepunkte (n_departures).
     """
+    n_departures = 0
     for c in range(len(chargers)):
         s = chargers[c]
         if s is None:
@@ -1219,6 +1467,8 @@ def release_departed_sessions(
         departed = not (s["arrival_time"] <= ts < s["departure_time"])
         if departed:
             chargers[c] = None
+            n_departures += 1
+    return n_departures
 
 
 def get_present_plugged_sessions(
@@ -1296,16 +1546,15 @@ def select_sessions_market_or_fallback_to_immediate(
     emergency_slack_minutes: float,
 ) -> tuple[list[dict[str, Any]], bool]:
     """
-    Diese Funktion wählt Sessions für Market in einem Zeitschritt aus.
-
-    Konservative Variante A:
-      - Es wird bevorzugt in den Slot geladen, der aktuell als "nächster" in der Preis-Priorität liegt.
-      - Wenn Slots verpasst wurden, wird nur in die Zukunft gesprungen (ptr überspringt idx < i).
-      - Wenn kein Vehicle für Market "dran" ist, wird auf Immediate zurückgefallen.
+    Auswahlregeln (angepasst):
+      - Immediate-Fallback NUR, wenn kritische Sessions existieren (Slack <= emergency_slack_minutes).
+      - Wenn keine kritischen Sessions existieren und niemand im preferred Slot "dran" ist:
+        -> niemand lädt (leere Liste), um teure Zeiten zu vermeiden.
+      - Wenn mehrere Sessions gleichzeitig "dran" sind: Priorisierung nach Slack (kleiner zuerst).
 
     Rückgabe:
       - selected_sessions
-      - did_fallback_to_immediate (True/False)
+      - did_fallback_to_immediate (True/False)  # True bedeutet: kritische Sessions laden außerhalb Market-Logik
     """
     if not present_sessions:
         return [], False
@@ -1313,46 +1562,73 @@ def select_sessions_market_or_fallback_to_immediate(
     emergency: list[dict[str, Any]] = []
     slot_due: list[dict[str, Any]] = []
 
-    # Slack berechnen (für Emergency + Priorisierung)
     for s in present_sessions:
         slack_m = _slack_minutes_for_session(s, ts, rated_power_kw, charger_efficiency)
         s["_slack_minutes"] = float(slack_m)
+
+        # Kritisch => darf laden, auch wenn Slot nicht passt (Immediate-Fallback)
         if slack_m <= emergency_slack_minutes:
             emergency.append(s)
             continue
 
+        # Nicht kritisch => nur laden, wenn aktueller Zeitschritt ein preferred Slot ist
         pref = s.get("preferred_slot_indices", [])
         ptr = int(s.get("preferred_ptr", 0))
 
-        # niemals in Vergangenheit planen
         while ptr < len(pref) and pref[ptr] < i:
             ptr += 1
         s["preferred_ptr"] = ptr
 
-        # Slot ist "due", wenn der aktuelle Index der nächste bevorzugte ist
         if pref and ptr < len(pref) and pref[ptr] == i:
             slot_due.append(s)
 
-    candidates: list[dict[str, Any]] = []
-    seen = set()
+    # Wenn kritische Sessions existieren -> ausschließlich diese laden (Fallback Immediate)
+    if emergency:
+        emergency.sort(key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"]))
+        return emergency, True
 
-    for s in emergency:
-        sid = id(s)
-        if sid not in seen:
-            candidates.append(s)
-            seen.add(sid)
-    for s in slot_due:
-        sid = id(s)
-        if sid not in seen:
-            candidates.append(s)
-            seen.add(sid)
+    # Keine kritischen Sessions:
+    # -> nur im preferred Slot laden, sonst gar nicht laden
+    if not slot_due:
+        return [], False
 
-    if not candidates:
-        # WICHTIG: Market-Fallback zu Immediate (so gewünscht)
-        return present_sessions, True
+    slot_due.sort(key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"]))
+    return slot_due, False
 
-    candidates.sort(key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"]))
-    return candidates, False
+
+def _allocate_power_by_slack_priority(
+    sessions: list[dict[str, Any]],
+    total_budget_kw: float,
+    rated_power_kw: float,
+    time_step_hours: float,
+    charger_efficiency: float,
+) -> dict[int, float]:
+    """
+    Slack-priorisierte Budgetverteilung (statt Water-Filling):
+      - sortiere nach Slack (kleiner zuerst)
+      - gib jeder Session bis zu ihrem Step-Cap, bis Budget leer ist
+    """
+    alloc: dict[int, float] = {}
+    if not sessions or total_budget_kw <= 1e-9:
+        return alloc
+
+    ordered = sorted(
+        sessions,
+        key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"])
+    )
+
+    remaining = float(total_budget_kw)
+
+    for s in ordered:
+        if remaining <= 1e-9:
+            break
+        cap = _session_step_power_cap_kw(s, rated_power_kw, time_step_hours, charger_efficiency)
+        take = min(float(cap), remaining)
+        if take > 1e-9:
+            alloc[id(s)] = float(take)
+            remaining -= float(take)
+
+    return alloc
 
 
 def run_step_market(
@@ -1366,12 +1642,10 @@ def run_step_market(
     emergency_slack_minutes: float,
 ) -> tuple[float, bool]:
     """
-    Diese Funktion führt einen Market-Zeitschritt aus.
-
-    Ablauf:
-      1) Auswahl der Sessions, die jetzt laden sollen (Market-Slots + Emergency).
-      2) Falls niemand dran ist: Fallback zu Immediate (für alle Present).
-      3) Fair-Share (Water-Filling) auf dem Grid-Budget.
+    Ablauf (angepasst):
+      1) Auswahl: kritische Sessions -> Immediate-Fallback (nur diese), sonst preferred-slot Sessions.
+      2) Wenn niemand dran ist (keine kritischen, kein preferred Slot): 0 kW.
+      3) Wenn mehrere gleichzeitig laden wollen und Budget knapp ist: Slack-Priorität (kein Fair-Share).
     """
     if not present_sessions:
         return 0.0, False
@@ -1385,14 +1659,21 @@ def run_step_market(
         emergency_slack_minutes=emergency_slack_minutes,
     )
 
+    # Niemand lädt (keine kritischen + kein preferred slot jetzt)
+    if not selected:
+        return 0.0, False
+
     total_budget_kw = max(0.0, float(grid_limit_p_avb_kw))
-    alloc = allocate_power_water_filling(
+
+    # Slack-priorisierte Zuteilung statt Water-Filling
+    alloc = _allocate_power_by_slack_priority(
         sessions=selected,
         total_budget_kw=total_budget_kw,
         rated_power_kw=rated_power_kw,
         time_step_hours=time_step_hours,
         charger_efficiency=charger_efficiency,
     )
+
     mode_for_energy = "immediate" if fell_back else "market"
     total_power_kw = apply_energy_update(
         ts=ts,
@@ -1406,8 +1687,9 @@ def run_step_market(
     return float(total_power_kw), bool(fell_back)
 
 
+
 # =============================================================================
-# 13) Lademanagement: Generation (PV) + Fallback PV -> Market -> Immediate
+# 13) Lademanagement: Generation (PV) – PV-Planung + Critical-only Fallback
 # =============================================================================
 
 def compute_pv_surplus_kw(
@@ -1446,11 +1728,13 @@ def compute_pv_surplus_kw(
     return max(0.0, pv_kw - base_kw)
 
 
-def run_step_generation_with_fallbacks(
+def run_step_generation_planned_pv_with_critical_fallback(
     ts: datetime,
     i: int,
+    time_index: list[datetime],
     present_sessions: list[dict[str, Any]],
     pv_surplus_kw_now: float,
+    pv_reserved_kw: np.ndarray,
     grid_limit_p_avb_kw: float,
     rated_power_kw: float,
     time_step_hours: float,
@@ -1458,57 +1742,70 @@ def run_step_generation_with_fallbacks(
     emergency_slack_minutes: float,
     # Market fallback signals:
     market_enabled: bool,
-    # Für Market-Fallback wird dasselbe Auswahlverhalten wie in "market" genutzt.
-) -> tuple[float, str, bool]:
+) -> tuple[float, str, bool, bool, bool]:
     """
-    Diese Funktion führt einen Generation-Zeitschritt aus (PV zuerst, dann Fallbacks).
+    Diese Funktion führt einen Generation-Zeitschritt aus:
+      - PV wird ausschließlich nach vorheriger Reservierung (pv_plan_kw_by_idx) genutzt.
+      - Die PV-Verteilung innerhalb der eingesteckten Sessions erfolgt nach Slack-Priorität.
+      - Grid-Fallback wird nur für kritische Sessions (Slack <= emergency_slack_minutes) zugelassen.
 
     Physik/Limit-Definition:
       - grid_limit_p_avb_kw ist ein Import-Limit.
       - PV kommt zusätzlich und reduziert den Grid-Import physikalisch.
       - Damit gilt: grid_import = max(0, total_power - pv_surplus_kw_now) <= grid_limit_p_avb_kw
       - also: total_power <= pv_surplus_kw_now + grid_limit_p_avb_kw
-      - zusätzlich gelten Charger-Limits pro Session.
-
-    Fallback-Logik:
-      1) Zuerst PV-Allocation (priorisiert nach Slack)
-      2) Wenn PV nicht reicht und (Market aktiv), wird Market-Fallback angewendet
-      3) Wenn Market niemanden lädt (oder Market nicht aktiv), Fallback zu Immediate
 
     Rückgabe:
       - total_power_kw
-      - mode_label: "PV" | "MARKET_FALLBACK" | "IMMEDIATE_FALLBACK"
+      - mode_label
       - did_fallback_to_immediate
+      - did_use_grid (Grid-Energie > 0)
+      - did_finish_event (mindestens eine Session wurde in diesem Schritt fertig)
     """
     if not present_sessions:
-        return 0.0, "PV", False
+        return 0.0, "PV_ONLY", False, False, False
 
-    # --- Slack berechnen, da PV bei Mangel nach Slack priorisiert ---
+    did_finish_event = False
+    did_use_grid = False
+    did_fallback_immediate = False
+
+    # ------------------------------------------------------------------
+    # 1) PV-Ausführung (nur reservierte PV, Slack-priorisiert innerhalb present)
+    # ------------------------------------------------------------------
+    pv_budget = float(max(0.0, pv_surplus_kw_now))
+    pv_alloc: dict[int, float] = {}
+
+    # Slack nur für PV-Verteilung (nach Plug-In) berechnen
     for s in present_sessions:
         s["_slack_minutes"] = float(_slack_minutes_for_session(s, ts, rated_power_kw, charger_efficiency))
 
-    present_sorted = sorted(
-        present_sessions,
-        key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"])
-    )
-
-    # --- 1) PV-only Allocation (greedy nach Slack, um PV maximal "sicher" zu nutzen) ---
-    pv_remaining = float(max(0.0, pv_surplus_kw_now))
-    pv_alloc: dict[int, float] = {}
-
-    for s in present_sorted:
-        if pv_remaining <= 1e-9:
-            break
-        cap = _session_step_power_cap_kw(s, rated_power_kw, time_step_hours, charger_efficiency)
-        if cap <= 1e-9:
+    # PV-Kandidaten: in diesem Schritt ist eine PV-Reservierung vorhanden
+    pv_candidates = []
+    for s in present_sessions:
+        plan = s.get("pv_plan_kw_by_idx", {}) or {}
+        p_plan = float(plan.get(i, 0.0))
+        if p_plan <= 1e-9:
             continue
-        take = min(cap, pv_remaining)
+
+        p_phys = _session_step_power_cap_kw(s, rated_power_kw, time_step_hours, charger_efficiency)
+        p_cap = max(0.0, min(p_plan, p_phys))
+        if p_cap <= 1e-9:
+            continue
+
+        pv_candidates.append((s, p_cap))
+
+    # Slack-priorisierte greedy Allocation (explizit Slack als Verteilregel)
+    pv_candidates.sort(key=lambda x: (x[0].get("_slack_minutes", 1e9), x[0]["departure_time"], x[0]["arrival_time"]))
+
+    for s, cap in pv_candidates:
+        if pv_budget <= 1e-9:
+            break
+        take = min(float(cap), pv_budget)
         if take > 1e-9:
             pv_alloc[id(s)] = float(take)
-            pv_remaining -= float(take)
+            pv_budget -= float(take)
 
-    # PV-Leistung anwenden (nur auf Sessions, die PV bekommen)
-    pv_sessions = [s for s in present_sorted if id(s) in pv_alloc]
+    pv_sessions = [s for s in present_sessions if id(s) in pv_alloc]
     pv_power_kw = apply_energy_update(
         ts=ts,
         sessions=pv_sessions,
@@ -1518,37 +1815,50 @@ def run_step_generation_with_fallbacks(
         mode_label="generation",
     )
 
+    # Finish-Event prüfen (für PV-Cleanup/optional Replanning)
+    for s in pv_sessions:
+        if float(s.get("energy_required_kwh", 0.0)) <= 1e-9 and "finished_charging_time" in s and s["finished_charging_time"] == ts:
+            did_finish_event = True
 
-    # --- 2) Prüfen, ob noch Bedarf besteht und ob Grid-Fallback nötig ist ---
+    # ------------------------------------------------------------------
+    # 2) Critical-only Grid-Fallback: nur wenn kritische Sessions noch Bedarf haben
+    # ------------------------------------------------------------------
     still_need = [s for s in present_sessions if float(s.get("energy_required_kwh", 0.0)) > 1e-9]
-
     if not still_need:
-        return float(pv_power_kw), "PV", False
+        return float(pv_power_kw), "PV_ONLY", False, False, did_finish_event
 
-    # Maximal erlaubte zusätzliche Gesamtleistung aufgrund Import-Limit:
-    # grid_import = max(0, total_power - pv_surplus_kw_now) <= grid_limit
-    # => total_power <= pv_surplus_kw_now + grid_limit
-    total_power_upper = float(max(0.0, pv_surplus_kw_now + float(grid_limit_p_avb_kw)))
+    critical = []
+    for s in still_need:
+        slack_m = float(s.get("_slack_minutes", _slack_minutes_for_session(s, ts, rated_power_kw, charger_efficiency)))
+        s["_slack_minutes"] = slack_m
+        if slack_m <= emergency_slack_minutes:
+            critical.append(s)
 
-    # In dieser Stufe ist bereits pv_power_kw gefahren.
+    if not critical:
+        # Nicht-kritische Sessions laden ausschließlich PV (auch wenn PV nicht reicht)
+        return float(pv_power_kw), "PV_ONLY", False, False, did_finish_event
+
+    # Importlimit: total_power <= pv_surplus_kw_now + grid_limit_p_avb_kw
+    total_power_upper = float(max(0.0, float(pv_surplus_kw_now) + float(grid_limit_p_avb_kw)))
     remaining_total_power_budget = max(0.0, total_power_upper - float(pv_power_kw))
-    if remaining_total_power_budget <= 1e-9:
-        # Keine Grid-Leistung möglich (Import-Limit bereits ausgeschöpft)
-        return float(pv_power_kw), "PV", False
 
-    # --- 3) Market-Fallback oder Immediate-Fallback ---
+    if remaining_total_power_budget <= 1e-9:
+        return float(pv_power_kw), "PV_ONLY", False, False, did_finish_event
+
+    # ------------------------------------------------------------------
+    # 3) Market → Immediate-Fallback, aber nur für critical
+    # ------------------------------------------------------------------
+    mode_label = "CRITICAL->MARKET" if market_enabled else "CRITICAL->IMMEDIATE"
+
     if market_enabled:
-        # Market-Fallback wird wie Market im Schritt gewählt.
         selected, fell_back = select_sessions_market_or_fallback_to_immediate(
             ts=ts,
             i=i,
-            present_sessions=still_need,
+            present_sessions=critical,
             rated_power_kw=rated_power_kw,
             charger_efficiency=charger_efficiency,
             emergency_slack_minutes=emergency_slack_minutes,
         )
-
-        # Hier wird nur das verbleibende Import-abhängige Budget verteilt.
         alloc = allocate_power_water_filling(
             sessions=selected,
             total_budget_kw=remaining_total_power_budget,
@@ -1565,32 +1875,41 @@ def run_step_generation_with_fallbacks(
             charger_efficiency=charger_efficiency,
             mode_label=mode_for_energy,
         )
+        if add_power > 1e-9:
+            did_use_grid = True
 
-
-        mode = "MARKET_FALLBACK"
         if fell_back:
-            mode = "IMMEDIATE_FALLBACK"
+            did_fallback_immediate = True
+            mode_label = "CRITICAL->IMMEDIATE"
 
-        return float(pv_power_kw + add_power), mode, bool(fell_back)
+    else:
+        alloc = allocate_power_water_filling(
+            sessions=critical,
+            total_budget_kw=remaining_total_power_budget,
+            rated_power_kw=rated_power_kw,
+            time_step_hours=time_step_hours,
+            charger_efficiency=charger_efficiency,
+        )
+        add_power = apply_energy_update(
+            ts=ts,
+            sessions=critical,
+            power_alloc_kw=alloc,
+            time_step_hours=time_step_hours,
+            charger_efficiency=charger_efficiency,
+            mode_label="immediate",
+        )
+        if add_power > 1e-9:
+            did_use_grid = True
+        did_fallback_immediate = True
+        mode_label = "CRITICAL->IMMEDIATE"
 
-    # Wenn Market nicht aktiv ist: Immediate-Fallback
-    alloc = allocate_power_water_filling(
-        sessions=still_need,
-        total_budget_kw=remaining_total_power_budget,
-        rated_power_kw=rated_power_kw,
-        time_step_hours=time_step_hours,
-        charger_efficiency=charger_efficiency,
-    )
-    add_power = apply_energy_update(
-        ts=ts,
-        sessions=still_need,
-        power_alloc_kw=alloc,
-        time_step_hours=time_step_hours,
-        charger_efficiency=charger_efficiency,
-        mode_label="immediate",
-    )
+    # Finish-Event prüfen (Grid kann ebenfalls finish auslösen)
+    for s in critical:
+        if float(s.get("energy_required_kwh", 0.0)) <= 1e-9 and "finished_charging_time" in s and s["finished_charging_time"] == ts:
+            did_finish_event = True
 
-    return float(pv_power_kw + add_power), "IMMEDIATE_FALLBACK", True
+    total_power_kw = float(pv_power_kw + (add_power if 'add_power' in locals() else 0.0))
+    return total_power_kw, mode_label, bool(did_fallback_immediate), bool(did_use_grid), bool(did_finish_event)
 
 
 # =============================================================================
@@ -1686,7 +2005,7 @@ def simulate_load_profile(
             strategy_csv_path=gen_csv_path,
         )
 
-        # Market-Fallback für Generation ist in diesem Setup erlaubt/typisch:
+        # Market-Fallback für Generation ist erlaubt, wenn Market-Signal vorhanden ist.
         market_csv = site_cfg.get("market_strategy_csv", None)
         market_col = site_cfg.get("market_strategy_value_col", None)
         market_unit = str(site_cfg.get("market_strategy_unit", "") or "").strip()
@@ -1753,6 +2072,25 @@ def simulate_load_profile(
             base_load_resolution_min=STRATEGY_RESOLUTION_MIN,
         )
 
+    # PV-Serien nur für generation
+    pv_available_kw = None
+    pv_reserved_kw = None
+    if charging_strategy == "generation" and generation_map is not None and generation_unit is not None:
+        pv_available_kw = np.zeros(n_steps, dtype=float)
+        pv_reserved_kw = np.zeros(n_steps, dtype=float)
+        for i0, ts0 in enumerate(time_index):
+            pv_available_kw[i0] = float(
+                compute_pv_surplus_kw(
+                    ts=ts0,
+                    i=i0,
+                    generation_map=generation_map,
+                    generation_unit=str(generation_unit),
+                    base_load_series_kw=base_load_series_kw,
+                    strategy_resolution_min=STRATEGY_RESOLUTION_MIN,
+                    step_hours_strategy=strategy_step_hours,
+                )
+            )
+
     # ------------------------------------------------------------
     # E) Plug-In Policy (FCFS, drive_off)
     # ------------------------------------------------------------
@@ -1763,13 +2101,40 @@ def simulate_load_profile(
     # F) Zeitschritt-Simulation
     # ------------------------------------------------------------
     for i, ts in enumerate(time_index):
-        release_departed_sessions(ts, chargers)
+        # Plug-Set vor Release
+        plugged_before = sum(1 for c in chargers if c is not None)
+
+        # Departures: Ladepunkte freigeben
+        n_departures = release_departed_sessions(ts, chargers)
+
+        plugged_after_release = sum(1 for c in chargers if c is not None)
+        did_unplug_event = (plugged_after_release < plugged_before) or (n_departures > 0)
+
+        # Ankünfte: FCFS Plug-In (drive_off)
+        plugged_before_assign = plugged_after_release
         next_arrival_idx = assign_chargers_drive_off_fcfs(
             ts=ts,
             chargers=chargers,
             all_sessions=all_charging_sessions,
             next_arrival_idx=next_arrival_idx,
         )
+        plugged_after_assign = sum(1 for c in chargers if c is not None)
+        did_plug_event = (plugged_after_assign > plugged_before_assign)
+
+        # Event-basiertes Replanning (Option 1) bei Änderung der Plug-Menge
+        if charging_strategy == "generation" and pv_available_kw is not None and pv_reserved_kw is not None:
+            if did_plug_event or did_unplug_event:
+                replan_pv_for_plugged_sessions_on_event(
+                    ts=ts,
+                    now_idx=i,
+                    time_index=time_index,
+                    chargers=chargers,
+                    pv_available_kw=pv_available_kw,
+                    pv_reserved_kw=pv_reserved_kw,
+                    rated_power_kw=rated_power_kw,
+                    time_step_hours=time_step_hours,
+                    charger_efficiency=charger_efficiency,
+                )
 
         present_sessions = get_present_plugged_sessions(ts, chargers)
         charging_count_series.append(len(present_sessions))
@@ -1828,8 +2193,8 @@ def simulate_load_profile(
 
         # generation
         if charging_strategy == "generation":
-            if generation_map is None or generation_unit is None:
-                # Wenn PV-Signal nicht verfügbar ist: als Immediate behandeln
+            # Fehlende PV-Signale => als Immediate behandeln
+            if generation_map is None or generation_unit is None or pv_available_kw is None or pv_reserved_kw is None:
                 total_power_kw = run_step_immediate(
                     ts=ts,
                     i=i,
@@ -1853,32 +2218,50 @@ def simulate_load_profile(
                     )
                 continue
 
-            pv_surplus_kw_now = compute_pv_surplus_kw(
-                ts=ts,
-                i=i,
-                generation_map=generation_map,
-                generation_unit=str(generation_unit),
-                base_load_series_kw=base_load_series_kw,
-                strategy_resolution_min=STRATEGY_RESOLUTION_MIN,
-                step_hours_strategy=strategy_step_hours,
-            )
+            pv_surplus_kw_now = float(pv_available_kw[i])
 
-            total_power_kw, mode_label, fell_back_immediate = run_step_generation_with_fallbacks(
-                ts=ts,
-                i=i,
-                present_sessions=present_sessions,
-                pv_surplus_kw_now=pv_surplus_kw_now,
-                grid_limit_p_avb_kw=grid_limit_p_avb_kw,
-                rated_power_kw=rated_power_kw,
-                time_step_hours=time_step_hours,
-                charger_efficiency=charger_efficiency,
-                emergency_slack_minutes=emergency_slack_minutes,
-                market_enabled=(market_map is not None and market_unit is not None),
+            total_power_kw, mode_label, fell_back_immediate, did_use_grid, did_finish_event = (
+                run_step_generation_planned_pv_with_critical_fallback(
+                    ts=ts,
+                    i=i,
+                    time_index=time_index,
+                    present_sessions=present_sessions,
+                    pv_surplus_kw_now=pv_surplus_kw_now,
+                    pv_reserved_kw=pv_reserved_kw,
+                    grid_limit_p_avb_kw=grid_limit_p_avb_kw,
+                    rated_power_kw=rated_power_kw,
+                    time_step_hours=time_step_hours,
+                    charger_efficiency=charger_efficiency,
+                    emergency_slack_minutes=emergency_slack_minutes,
+                    market_enabled=(market_map is not None and market_unit is not None),
+                )
             )
             load_profile_kw[i] = float(total_power_kw)
 
-            # Physikalischer Grid-Import:
+            # Physikalischer Grid-Import
             grid_import_kw_site = max(0.0, float(total_power_kw) - float(pv_surplus_kw_now))
+
+            # PV-Plan Cleanup für fertige Sessions (Reservierungen freigeben)
+            did_cleanup_event = clear_future_pv_plan_if_finished(
+                sessions=[s for s in chargers if s is not None],
+                current_idx=i,
+                pv_reserved_kw=pv_reserved_kw,
+            )
+
+            # Event-basiertes Replanning für die Zukunft, wenn Grid genutzt wurde oder Sessions fertig wurden
+            # (damit Reservierungen nicht blockieren und PV maximal genutzt wird)
+            if (did_use_grid or did_finish_event or did_cleanup_event) and (i + 1) < n_steps:
+                replan_pv_for_plugged_sessions_on_event(
+                    ts=ts,                      # Slack-Bewertung zum aktuellen Zeitpunkt
+                    now_idx=i + 1,               # Planung beginnt erst ab nächstem Schritt
+                    time_index=time_index,
+                    chargers=chargers,
+                    pv_available_kw=pv_available_kw,
+                    pv_reserved_kw=pv_reserved_kw,
+                    rated_power_kw=rated_power_kw,
+                    time_step_hours=time_step_hours,
+                    charger_efficiency=charger_efficiency,
+                )
 
             if record_debug:
                 debug_rows.append(
@@ -1889,6 +2272,9 @@ def simulate_load_profile(
                         "site_total_power_kw": float(total_power_kw),
                         "grid_import_kw_site": float(grid_import_kw_site),
                         "fell_back_immediate": bool(fell_back_immediate),
+                        "did_use_grid": bool(did_use_grid),
+                        "did_finish_event": bool(did_finish_event),
+                        "did_cleanup_event": bool(did_cleanup_event),
                     }
                 )
 
@@ -1917,14 +2303,18 @@ def simulate_load_profile(
         debug_rows if record_debug else None,
     )
 
+
 # =============================================================================
 # Reporting / KPI Helper (Notebook)
 # =============================================================================
-# Dieser Abschnitt bündelt ausschließlich Notebook-Helfer:
-#   - KPI-Zusammenfassungen über Sessions
+# Dieser Abschnitt bündelt ausschließlich Notebook-Helfer und Auswertungsfunktionen.
+#
+# Inhalt:
+#   - KPI-Zusammenfassungen über Sessions (Plug-In, Rejects, Zielerreichung)
 #   - Kalender-/Gruppierungsfunktionen für Histogramme
-#   - PV-unused-Auswertung aus debug_rows
-#   - Signalreihen für Plotting (Generation/Market)
+#   - PV-Überschuss-Auswertung aus debug_rows (ungennutzter PV-Anteil)
+#   - Strategie-Signalreihen für Plotting (Generation / Market)
+#   - Zusatz-KPIs: Sessions/Energie nach tatsächlich genutztem Lademodus
 
 
 def summarize_sessions(
@@ -1934,11 +2324,17 @@ def summarize_sessions(
     """
     Diese Funktion erzeugt eine KPI-Zusammenfassung über alle Sessions.
 
+    Sie betrachtet:
+      - alle Sessions mit Ladebedarf (Grundmodell),
+      - Sessions mit physischem Ladezugang (eingesteckt),
+      - abgewiesene Sessions (drive_off),
+      - Sessions, die ihr Ziel-SoC nicht erreicht haben.
+
     Rückgabe (notebook-kompatibel):
-      - num_sessions_total: alle Sessions (mit Ladebedarf im Grundmodell)
-      - num_sessions_plugged: Sessions, die physisch eingesteckt wurden
-      - num_sessions_rejected: Sessions, die wegen fehlender Ladepunkte abgewiesen wurden
-      - not_reached_rows: Liste der Sessions, die ihr Ziel-SoC nicht erreicht haben (Restenergie > eps_kwh)
+      - num_sessions_total: Anzahl aller Sessions (mit Ladebedarf im Grundmodell)
+      - num_sessions_plugged: Anzahl Sessions, die physisch eingesteckt wurden
+      - num_sessions_rejected: Anzahl Sessions, die wegen fehlender Ladepunkte abgewiesen wurden
+      - not_reached_rows: Liste von Sessions, die ihr Ziel nicht erreicht haben (Restenergie > eps_kwh)
     """
     if not sessions:
         return {
@@ -1957,17 +2353,24 @@ def summarize_sessions(
         if remaining <= float(eps_kwh):
             continue
 
-        arrival = s["arrival_time"]
-        departure = s["departure_time"]
+        arrival = s.get("arrival_time")
+        departure = s.get("departure_time")
+
+        parking_hours = None
+        if arrival is not None and departure is not None:
+            parking_hours = (departure - arrival).total_seconds() / 3600.0
 
         not_reached_rows.append(
             {
+                "session_id": s.get("session_id", ""),
                 "vehicle_name": s.get("vehicle_name", ""),
+                "vehicle_class": s.get("vehicle_class", ""),
                 "arrival_time": arrival,
                 "departure_time": departure,
-                "parking_hours": (departure - arrival).total_seconds() / 3600.0,
+                "parking_hours": parking_hours,
                 "delivered_energy_kwh": float(s.get("delivered_energy_kwh", 0.0)),
                 "remaining_energy_kwh": remaining,
+                "charger_id": s.get("_charger_id", None),
             }
         )
 
@@ -1985,10 +2388,14 @@ def get_daytype_calendar(
     holiday_dates: set[date],
 ) -> dict[str, list[date]]:
     """
-    Diese Funktion erzeugt eine Liste der Tage je Tagtyp.
+    Diese Funktion erzeugt eine Kalenderliste der Tage je Tagtyp.
 
-    Sie nutzt die zentrale Logik determine_day_type_with_holidays(...) aus dem Modul,
-    damit die Kalenderklassifikation konsistent zur Simulation bleibt.
+    Sie nutzt bewusst die zentrale Logik determine_day_type_with_holidays(...),
+    damit die Tagesklassifikation konsistent zur Simulation bleibt.
+
+    Rückgabe:
+      - dict mit Keys: working_day, saturday, sunday_holiday
+      - Werte: Liste der jeweiligen Datumswerte (date)
     """
     out: dict[str, list[date]] = {"working_day": [], "saturday": [], "sunday_holiday": []}
 
@@ -2009,10 +2416,13 @@ def group_sessions_by_day(
     only_plugged: bool = False,
 ) -> dict[date, list[dict[str, Any]]]:
     """
-    Diese Funktion gruppiert Sessions nach dem Ankunftsdatum.
+    Diese Funktion gruppiert Sessions nach ihrem Ankunftsdatum.
 
     Parameter:
       - only_plugged=True filtert auf Sessions, die physisch eingesteckt wurden.
+
+    Rückgabe:
+      - dict[date] -> list[session]
     """
     out: dict[date, list[dict[str, Any]]] = {}
     if not sessions:
@@ -2021,21 +2431,38 @@ def group_sessions_by_day(
     for s in sessions:
         if only_plugged and s.get("_plug_in_time") is None:
             continue
-        d = s["arrival_time"].date()
+
+        arrival = s.get("arrival_time", None)
+        if arrival is None:
+            continue
+
+        d = arrival.date()
         out.setdefault(d, []).append(s)
 
     return out
 
 
-def build_pv_unused_table(debug_rows: list[dict[str, Any]] | None):
+def build_pv_unused_table(
+    debug_rows: list[dict[str, Any]] | None,
+    eps_kw: float = 1e-6,
+    eps_unused_kw: float = 1e-3,
+):
     """
-    Diese Funktion erstellt eine Tabelle für Zeitpunkte mit ungenutztem PV-Überschuss.
+    Diese Funktion erstellt eine Tabelle für Zeitschritte mit ungenutztem PV-Überschuss.
+
+    Hintergrund:
+      - In der generation-Strategie wird PV (bzw. PV-Überschuss = PV - Grundlast) als Budget betrachtet.
+      - Diese Funktion zeigt, in welchen Zeitschritten PV verfügbar war, aber nicht vollständig genutzt wurde.
 
     Erwartete Felder in debug_rows (generation-Strategie):
       - ts
       - pv_surplus_kw
       - site_total_power_kw
       - optional: grid_import_kw_site
+
+    Parameter:
+      - eps_kw: Schwelle, ab der PV als "vorhanden" gilt
+      - eps_unused_kw: Schwelle, ab der PV als "ungenutzt" gilt
 
     Rückgabe:
       - pandas.DataFrame (kann leer sein)
@@ -2060,10 +2487,12 @@ def build_pv_unused_table(debug_rows: list[dict[str, Any]] | None):
     if not required.issubset(df.columns):
         return pd.DataFrame()
 
-    df_pv = df[df["pv_surplus_kw"] > 1e-6].copy()
+    # Nur Zeitschritte betrachten, in denen PV-Überschuss überhaupt vorhanden ist.
+    df_pv = df[df["pv_surplus_kw"] > float(eps_kw)].copy()
     if len(df_pv) == 0:
         return pd.DataFrame()
 
+    # Pro Timestamp aggregieren (debug_rows kann mehrfach pro ts vorkommen)
     agg: dict[str, tuple[str, str]] = {
         "pv_surplus_kw": ("pv_surplus_kw", "first"),
         "site_power_kw": ("site_total_power_kw", "first"),
@@ -2074,11 +2503,12 @@ def build_pv_unused_table(debug_rows: list[dict[str, Any]] | None):
 
     pv_steps = df_pv.groupby("ts", as_index=False).agg(**agg)
 
+    # PV-Nutzung ist durch Standortleistung begrenzt.
     pv_steps["pv_used_kw"] = np.minimum(pv_steps["pv_surplus_kw"], pv_steps["site_power_kw"])
     pv_steps["pv_unused_kw"] = (pv_steps["pv_surplus_kw"] - pv_steps["pv_used_kw"]).clip(lower=0.0)
 
-    pv_unused_steps = pv_steps[pv_steps["pv_unused_kw"] > 1e-3].copy()
-    pv_unused_steps = pv_unused_steps.sort_values(["pv_unused_kw", "ts"], ascending=[False, True])
+    pv_unused_steps = pv_steps[pv_steps["pv_unused_kw"] > float(eps_unused_kw)].copy()
+    pv_unused_steps = pv_unused_steps.sort_values(["pv_unused_kw", "ts"], ascending=[False, True]).reset_index(drop=True)
 
     return pv_unused_steps
 
@@ -2110,14 +2540,23 @@ def build_strategy_signal_series(
     step_hours = float(strategy_resolution_min) / 60.0
 
     def _load_cfg(prefix: str, allowed_units: set[str]) -> tuple[str, str, int]:
+        """
+        Diese Funktion lädt und validiert die Strategie-Konfiguration aus dem Szenario.
+        """
         unit = str(site_cfg.get(f"{prefix}_strategy_unit", "") or "").strip()
         csv_rel = site_cfg.get(f"{prefix}_strategy_csv", None)
         col = site_cfg.get(f"{prefix}_strategy_value_col", None)
 
         if unit not in allowed_units:
-            raise ValueError(f"❌ Abbruch: 'site.{prefix}_strategy_unit' ungültig (erlaubt: {sorted(allowed_units)}).")
+            raise ValueError(
+                f"❌ Abbruch: 'site.{prefix}_strategy_unit' ungültig "
+                f"(erlaubt: {sorted(allowed_units)})."
+            )
         if not csv_rel or not isinstance(col, int) or col < 2:
-            raise ValueError(f"❌ Abbruch: 'site.{prefix}_strategy_csv' oder 'site.{prefix}_strategy_value_col' fehlt/ungültig.")
+            raise ValueError(
+                f"❌ Abbruch: 'site.{prefix}_strategy_csv' oder "
+                f"'site.{prefix}_strategy_value_col' fehlt/ungültig."
+            )
         return unit, str(csv_rel), int(col)
 
     if strat == "market":
@@ -2166,7 +2605,7 @@ def summarize_sessions_by_charging_mode(
     generation, market oder immediate erhalten haben.
 
     Hinweis:
-      - Eine Session kann in mehreren Modi gezählt werden (z.B. PV + Market-Fallback).
+      - Eine Session kann in mehreren Modi gezählt werden (z.B. generation + market fallback).
       - Gezählt wird nur, wenn tatsächlich Energie > eps_kwh im jeweiligen Modus geliefert wurde.
     """
     modes = ("generation", "market", "immediate")
@@ -2214,6 +2653,10 @@ def summarize_energy_by_charging_mode(
 
     Voraussetzung:
       - apply_energy_update(...) hat pro Session _energy_by_mode_kwh geschrieben.
+
+    Rückgabe:
+      - dict mit Schlüsseln: generation, market, immediate
+      - Werte: Energie in kWh
     """
     total = {"generation": 0.0, "market": 0.0, "immediate": 0.0}
     if not sessions:
