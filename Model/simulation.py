@@ -2669,34 +2669,46 @@ def simulate_load_profile(
 
 
     # PV-Serien nur für generation
-    pv_available_kw = None          # das bleibt: PV-ÜBERSCHUSS als Budget
-    pv_generation_kw = None         # neu: PV-ERZEUGUNG fürs Reporting/Plot
+    pv_available_kw = None          # PV-Überschuss-Budget (für EV-Laden)
+    pv_generation_kw = None         # PV-Erzeugung (ECHT aus CSV)
     pv_reserved_kw = None
+    base_kw_series = None           # Grundlast je Schritt (kW)
 
     if charging_strategy == "generation" and generation_map is not None and generation_unit is not None:
-        pv_available_kw = np.zeros(n_steps, dtype=float)     # Überschuss
-        pv_generation_kw = np.zeros(n_steps, dtype=float)    # Erzeugung (neu)
+        pv_available_kw = np.zeros(n_steps, dtype=float)      # Überschuss = max(0, PV - Base)
+        pv_generation_kw = np.zeros(n_steps, dtype=float)     # Erzeugung = PV (ohne Base-Abzug)
         pv_reserved_kw = np.zeros(n_steps, dtype=float)
+        base_kw_series = np.zeros(n_steps, dtype=float)
 
         for i0, ts0 in enumerate(time_index):
-            # 1) PV-Erzeugung (ohne Grundlastabzug)
-            pv_gen = compute_pv_generation_kw(
-                ts=ts0,
-                generation_map=generation_map,
-                generation_unit=str(generation_unit),
-                strategy_resolution_min=STRATEGY_RESOLUTION_MIN,
-                step_hours_strategy=strategy_step_hours,
-            )
-            pv_generation_kw[i0] = float(pv_gen)
+
+            # 1) PV-Erzeugung (kW) aus CSV (ohne Grundlastabzug)
+            raw = lookup_signal(generation_map, ts0, STRATEGY_RESOLUTION_MIN)
+            pv_kw = 0.0
+            if raw is not None:
+                pv_kw = max(
+                    0.0,
+                    float(
+                        convert_strategy_value_to_internal(
+                            charging_strategy="generation",
+                            raw_value=float(raw),
+                            strategy_unit=str(generation_unit),
+                            step_hours=strategy_step_hours,
+                        )
+                    ),
+                )
+            pv_generation_kw[i0] = float(pv_kw)
 
             # 2) Grundlast (kW) an diesem Schritt
             base_kw = 0.0
             if base_load_series_kw is not None:
                 v = float(base_load_series_kw[i0])
                 base_kw = 0.0 if np.isnan(v) else max(0.0, v)
+            base_kw_series[i0] = float(base_kw)
 
-            # 3) PV-Überschuss als Budget = max(0, PV - Grundlast)
-            pv_available_kw[i0] = float(max(0.0, pv_gen - base_kw))
+            # 3) Überschuss als EV-Budget
+            pv_available_kw[i0] = float(max(0.0, pv_kw - base_kw))
+
 
 
     # ------------------------------------------------------------
@@ -2820,7 +2832,14 @@ def simulate_load_profile(
                     charger_efficiency=charger_efficiency,
                 )
             mode_label_for_debug = "IMMEDIATE"
-            grid_import_kw_site = max(0.0, float(total_power_kw) + float(base_load_series_kw[i]))
+            base_kw_now = float(base_kw_series[i]) if base_kw_series is not None else 0.0
+            pv_gen_now  = float(pv_generation_kw[i])
+
+            # site_load = EV + Base
+            site_load_kw_now = float(total_power_kw) + base_kw_now
+
+            # korrekter Netzimport
+            grid_import_kw_site = max(0.0, site_load_kw_now - pv_gen_now)
 
 
         elif charging_strategy == "market":
