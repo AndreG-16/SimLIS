@@ -2634,7 +2634,7 @@ def simulate_load_profile(
 
     emergency_slack_minutes = float(emergency_slack_minutes)
 
-    # Basislast immer (für korrekten Netzimport = EV + Grundlast)
+    # Basislast immer
     base_load_series_kw = build_base_load_series(
         scenario=scenario,
         timestamps=time_index,
@@ -2784,7 +2784,8 @@ def simulate_load_profile(
                     charger_efficiency=charger_efficiency,
                 )
             mode_label_for_debug = "IMMEDIATE"
-            grid_import_kw_site = max(0.0, float(total_power_kw))
+            grid_import_kw_site = max(0.0, float(total_power_kw) + float(base_load_series_kw[i]))
+
 
         elif charging_strategy == "market":
             did_market_event = False
@@ -2803,7 +2804,8 @@ def simulate_load_profile(
                         charger_efficiency=charger_efficiency,
                     )
                 mode_label_for_debug = "MARKET_MISSING_SIGNAL->IMMEDIATE"
-                grid_import_kw_site = max(0.0, float(total_power_kw))
+                grid_import_kw_site = max(0.0, float(total_power_kw) + float(base_load_series_kw[i]))
+
 
             else:
                 if present_sessions:
@@ -2829,7 +2831,8 @@ def simulate_load_profile(
                     fell_back_market_to_immediate = False
                     total_power_kw = 0.0
 
-                grid_import_kw_site = max(0.0, float(total_power_kw))
+                grid_import_kw_site = max(0.0, float(total_power_kw) + float(base_load_series_kw[i]))
+
 
                 # Wenn Cleanup/Finish Reservierungen geändert hat => ab nächstem Schritt replanen
                 if did_market_event and (i + 1) < n_steps:
