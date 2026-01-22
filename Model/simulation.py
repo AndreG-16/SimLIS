@@ -3021,8 +3021,10 @@ def simulate_load_profile(
                     # Niemand lädt, aber PV-Überschuss kann existieren
                     mode_label_for_debug = "PV_ONLY"
 
-                # Physikalischer Grid-Import
-                grid_import_kw_site = max(0.0, float(total_power_kw) - float(pv_surplus_kw_now))
+                    # Standortbilanz: Netzimport = max(0, (EV + Base) - PV_generation)
+                    site_load_kw_now = float(total_power_kw) + float(base_kw_now)
+                    grid_import_kw_site = max(0.0, site_load_kw_now - float(pv_gen_now))
+
 
                 # PV-Plan Cleanup für fertige Sessions (Reservierungen freigeben)
                 did_cleanup_event = clear_future_pv_plan_if_finished(
