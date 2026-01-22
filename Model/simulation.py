@@ -265,7 +265,7 @@ def vehicle_power_at_soc(session: dict[str, Any]) -> float:
 
 
 # =============================================================================
-# 2) Szenario laden (YAML) + Pfadkontext
+# 2) Szenario laden (YAML) + Pfadkontext + Validierung der YAML
 # =============================================================================
 
 def load_scenario(path: str) -> dict[str, Any]:
@@ -276,6 +276,97 @@ def load_scenario(path: str) -> dict[str, Any]:
         scenario = yaml.safe_load(file)
     scenario["_scenario_dir"] = str(Path(path).resolve().parent)
     return scenario
+
+def validate_scenario(scenario: dict[str, Any]) -> None:
+    """
+    Minimal robuste Szenario-Validierung.
+    Wirft ValueError mit verständlicher Fehlermeldung, wenn etwas unplausibel ist.
+    """
+    if not isinstance(scenario, dict):
+        raise ValueError("Szenario ist kein dict (YAML fehlerhaft?).")
+
+    # --- Kernfelder ---
+    if "time_resolution_min" not in scenario:
+        raise ValueError("Fehlend: time_resolution_min")
+    if "simulation_horizon_days" not in scenario:
+        raise ValueError("Fehlend: simulation_horizon_days")
+    if "site" not in scenario or not isinstance(scenario["site"], dict):
+        raise ValueError("Fehlend/ungültig: site")
+
+    tr = int(scenario["time_resolution_min"])
+    if tr <= 0:
+        raise ValueError("time_resolution_min muss > 0 sein.")
+    if 60 % tr != 0:
+        # nicht zwingend verboten, aber oft ein Zeichen für Misskonfiguration
+        raise ValueError("time_resolution_min sollte ein Teiler von 60 sein (z.B. 5, 10, 15).")
+
+    horizon = int(scenario["simulation_horizon_days"])
+    if horizon <= 0:
+        raise ValueError("simulation_horizon_days muss > 0 sein.")
+
+    site = scenario["site"]
+    n_ch = int(site.get("number_chargers", 0))
+    if n_ch <= 0:
+        raise ValueError("site.number_chargers muss >= 1 sein.")
+
+    rated = float(site.get("rated_power_kw", -1))
+    if rated <= 0:
+        raise ValueError("site.rated_power_kw muss > 0 sein.")
+
+    grid_lim = float(site.get("grid_limit_p_avb_kw", -1))
+    if grid_lim <= 0:
+        raise ValueError("site.grid_limit_p_avb_kw muss > 0 sein.")
+
+    eff = float(site.get("charger_efficiency", -1))
+    if not (0.0 < eff <= 1.0):
+        raise ValueError("site.charger_efficiency muss in (0, 1] liegen.")
+
+    # --- Strategy ---
+    strat = str(site.get("charging_strategy", "immediate")).lower()
+    if strat not in ("immediate", "market", "generation"):
+        raise ValueError("site.charging_strategy muss 'immediate', 'market' oder 'generation' sein.")
+
+    # --- Vehicles ---
+    veh = scenario.get("vehicles", {})
+    if "soc_target" not in veh:
+        raise ValueError("vehicles.soc_target fehlt.")
+    soc_target = float(veh["soc_target"])
+    if not (0.0 < soc_target <= 1.0):
+        raise ValueError("vehicles.soc_target muss in (0, 1] liegen.")
+
+    if "vehicle_curve_csv" not in veh:
+        raise ValueError("vehicles.vehicle_curve_csv fehlt.")
+
+    # --- Distributions (minimal checks) ---
+    if "arrival_time_distribution" not in scenario:
+        raise ValueError("arrival_time_distribution fehlt.")
+    if "parking_duration_distribution" not in scenario:
+        raise ValueError("parking_duration_distribution fehlt.")
+    if "soc_at_arrival_distribution" not in scenario:
+        raise ValueError("soc_at_arrival_distribution fehlt.")
+
+    # weekday keys check
+    atd = scenario["arrival_time_distribution"]
+    if atd.get("type") != "mixture":
+        raise ValueError("arrival_time_distribution.type muss 'mixture' sein.")
+    if "components_per_weekday" not in atd:
+        raise ValueError("arrival_time_distribution.components_per_weekday fehlt.")
+    for k in ("working_day", "saturday", "sunday_holiday"):
+        if k not in atd["components_per_weekday"]:
+            raise ValueError(f"arrival_time_distribution.components_per_weekday.{k} fehlt.")
+
+    # SoC caps plausibility
+    sad = scenario["soc_at_arrival_distribution"]
+    max_soc = float(sad.get("max_soc", 1.0))
+    if not (0.0 < max_soc <= 1.0):
+        raise ValueError("soc_at_arrival_distribution.max_soc muss in (0, 1] liegen.")
+
+    # Parkdauer plausibility
+    pdd = scenario["parking_duration_distribution"]
+    max_d = float(pdd.get("max_duration_minutes", 0))
+    min_d = float(pdd.get("min_duration_minutes", 0))
+    if max_d <= 0 or min_d <= 0 or max_d < min_d:
+        raise ValueError("parking_duration_distribution min/max_duration_minutes ist unplausibel.")
 
 
 # =============================================================================
@@ -641,9 +732,11 @@ def build_charging_sessions_for_day(
                 "_charger_id": None,
                 "_rejected": False,
 
-                # Market Präferenzen:
-                "preferred_slot_indices": [],
-                "preferred_ptr": 0,
+                # --- Market Planung via Slot-Reservierung ---
+                "market_plan_kw_by_idx": {},           # idx -> reservierte kW
+                "_market_planned_energy_kwh": 0.0,
+                "_market_remaining_after_plan_kwh": float(required_energy_kwh),
+
 
                 # Generation/PV Plan (Option 1: Event-basiert):
                 "pv_plan_kw_by_idx": {},              # idx -> reservierte kW (nur PV)
@@ -948,73 +1041,6 @@ def _slack_minutes_for_session(
 
     return (remaining_hours - needed_hours) * 60.0
 
-
-def _build_preferred_slots_for_market(
-    all_sessions: list[dict[str, Any]],
-    time_index: list[datetime],
-    time_to_idx: dict[datetime, int],
-    market_map: dict[datetime, float],
-    market_resolution_min: int,
-    market_unit: str,
-    step_hours: float,
-) -> None:
-    """
-    Diese Funktion baut pro Session eine nach günstigen Preisen sortierte Slot-Liste.
-
-    Konservative Variante A:
-      - Es wird nur eine Präferenzreihenfolge erstellt.
-      - Bei "verpassten" Slots wird später einfach zum nächstbesten Slot
-        (in der Preis-Rangfolge) gewechselt, jedoch nie in der Vergangenheit.
-    """
-    if not market_map or not time_index:
-        return
-
-    for s in all_sessions:
-        if float(s.get("energy_required_kwh", 0.0)) <= 0.0:
-            continue
-
-        a = floor_to_resolution(s["arrival_time"], market_resolution_min)
-        d = floor_to_resolution(s["departure_time"], market_resolution_min)
-
-        while a not in time_to_idx and a < time_index[-1]:
-            a += timedelta(minutes=market_resolution_min)
-        while d not in time_to_idx and d > time_index[0]:
-            d -= timedelta(minutes=market_resolution_min)
-
-        if a not in time_to_idx or d not in time_to_idx:
-            s["preferred_slot_indices"] = []
-            s["preferred_ptr"] = 0
-            continue
-
-        start_idx = time_to_idx[a]
-        end_idx = time_to_idx[d]
-        if end_idx <= start_idx:
-            s["preferred_slot_indices"] = []
-            s["preferred_ptr"] = 0
-            continue
-
-        idxs = list(range(start_idx, end_idx))
-
-        scored: list[tuple[float, int]] = []
-        for idx in idxs:
-            t = time_index[idx]
-            raw = lookup_signal(market_map, t, market_resolution_min)
-            if raw is None:
-                score = 1e30
-            else:
-                score = float(
-                    convert_strategy_value_to_internal(
-                        charging_strategy="market",
-                        raw_value=float(raw),
-                        strategy_unit=market_unit,
-                        step_hours=step_hours,
-                    )
-                )
-            scored.append((score, idx))
-
-        scored.sort(key=lambda x: x[0])
-        s["preferred_slot_indices"] = [idx for _, idx in scored]
-        s["preferred_ptr"] = 0
 
 
 # =============================================================================
@@ -1537,154 +1563,507 @@ def run_step_immediate(
 # 12) Lademanagement: Market
 # =============================================================================
 
-def select_sessions_market_or_fallback_to_immediate(
-    ts: datetime,
-    i: int,
-    present_sessions: list[dict[str, Any]],
-    rated_power_kw: float,
-    charger_efficiency: float,
-    emergency_slack_minutes: float,
-) -> tuple[list[dict[str, Any]], bool]:
-    """
-    Auswahlregeln:
-      - Immediate-Fallback NUR, wenn kritische Sessions existieren (Slack <= emergency_slack_minutes).
-      - Wenn keine kritischen Sessions existieren und niemand im preferred Slot "dran" ist:
-        -> niemand lädt (leere Liste), um teure Zeiten zu vermeiden.
-      - Wenn mehrere Sessions gleichzeitig "dran" sind: Priorisierung nach Slack (kleiner zuerst).
-
-    Rückgabe:
-      - selected_sessions
-      - did_fallback_to_immediate (True/False)  # True bedeutet: kritische Sessions laden außerhalb Market-Logik
-    """
-    if not present_sessions:
-        return [], False
-
-    emergency: list[dict[str, Any]] = []
-    slot_due: list[dict[str, Any]] = []
-
-    for s in present_sessions:
-        slack_m = _slack_minutes_for_session(s, ts, rated_power_kw, charger_efficiency)
-        s["_slack_minutes"] = float(slack_m)
-
-        # Kritisch => darf laden, auch wenn Slot nicht passt (Immediate-Fallback)
-        if slack_m <= emergency_slack_minutes:
-            emergency.append(s)
-            continue
-
-        # Nicht kritisch => nur laden, wenn aktueller Zeitschritt ein preferred Slot ist
-        pref = s.get("preferred_slot_indices", [])
-        ptr = int(s.get("preferred_ptr", 0))
-
-        while ptr < len(pref) and pref[ptr] < i:
-            ptr += 1
-        s["preferred_ptr"] = ptr
-
-        if pref and ptr < len(pref) and pref[ptr] == i:
-            slot_due.append(s)
-
-    # Wenn kritische Sessions existieren -> ausschließlich diese laden (Fallback Immediate)
-    if emergency:
-        emergency.sort(key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"]))
-        return emergency, True
-
-    # Keine kritischen Sessions:
-    # -> nur im preferred Slot laden, sonst gar nicht laden
-    if not slot_due:
-        return [], False
-
-    slot_due.sort(key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"]))
-    return slot_due, False
-
-
-def _allocate_power_by_slack_priority(
-    sessions: list[dict[str, Any]],
-    total_budget_kw: float,
-    rated_power_kw: float,
-    time_step_hours: float,
-    charger_efficiency: float,
-) -> dict[int, float]:
-    """
-    Slack-priorisierte Budgetverteilung (statt Water-Filling):
-      - sortiere nach Slack (kleiner zuerst)
-      - gib jeder Session bis zu ihrem Step-Cap, bis Budget leer ist
-    """
-    alloc: dict[int, float] = {}
-    if not sessions or total_budget_kw <= 1e-9:
-        return alloc
-
-    ordered = sorted(
-        sessions,
-        key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"])
-    )
-
-    remaining = float(total_budget_kw)
-
-    for s in ordered:
-        if remaining <= 1e-9:
-            break
-        cap = _session_step_power_cap_kw(s, rated_power_kw, time_step_hours, charger_efficiency)
-        take = min(float(cap), remaining)
-        if take > 1e-9:
-            alloc[id(s)] = float(take)
-            remaining -= float(take)
-
-    return alloc
-
-
 def run_step_market(
     ts: datetime,
     i: int,
     present_sessions: list[dict[str, Any]],
+    chargers: list[dict[str, Any] | None],
+    time_index: list[datetime],
+    market_map: dict[datetime, float],
+    market_unit: str,
+    market_reserved_kw: np.ndarray,
     grid_limit_p_avb_kw: float,
     rated_power_kw: float,
     time_step_hours: float,
     charger_efficiency: float,
     emergency_slack_minutes: float,
-) -> tuple[float, bool]:
+    strategy_resolution_min: int,
+    strategy_step_hours: float,
+) -> tuple[float, bool, str, bool]:
     """
-    Ablauf:
-      1) Auswahl: kritische Sessions -> Immediate-Fallback (nur diese), sonst preferred-slot Sessions.
-      2) Wenn niemand dran ist (keine kritischen, kein preferred Slot): 0 kW.
-      3) Wenn mehrere gleichzeitig laden wollen und Budget knapp ist: Slack-Priorität (kein Fair-Share).
+    Market mit Slot-Reservierung.
+
+    Ablauf pro Schritt:
+      1) Geplante Market-Leistung ausführen (Plan pro Session/idx).
+      2) Prüfen: wer ist kritisch (Slack <= emergency) ODER hatte gar keinen Plan.
+      3) Wenn kritisch/no-plan -> Immediate-Fallback (nur für diese) innerhalb Restbudget.
+      4) Optional Cleanup-Event: fertige Sessions geben zukünftige Reservierungen frei.
+
+    Rückgabe:
+      - total_power_kw
+      - did_fallback_to_immediate
+      - mode_label
+      - did_finish_or_cleanup_event (damit Simulation replanen kann)
     """
     if not present_sessions:
-        return 0.0, False
+        return 0.0, False, "MARKET_IDLE", False
 
-    selected, fell_back = select_sessions_market_or_fallback_to_immediate(
-        ts=ts,
-        i=i,
-        present_sessions=present_sessions,
-        rated_power_kw=rated_power_kw,
-        charger_efficiency=charger_efficiency,
-        emergency_slack_minutes=emergency_slack_minutes,
+    did_fallback = False
+    mode_label = "MARKET_PLANNED"
+    did_event = False
+
+    # (A) Market-Plan ausführen
+    total_power_kw = 0.0
+    planned_alloc: dict[int, float] = {}
+
+    for s in present_sessions:
+        p_plan = float((s.get("market_plan_kw_by_idx", {}) or {}).get(i, 0.0))
+        if p_plan <= 1e-9:
+            continue
+
+        p_phys = _session_step_power_cap_kw(s, rated_power_kw, time_step_hours, charger_efficiency)
+        p = min(p_plan, p_phys)
+        if p > 1e-9:
+            planned_alloc[id(s)] = float(p)
+
+    planned_sessions = [s for s in present_sessions if id(s) in planned_alloc]
+    if planned_sessions:
+        total_power_kw += apply_energy_update(
+            ts=ts,
+            sessions=planned_sessions,
+            power_alloc_kw=planned_alloc,
+            time_step_hours=time_step_hours,
+            charger_efficiency=charger_efficiency,
+            mode_label="market",
+        )
+
+    # (B) Critical/no-plan bestimmen
+    fallback_candidates: list[dict[str, Any]] = []
+    for s in present_sessions:
+        slack = float(_slack_minutes_for_session(s, ts, rated_power_kw, charger_efficiency))
+        s["_slack_minutes"] = slack
+
+        no_plan = float(s.get("_market_planned_energy_kwh", 0.0)) <= 1e-9
+        if no_plan or slack <= emergency_slack_minutes:
+            fallback_candidates.append(s)
+
+    # (C) Immediate fallback mit Restbudget
+    remaining_budget = max(0.0, float(grid_limit_p_avb_kw) - float(total_power_kw))
+    if fallback_candidates and remaining_budget > 1e-9:
+        alloc = allocate_power_water_filling(
+            sessions=fallback_candidates,
+            total_budget_kw=remaining_budget,
+            rated_power_kw=rated_power_kw,
+            time_step_hours=time_step_hours,
+            charger_efficiency=charger_efficiency,
+        )
+        add_power = apply_energy_update(
+            ts=ts,
+            sessions=fallback_candidates,
+            power_alloc_kw=alloc,
+            time_step_hours=time_step_hours,
+            charger_efficiency=charger_efficiency,
+            mode_label="immediate",
+        )
+        if add_power > 1e-9:
+            did_fallback = True
+            mode_label = "MARKET_PLANNED->IMMEDIATE"
+            total_power_kw += float(add_power)
+
+    # (D) Cleanup: fertige Sessions geben Reservierungen frei
+    plugged = [s for s in chargers if s is not None]
+    if clear_future_market_plan_if_finished(plugged, current_idx=i, market_reserved_kw=market_reserved_kw):
+        did_event = True
+
+    return float(total_power_kw), bool(did_fallback), str(mode_label), bool(did_event)
+
+
+# =============================================================================
+# 12b) Market-Planung: Slot-Reservierung (NEU)
+# =============================================================================
+
+def unreserve_market_plan_for_sessions(
+    sessions: list[dict[str, Any]],
+    market_reserved_kw: np.ndarray,
+    from_idx_inclusive: int = 0,
+) -> None:
+    """
+    Entfernt Market-Reservierungen der Sessions ab from_idx_inclusive aus market_reserved_kw.
+    """
+    if market_reserved_kw is None or len(market_reserved_kw) == 0:
+        return
+
+    start = max(0, int(from_idx_inclusive))
+
+    for s in sessions:
+        plan = s.get("market_plan_kw_by_idx", None)
+        if not plan or not isinstance(plan, dict):
+            s["market_plan_kw_by_idx"] = {}
+            continue
+
+        for idx, p in list(plan.items()):
+            try:
+                j = int(idx)
+            except Exception:
+                continue
+            if j < start:
+                continue
+            if 0 <= j < len(market_reserved_kw):
+                market_reserved_kw[j] = max(0.0, float(market_reserved_kw[j]) - float(p))
+                del plan[idx]
+
+        # Plan in der Vergangenheit behalten, Zukunft geleert
+        s["market_plan_kw_by_idx"] = plan
+
+
+def plan_and_reserve_market_for_session_from_now(
+    s: dict[str, Any],
+    now_idx: int,
+    time_index: list[datetime],
+    market_map: dict[datetime, float],
+    market_resolution_min: int,
+    market_unit: str,
+    step_hours_strategy: float,
+    market_reserved_kw: np.ndarray,
+    grid_limit_p_avb_kw: float,
+    rated_power_kw: float,
+    time_step_hours: float,
+    charger_efficiency: float,
+) -> None:
+    """
+    Plant ab now_idx bis Abfahrt die günstigsten Slots und reserviert sie.
+    Wenn Slots voll sind => nächstgünstiger Slot.
+    Ergebnis steht in s["market_plan_kw_by_idx"].
+    """
+    e_need = float(s.get("energy_required_kwh", 0.0))
+    if e_need <= 1e-9:
+        s["market_plan_kw_by_idx"] = {}
+        s["_market_planned_energy_kwh"] = 0.0
+        s["_market_remaining_after_plan_kwh"] = 0.0
+        return
+
+    end_idx = _departure_index_exclusive(s, time_index, now_idx)
+    if end_idx <= now_idx:
+        s["market_plan_kw_by_idx"] = {}
+        s["_market_planned_energy_kwh"] = 0.0
+        s["_market_remaining_after_plan_kwh"] = e_need
+        return
+
+    # 1) Alle Kandidaten-Slots im Anwesenheitsfenster bewerten
+    scored: list[tuple[float, int]] = []
+    for idx in range(now_idx, end_idx):
+        ts = time_index[idx]
+        raw = lookup_signal(market_map, ts, market_resolution_min)
+        if raw is None:
+            continue
+        price = float(
+            convert_strategy_value_to_internal(
+                charging_strategy="market",
+                raw_value=float(raw),
+                strategy_unit=str(market_unit),
+                step_hours=float(step_hours_strategy),
+            )
+        )
+        scored.append((price, idx))
+
+    scored.sort(key=lambda x: x[0])
+
+    plan: dict[int, float] = {}
+    e_left = float(e_need)
+
+    for _, idx in scored:
+        if e_left <= 1e-9:
+            break
+
+        # freie Grid-Leistung im Slot (site budget)
+        free_kw = max(0.0, float(grid_limit_p_avb_kw) - float(market_reserved_kw[idx]))
+        if free_kw <= 1e-9:
+            continue
+
+        # Session-physikalisches Cap im Schritt (SoC-abhängig)
+        p_cap = _session_step_power_cap_kw(s, rated_power_kw, time_step_hours, charger_efficiency)
+        if p_cap <= 1e-9:
+            break
+
+        # benötigte Leistung um Restenergie zu decken
+        p_need = e_left / (time_step_hours * charger_efficiency)
+        p_take = min(p_cap, free_kw, p_need)
+
+        if p_take > 1e-9:
+            plan[idx] = float(p_take)
+            market_reserved_kw[idx] += float(p_take)
+            e_left -= float(p_take) * time_step_hours * charger_efficiency
+
+    s["market_plan_kw_by_idx"] = plan
+    planned = e_need - max(0.0, e_left)
+    s["_market_planned_energy_kwh"] = float(planned)
+    s["_market_remaining_after_plan_kwh"] = float(max(0.0, e_left))
+
+
+def replan_market_on_event(
+    ts: datetime,
+    now_idx: int,
+    time_index: list[datetime],
+    chargers: list[dict[str, Any] | None],
+    market_map: dict[datetime, float],
+    market_resolution_min: int,
+    market_unit: str,
+    step_hours_strategy: float,
+    market_reserved_kw: np.ndarray,
+    grid_limit_p_avb_kw: float,
+    rated_power_kw: float,
+    time_step_hours: float,
+    charger_efficiency: float,
+) -> None:
+    """
+    Replanning-Event für Market:
+      - alte Reservierungen ab now_idx entfernen
+      - plugged Sessions nach Slack priorisieren
+      - in Reihenfolge neu reservieren
+    """
+    plugged = [s for s in chargers if s is not None]
+    if not plugged:
+        return
+
+    # alte Reservierungen für Zukunft entfernen
+    unreserve_market_plan_for_sessions(plugged, market_reserved_kw, from_idx_inclusive=now_idx)
+
+    # Slack priorisiert: kleiner Slack zuerst
+    for s in plugged:
+        if not (s["arrival_time"] <= ts < s["departure_time"]):
+            s["_slack_minutes"] = -1e9
+        else:
+            s["_slack_minutes"] = float(_slack_minutes_for_session(s, ts, rated_power_kw, charger_efficiency))
+
+    plugged_sorted = sorted(
+        plugged,
+        key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"])
     )
 
-    # Niemand lädt (keine kritischen + kein preferred slot jetzt)
-    if not selected:
-        return 0.0, False
+    for s in plugged_sorted:
+        if not (s["arrival_time"] <= ts < s["departure_time"]):
+            continue
+        if float(s.get("energy_required_kwh", 0.0)) <= 1e-9:
+            s["market_plan_kw_by_idx"] = {}
+            s["_market_planned_energy_kwh"] = 0.0
+            s["_market_remaining_after_plan_kwh"] = 0.0
+            continue
 
-    total_budget_kw = max(0.0, float(grid_limit_p_avb_kw))
+        plan_and_reserve_market_for_session_from_now(
+            s=s,
+            now_idx=now_idx,
+            time_index=time_index,
+            market_map=market_map,
+            market_resolution_min=market_resolution_min,
+            market_unit=market_unit,
+            step_hours_strategy=step_hours_strategy,
+            market_reserved_kw=market_reserved_kw,
+            grid_limit_p_avb_kw=grid_limit_p_avb_kw,
+            rated_power_kw=rated_power_kw,
+            time_step_hours=time_step_hours,
+            charger_efficiency=charger_efficiency,
+        )
 
-    # Slack-priorisierte Zuteilung statt Water-Filling
-    alloc = _allocate_power_by_slack_priority(
-        sessions=selected,
-        total_budget_kw=total_budget_kw,
-        rated_power_kw=rated_power_kw,
-        time_step_hours=time_step_hours,
-        charger_efficiency=charger_efficiency,
+
+def clear_future_market_plan_if_finished(
+    sessions: list[dict[str, Any]],
+    current_idx: int,
+    market_reserved_kw: np.ndarray,
+) -> bool:
+    """
+    Wenn Session fertig ist, werden zukünftige Market-Reservierungen freigegeben.
+    Rückgabe: True wenn etwas geändert wurde (kann Replanning triggern).
+    """
+    changed = False
+    if market_reserved_kw is None or len(market_reserved_kw) == 0:
+        return False
+
+    start = max(0, int(current_idx) + 1)
+
+    for s in sessions:
+        if float(s.get("energy_required_kwh", 0.0)) > 1e-9:
+            continue
+
+        plan = s.get("market_plan_kw_by_idx", {}) or {}
+        if not isinstance(plan, dict) or not plan:
+            continue
+
+        for idx, p in list(plan.items()):
+            try:
+                j = int(idx)
+            except Exception:
+                continue
+            if j >= start and 0 <= j < len(market_reserved_kw):
+                market_reserved_kw[j] = max(0.0, float(market_reserved_kw[j]) - float(p))
+                del plan[idx]
+                changed = True
+
+        s["market_plan_kw_by_idx"] = plan
+
+    return changed
+
+def _session_step_power_cap_kw_for_energy(
+    s: dict[str, Any],
+    rated_power_kw: float,
+    time_step_hours: float,
+    charger_efficiency: float,
+    e_need_kwh: float,
+) -> float:
+    """
+    Wie _session_step_power_cap_kw, aber begrenzt auf eine explizite Energierestmenge (kWh),
+    z.B. Market-Fallback-Rest nach PV-Plan.
+    """
+    if float(e_need_kwh) <= 1e-9:
+        return 0.0
+
+    vehicle_limit_kw = vehicle_power_at_soc(s)
+    hw_limit_kw = float(s.get("max_charging_power_kw", rated_power_kw))
+    cap_kw = max(0.0, min(rated_power_kw, vehicle_limit_kw, hw_limit_kw))
+
+    p_need_for_full_step = float(e_need_kwh) / (time_step_hours * charger_efficiency)
+    cap_kw = min(cap_kw, max(0.0, p_need_for_full_step))
+
+    return max(0.0, cap_kw)
+
+
+def plan_and_reserve_market_fallback_energy_from_now(
+    s: dict[str, Any],
+    now_idx: int,
+    time_index: list[datetime],
+    market_map: dict[datetime, float],
+    market_resolution_min: int,
+    market_unit: str,
+    step_hours_strategy: float,
+    market_reserved_kw: np.ndarray,
+    grid_limit_p_avb_kw: float,
+    rated_power_kw: float,
+    time_step_hours: float,
+    charger_efficiency: float,
+    fallback_energy_need_kwh: float,
+) -> None:
+    """
+    Plant Market-Slots nur für fallback_energy_need_kwh (Restenergie, die PV nicht deckt).
+    Schreibt in s["market_plan_kw_by_idx"] und reserviert in market_reserved_kw.
+    """
+    e_need = float(fallback_energy_need_kwh)
+    if e_need <= 1e-9:
+        s["market_plan_kw_by_idx"] = {}
+        s["_market_planned_energy_kwh"] = 0.0
+        s["_market_remaining_after_plan_kwh"] = 0.0
+        return
+
+    end_idx = _departure_index_exclusive(s, time_index, now_idx)
+    if end_idx <= now_idx:
+        s["market_plan_kw_by_idx"] = {}
+        s["_market_planned_energy_kwh"] = 0.0
+        s["_market_remaining_after_plan_kwh"] = e_need
+        return
+
+    scored: list[tuple[float, int]] = []
+    for idx in range(now_idx, end_idx):
+        ts = time_index[idx]
+        raw = lookup_signal(market_map, ts, market_resolution_min)
+        if raw is None:
+            continue
+        price = float(
+            convert_strategy_value_to_internal(
+                charging_strategy="market",
+                raw_value=float(raw),
+                strategy_unit=str(market_unit),
+                step_hours=float(step_hours_strategy),
+            )
+        )
+        scored.append((price, idx))
+
+    scored.sort(key=lambda x: x[0])
+
+    plan: dict[int, float] = {}
+    e_left = float(e_need)
+
+    for _, idx in scored:
+        if e_left <= 1e-9:
+            break
+
+        free_kw = max(0.0, float(grid_limit_p_avb_kw) - float(market_reserved_kw[idx]))
+        if free_kw <= 1e-9:
+            continue
+
+        p_cap = _session_step_power_cap_kw_for_energy(
+            s, rated_power_kw, time_step_hours, charger_efficiency, e_left
+        )
+        if p_cap <= 1e-9:
+            break
+
+        p_need = e_left / (time_step_hours * charger_efficiency)
+        p_take = min(p_cap, free_kw, p_need)
+
+        if p_take > 1e-9:
+            plan[idx] = float(p_take)
+            market_reserved_kw[idx] += float(p_take)
+            e_left -= float(p_take) * time_step_hours * charger_efficiency
+
+    s["market_plan_kw_by_idx"] = plan
+    planned = e_need - max(0.0, e_left)
+    s["_market_planned_energy_kwh"] = float(planned)
+    s["_market_remaining_after_plan_kwh"] = float(max(0.0, e_left))
+
+
+def replan_market_fallback_for_generation_on_event(
+    ts: datetime,
+    now_idx: int,
+    time_index: list[datetime],
+    chargers: list[dict[str, Any] | None],
+    market_map: dict[datetime, float],
+    market_resolution_min: int,
+    market_unit: str,
+    step_hours_strategy: float,
+    market_reserved_kw: np.ndarray,
+    grid_limit_p_avb_kw: float,
+    rated_power_kw: float,
+    time_step_hours: float,
+    charger_efficiency: float,
+) -> None:
+    """
+    Generation-Hybrid: Market wird NUR für Restenergie nach PV-Plan geplant.
+    Voraussetzung: PV-Planung wurde vorher bereits replanned, sodass
+    s["_pv_remaining_after_plan_kwh"] stimmt.
+    """
+    plugged = [s for s in chargers if s is not None]
+    if not plugged:
+        return
+
+    # alte Reservierungen für Zukunft entfernen
+    unreserve_market_plan_for_sessions(plugged, market_reserved_kw, from_idx_inclusive=now_idx)
+
+    # Slack priorisiert (wie bei Market)
+    for s in plugged:
+        if not (s["arrival_time"] <= ts < s["departure_time"]):
+            s["_slack_minutes"] = -1e9
+        else:
+            s["_slack_minutes"] = float(_slack_minutes_for_session(s, ts, rated_power_kw, charger_efficiency))
+
+    plugged_sorted = sorted(
+        plugged,
+        key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"])
     )
 
-    mode_for_energy = "immediate" if fell_back else "market"
-    total_power_kw = apply_energy_update(
-        ts=ts,
-        sessions=selected,
-        power_alloc_kw=alloc,
-        time_step_hours=time_step_hours,
-        charger_efficiency=charger_efficiency,
-        mode_label=mode_for_energy,
-    )
+    for s in plugged_sorted:
+        if not (s["arrival_time"] <= ts < s["departure_time"]):
+            continue
 
-    return float(total_power_kw), bool(fell_back)
+        # Market-Fallback nur für Rest nach PV-Plan:
+        fallback_need = float(s.get("_pv_remaining_after_plan_kwh", 0.0))
+        if fallback_need <= 1e-9:
+            s["market_plan_kw_by_idx"] = {}
+            s["_market_planned_energy_kwh"] = 0.0
+            s["_market_remaining_after_plan_kwh"] = 0.0
+            continue
+
+        plan_and_reserve_market_fallback_energy_from_now(
+            s=s,
+            now_idx=now_idx,
+            time_index=time_index,
+            market_map=market_map,
+            market_resolution_min=market_resolution_min,
+            market_unit=str(market_unit),
+            step_hours_strategy=step_hours_strategy,
+            market_reserved_kw=market_reserved_kw,
+            grid_limit_p_avb_kw=grid_limit_p_avb_kw,
+            rated_power_kw=rated_power_kw,
+            time_step_hours=time_step_hours,
+            charger_efficiency=charger_efficiency,
+            fallback_energy_need_kwh=fallback_need,
+        )
 
 
 
@@ -1727,6 +2106,69 @@ def compute_pv_surplus_kw(
 
     return max(0.0, pv_kw - base_kw)
 
+def split_critical_sessions_market_vs_immediate(
+    ts: datetime,
+    critical_sessions: list[dict[str, Any]],
+    market_enabled: bool,
+    market_map: dict[datetime, float] | None,
+    market_unit: str | None,
+    strategy_resolution_min: int,
+    strategy_step_hours: float,
+    rated_power_kw: float,
+    charger_efficiency: float,
+    hard_immediate_slack_minutes: float = 0.0,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+    """
+    Entscheidet im Generation-Mode (critical-only Grid-Fallback), welche Sessions
+    als 'market' gelabelt werden können und welche zwingend 'immediate' brauchen.
+
+    Market gilt als NICHT umsetzbar für eine Session, wenn z.B.:
+      - kein Preis-Signal vorhanden ist
+      - Slack <= hard_immediate_slack_minutes (z.B. <= 0) => jetzt sofort laden
+
+    Rückgabe:
+      - market_sessions
+      - immediate_sessions
+      - any_market_used (bool)
+    """
+    if not critical_sessions:
+        return [], [], False
+
+    if not market_enabled or market_map is None or market_unit is None:
+        return [], list(critical_sessions), False
+
+    # Market-Signal muss für den aktuellen Zeitpunkt existieren
+    raw_price = lookup_signal(market_map, ts, strategy_resolution_min)
+    if raw_price is None:
+        return [], list(critical_sessions), False
+
+    # Preis-Konvertierung (nur als Plausibilitätscheck; wir nutzen hier keine Reservierung/Planung)
+    try:
+        _ = convert_strategy_value_to_internal(
+            charging_strategy="market",
+            raw_value=float(raw_price),
+            strategy_unit=str(market_unit),
+            step_hours=float(strategy_step_hours),
+        )
+    except Exception:
+        return [], list(critical_sessions), False
+
+    market_sessions: list[dict[str, Any]] = []
+    immediate_sessions: list[dict[str, Any]] = []
+
+    for s in critical_sessions:
+        slack = float(s.get("_slack_minutes", _slack_minutes_for_session(s, ts, rated_power_kw, charger_efficiency)))
+        s["_slack_minutes"] = slack
+
+        # "Market nicht umsetzbar" => harte Regel: sofort laden
+        if slack <= float(hard_immediate_slack_minutes):
+            immediate_sessions.append(s)
+        else:
+            market_sessions.append(s)
+
+    any_market_used = len(market_sessions) > 0
+    return market_sessions, immediate_sessions, any_market_used
+
 
 def run_step_generation_planned_pv_with_critical_fallback(
     ts: datetime,
@@ -1740,27 +2182,25 @@ def run_step_generation_planned_pv_with_critical_fallback(
     time_step_hours: float,
     charger_efficiency: float,
     emergency_slack_minutes: float,
-    # Market fallback signals:
     market_enabled: bool,
+    market_map: dict[datetime, float] | None,
+    market_unit: str | None,
+    strategy_resolution_min: int,
+    strategy_step_hours: float,
+    hard_immediate_slack_minutes: float = 0.0,   # <-- neu: "Market nicht umsetzbar" Schwelle
 ) -> tuple[float, str, bool, bool, bool]:
     """
-    Diese Funktion führt einen Generation-Zeitschritt aus:
-      - PV wird ausschließlich nach vorheriger Reservierung (pv_plan_kw_by_idx) genutzt.
-      - Die PV-Verteilung innerhalb der eingesteckten Sessions erfolgt nach Slack-Priorität.
-      - Grid-Fallback wird nur für kritische Sessions (Slack <= emergency_slack_minutes) zugelassen.
+    Generation-Hybrid (PV max) + Market NUR als Fallback:
 
-    Physik/Limit-Definition:
-      - grid_limit_p_avb_kw ist ein Import-Limit.
-      - PV kommt zusätzlich und reduziert den Grid-Import physikalisch.
-      - Damit gilt: grid_import = max(0, total_power - pv_surplus_kw_now) <= grid_limit_p_avb_kw
-      - also: total_power <= pv_surplus_kw_now + grid_limit_p_avb_kw
+    Schritt:
+      1) PV nur aus PV-Reservierung (pv_plan_kw_by_idx)
+      2) Market-Fallback aus Market-Reservierung (market_plan_kw_by_idx) für Restenergie nach PV-Plan
+         -> ABER: wenn Slack <= hard_immediate_slack_minutes => Market für diese Session nicht mehr umsetzbar
+      3) Immediate nur als Notfall (kritisch: Slack <= emergency_slack_minutes) oder Market nicht mehr umsetzbar
 
-    Rückgabe:
-      - total_power_kw
-      - mode_label
-      - did_fallback_to_immediate
-      - did_use_grid (Grid-Energie > 0)
-      - did_finish_event (mindestens eine Session wurde in diesem Schritt fertig)
+    Physik:
+      grid_import = max(0, total_power - pv_surplus_kw_now) <= grid_limit_p_avb_kw
+      => total_power <= pv_surplus_kw_now + grid_limit_p_avb_kw
     """
     if not present_sessions:
         return 0.0, "PV_ONLY", False, False, False
@@ -1769,18 +2209,19 @@ def run_step_generation_planned_pv_with_critical_fallback(
     did_use_grid = False
     did_fallback_immediate = False
 
+    # Upper bound (PV + Grid Importlimit)
+    total_power_upper = float(max(0.0, float(pv_surplus_kw_now) + float(grid_limit_p_avb_kw)))
+
     # ------------------------------------------------------------------
-    # 1) PV-Ausführung (nur reservierte PV, Slack-priorisiert innerhalb present)
+    # 1) PV-Ausführung (nur reservierte PV, Slack-priorisiert)
     # ------------------------------------------------------------------
     pv_budget = float(max(0.0, pv_surplus_kw_now))
     pv_alloc: dict[int, float] = {}
 
-    # Slack nur für PV-Verteilung (nach Plug-In) berechnen
     for s in present_sessions:
         s["_slack_minutes"] = float(_slack_minutes_for_session(s, ts, rated_power_kw, charger_efficiency))
 
-    # PV-Kandidaten: in diesem Schritt ist eine PV-Reservierung vorhanden
-    pv_candidates = []
+    pv_candidates: list[tuple[dict[str, Any], float]] = []
     for s in present_sessions:
         plan = s.get("pv_plan_kw_by_idx", {}) or {}
         p_plan = float(plan.get(i, 0.0))
@@ -1794,7 +2235,6 @@ def run_step_generation_planned_pv_with_critical_fallback(
 
         pv_candidates.append((s, p_cap))
 
-    # Slack-priorisierte greedy Allocation (explizit Slack als Verteilregel)
     pv_candidates.sort(key=lambda x: (x[0].get("_slack_minutes", 1e9), x[0]["departure_time"], x[0]["arrival_time"]))
 
     for s, cap in pv_candidates:
@@ -1815,18 +2255,148 @@ def run_step_generation_planned_pv_with_critical_fallback(
         mode_label="generation",
     )
 
-    # Finish-Event prüfen (für PV-Cleanup/optional Replanning)
     for s in pv_sessions:
         if float(s.get("energy_required_kwh", 0.0)) <= 1e-9 and "finished_charging_time" in s and s["finished_charging_time"] == ts:
             did_finish_event = True
 
-    # ------------------------------------------------------------------
-    # 2) Critical-only Grid-Fallback: nur wenn kritische Sessions noch Bedarf haben
-    # ------------------------------------------------------------------
+    # Wenn nach PV niemand mehr Bedarf hat -> fertig
     still_need = [s for s in present_sessions if float(s.get("energy_required_kwh", 0.0)) > 1e-9]
     if not still_need:
         return float(pv_power_kw), "PV_ONLY", False, False, did_finish_event
 
+    remaining_total_power_budget = max(0.0, total_power_upper - float(pv_power_kw))
+    if remaining_total_power_budget <= 1e-9:
+        return float(pv_power_kw), "PV_ONLY", False, False, did_finish_event
+
+    # ------------------------------------------------------------------
+    # 2) Market-Fallback AUSFÜHREN (nicht nur "critical"!)
+    #    Aber: wenn Market "nicht umsetzbar" (Slack <= hard_immediate_slack_minutes) -> nicht Market, sondern ggf. Immediate
+    # ------------------------------------------------------------------
+    market_power_kw = 0.0
+    market_sessions_used: list[dict[str, Any]] = []
+    immediate_due_to_hard: list[dict[str, Any]] = []
+
+    if market_enabled and market_map is not None and market_unit is not None:
+        planned_alloc: dict[int, float] = {}
+        remaining = float(remaining_total_power_budget)
+
+        # Slack-priorisiert ausführen (aber nicht nur critical)
+        need_sorted = sorted(
+            still_need,
+            key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"])
+        )
+
+        for s in need_sorted:
+            if remaining <= 1e-9:
+                break
+
+            slack = float(s.get("_slack_minutes", _slack_minutes_for_session(s, ts, rated_power_kw, charger_efficiency)))
+            s["_slack_minutes"] = slack
+
+            # Market für diese Session "nicht umsetzbar" => wird später ggf. Immediate bekommen
+            if slack <= float(hard_immediate_slack_minutes):
+                immediate_due_to_hard.append(s)
+                continue
+
+            p_plan = float((s.get("market_plan_kw_by_idx", {}) or {}).get(i, 0.0))
+            if p_plan <= 1e-9:
+                continue
+
+            p_phys = _session_step_power_cap_kw(s, rated_power_kw, time_step_hours, charger_efficiency)
+            p_take = min(p_plan, p_phys, remaining)
+            if p_take > 1e-9:
+                planned_alloc[id(s)] = float(p_take)
+                remaining -= float(p_take)
+
+        planned_sessions = [s for s in still_need if id(s) in planned_alloc]
+        if planned_sessions:
+            market_power_kw = apply_energy_update(
+                ts=ts,
+                sessions=planned_sessions,
+                power_alloc_kw=planned_alloc,
+                time_step_hours=time_step_hours,
+                charger_efficiency=charger_efficiency,
+                mode_label="market",
+            )
+            if market_power_kw > 1e-9:
+                did_use_grid = True
+                market_sessions_used = planned_sessions
+
+    remaining_after_market = max(0.0, float(remaining_total_power_budget) - float(market_power_kw))
+    if remaining_after_market <= 1e-9:
+        # Kein Budget mehr für Grid-Notfall
+        total_power_kw = float(pv_power_kw + market_power_kw)
+        mode = "PV_ONLY->MARKET" if market_power_kw > 1e-9 else "PV_ONLY"
+        return total_power_kw, mode, False, did_use_grid, did_finish_event
+
+    # ------------------------------------------------------------------
+    # 3) Immediate-Notfall:
+    #    - nur für CRITICAL (Slack <= emergency_slack_minutes)
+    #    - plus die "hard" Fälle (Market nicht umsetzbar)
+    # ------------------------------------------------------------------
+    critical_or_hard: list[dict[str, Any]] = []
+    for s in still_need:
+        slack = float(s.get("_slack_minutes", _slack_minutes_for_session(s, ts, rated_power_kw, charger_efficiency)))
+        s["_slack_minutes"] = slack
+        if slack <= float(emergency_slack_minutes):
+            critical_or_hard.append(s)
+
+    # hard rule adden (Market nicht umsetzbar)
+    for s in immediate_due_to_hard:
+        if s not in critical_or_hard:
+            critical_or_hard.append(s)
+
+    add_power = 0.0
+    if critical_or_hard and remaining_after_market > 1e-9:
+        alloc = allocate_power_water_filling(
+            sessions=critical_or_hard,
+            total_budget_kw=remaining_after_market,
+            rated_power_kw=rated_power_kw,
+            time_step_hours=time_step_hours,
+            charger_efficiency=charger_efficiency,
+        )
+        add_power = apply_energy_update(
+            ts=ts,
+            sessions=critical_or_hard,
+            power_alloc_kw=alloc,
+            time_step_hours=time_step_hours,
+            charger_efficiency=charger_efficiency,
+            mode_label="immediate",
+        )
+        if add_power > 1e-9:
+            did_use_grid = True
+            did_fallback_immediate = True
+
+    for s in present_sessions:
+        if float(s.get("energy_required_kwh", 0.0)) <= 1e-9 and "finished_charging_time" in s and s["finished_charging_time"] == ts:
+            did_finish_event = True
+
+    total_power_kw = float(pv_power_kw + market_power_kw + add_power)
+
+    # Labeling
+    if market_power_kw > 1e-9 and add_power > 1e-9:
+        mode_label = "PV->MARKET->IMMEDIATE"
+    elif market_power_kw > 1e-9:
+        mode_label = "PV->MARKET"
+    elif add_power > 1e-9:
+        mode_label = "PV->IMMEDIATE"
+    else:
+        mode_label = "PV_ONLY"
+
+    return total_power_kw, mode_label, bool(did_fallback_immediate), bool(did_use_grid), bool(did_finish_event)
+
+
+    # ------------------------------------------------------------------
+    # 3) Market-Fallback (geplant) für critical: günstige Slots, aber wenn "zu spät" -> Immediate
+    # ------------------------------------------------------------------
+    mode_label = "CRITICAL_ONLY"
+    total_power_upper = float(max(0.0, float(pv_surplus_kw_now) + float(grid_limit_p_avb_kw)))
+    remaining_total_power_budget = max(0.0, total_power_upper - float(pv_power_kw))
+
+    if remaining_total_power_budget <= 1e-9:
+        return float(pv_power_kw), "PV_ONLY", False, False, did_finish_event
+
+    # Critical bestimmen
     critical = []
     for s in still_need:
         slack_m = float(s.get("_slack_minutes", _slack_minutes_for_session(s, ts, rated_power_kw, charger_efficiency)))
@@ -1835,64 +2405,63 @@ def run_step_generation_planned_pv_with_critical_fallback(
             critical.append(s)
 
     if not critical:
-        # Nicht-kritische Sessions laden ausschließlich PV (auch wenn PV nicht reicht)
+        # Nicht-kritische Sessions bleiben PV-only (max PV bleibt)
         return float(pv_power_kw), "PV_ONLY", False, False, did_finish_event
 
-    # Importlimit: total_power <= pv_surplus_kw_now + grid_limit_p_avb_kw
-    total_power_upper = float(max(0.0, float(pv_surplus_kw_now) + float(grid_limit_p_avb_kw)))
-    remaining_total_power_budget = max(0.0, total_power_upper - float(pv_power_kw))
-
-    if remaining_total_power_budget <= 1e-9:
-        return float(pv_power_kw), "PV_ONLY", False, False, did_finish_event
-
-    # ------------------------------------------------------------------
-    # 3) Market → Immediate-Fallback, aber nur für critical
-    # ------------------------------------------------------------------
-    mode_label = "CRITICAL->MARKET" if market_enabled else "CRITICAL->IMMEDIATE"
-
+    # 3a) Market-Plan (Fallback) zuerst ausführen – aber nur für critical (und nur wenn market_enabled)
+    market_power_kw = 0.0
     if market_enabled:
-        selected, fell_back = select_sessions_market_or_fallback_to_immediate(
-            ts=ts,
-            i=i,
-            present_sessions=critical,
-            rated_power_kw=rated_power_kw,
-            charger_efficiency=charger_efficiency,
-            emergency_slack_minutes=emergency_slack_minutes,
+        planned_alloc: dict[int, float] = {}
+        # Slack-priorisierte Ausführung der geplanten Slot-Leistung in diesem Schritt
+        crit_sorted = sorted(
+            critical,
+            key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"])
         )
+
+        remaining = float(remaining_total_power_budget)
+        for s in crit_sorted:
+            if remaining <= 1e-9:
+                break
+            p_plan = float((s.get("market_plan_kw_by_idx", {}) or {}).get(i, 0.0))
+            if p_plan <= 1e-9:
+                continue
+
+            # Physik-Cap
+            p_phys = _session_step_power_cap_kw(s, rated_power_kw, time_step_hours, charger_efficiency)
+            p_take = min(p_plan, p_phys, remaining)
+            if p_take > 1e-9:
+                planned_alloc[id(s)] = float(p_take)
+                remaining -= float(p_take)
+
+        planned_sessions = [s for s in critical if id(s) in planned_alloc]
+        if planned_sessions:
+            market_power_kw = apply_energy_update(
+                ts=ts,
+                sessions=planned_sessions,
+                power_alloc_kw=planned_alloc,
+                time_step_hours=time_step_hours,
+                charger_efficiency=charger_efficiency,
+                mode_label="market",
+            )
+            if market_power_kw > 1e-9:
+                did_use_grid = True
+
+    # 3b) Immediate-Notfall: wenn nach Market-Plan critical noch Bedarf haben (Slack klein => jetzt laden)
+    remaining_after_market = max(0.0, float(remaining_total_power_budget) - float(market_power_kw))
+    critical_still_need = [s for s in critical if float(s.get("energy_required_kwh", 0.0)) > 1e-9]
+
+    add_power = 0.0
+    if critical_still_need and remaining_after_market > 1e-9:
         alloc = allocate_power_water_filling(
-            sessions=selected,
-            total_budget_kw=remaining_total_power_budget,
+            sessions=critical_still_need,
+            total_budget_kw=remaining_after_market,
             rated_power_kw=rated_power_kw,
             time_step_hours=time_step_hours,
             charger_efficiency=charger_efficiency,
         )
-        mode_for_energy = "immediate" if fell_back else "market"
         add_power = apply_energy_update(
             ts=ts,
-            sessions=selected,
-            power_alloc_kw=alloc,
-            time_step_hours=time_step_hours,
-            charger_efficiency=charger_efficiency,
-            mode_label=mode_for_energy,
-        )
-        if add_power > 1e-9:
-            did_use_grid = True
-
-        if fell_back:
-            did_fallback_immediate = True
-            mode_label = "CRITICAL->IMMEDIATE"
-
-    else:
-        alloc = allocate_power_water_filling(
-            sessions=critical,
-            total_budget_kw=remaining_total_power_budget,
-            rated_power_kw=rated_power_kw,
-            time_step_hours=time_step_hours,
-            charger_efficiency=charger_efficiency,
-        )
-        add_power = apply_energy_update(
-            ts=ts,
-            sessions=critical,
+            sessions=critical_still_need,
             power_alloc_kw=alloc,
             time_step_hours=time_step_hours,
             charger_efficiency=charger_efficiency,
@@ -1900,15 +2469,22 @@ def run_step_generation_planned_pv_with_critical_fallback(
         )
         if add_power > 1e-9:
             did_use_grid = True
-        did_fallback_immediate = True
-        mode_label = "CRITICAL->IMMEDIATE"
+            did_fallback_immediate = True
 
-    # Finish-Event prüfen (Grid kann ebenfalls finish auslösen)
+    # Finish-Event prüfen
     for s in critical:
         if float(s.get("energy_required_kwh", 0.0)) <= 1e-9 and "finished_charging_time" in s and s["finished_charging_time"] == ts:
             did_finish_event = True
 
-    total_power_kw = float(pv_power_kw + (add_power if 'add_power' in locals() else 0.0))
+    total_power_kw = float(pv_power_kw + float(market_power_kw) + float(add_power))
+
+    if market_enabled and market_power_kw > 1e-9 and add_power <= 1e-9:
+        mode_label = "CRITICAL->MARKET"
+    elif market_enabled and add_power > 1e-9:
+        mode_label = "CRITICAL->MARKET->IMMEDIATE"
+    else:
+        mode_label = "CRITICAL->IMMEDIATE"
+
     return total_power_kw, mode_label, bool(did_fallback_immediate), bool(did_use_grid), bool(did_finish_event)
 
 
@@ -1920,6 +2496,8 @@ def simulate_load_profile(
     scenario: dict,
     start_datetime: datetime | None = None,
     record_debug: bool = False,
+    record_charger_traces: bool = False,
+    emergency_slack_minutes: float = 60.0,
 ):
     """
     Diese Funktion führt die Lastgangsimulation aus.
@@ -1938,6 +2516,7 @@ def simulate_load_profile(
       - strategy_status
       - debug_rows (optional)
     """
+    validate_scenario(scenario)
 
     # ------------------------------------------------------------
     # A) Grundmodell
@@ -2029,20 +2608,6 @@ def simulate_load_profile(
     else:
         raise ValueError(f"Unbekannte charging_strategy='{charging_strategy}'")
 
-    # ------------------------------------------------------------
-    # C) Präferenzlisten für Market aufbauen (auch für PV->Market Fallback)
-    # ------------------------------------------------------------
-    time_to_idx = {t: idx for idx, t in enumerate(time_index)}
-    if market_map is not None and market_unit is not None:
-        _build_preferred_slots_for_market(
-            all_sessions=all_charging_sessions,
-            time_index=time_index,
-            time_to_idx=time_to_idx,
-            market_map=market_map,
-            market_resolution_min=STRATEGY_RESOLUTION_MIN,
-            market_unit=str(market_unit),
-            step_hours=strategy_step_hours,
-        )
 
     # ------------------------------------------------------------
     # D) Parameter & Ergebniscontainer
@@ -2051,17 +2616,23 @@ def simulate_load_profile(
     time_step_hours = time_resolution_min / 60.0
     n_steps = len(time_index)
 
+    # Market-Reservierungen (auch für Generation-Fallback)
+    market_reserved_kw = None
+    if market_map is not None and market_unit is not None:
+        # Market wird entweder als Hauptstrategie genutzt ODER als Fallback in Generation
+        market_reserved_kw = np.zeros(n_steps, dtype=float)
+
     load_profile_kw = np.zeros(n_steps, dtype=float)
     charging_count_series: list[int] = []
     debug_rows: list[dict[str, Any]] = []
+    charger_trace_rows: list[dict[str, Any]] = []
 
     grid_limit_p_avb_kw = float(scenario["site"]["grid_limit_p_avb_kw"])
     rated_power_kw = float(scenario["site"]["rated_power_kw"])
     number_of_chargers = int(scenario["site"]["number_chargers"])
     charger_efficiency = float(scenario["site"]["charger_efficiency"])
 
-    strategy_params = site_cfg.get("strategy_params", {}) or {}
-    emergency_slack_minutes = float(strategy_params.get("emergency_slack_minutes", 60.0))
+    emergency_slack_minutes = float(emergency_slack_minutes)
 
     # Basislast nur für generation
     base_load_series_kw = None
@@ -2101,12 +2672,13 @@ def simulate_load_profile(
     # F) Zeitschritt-Simulation
     # ------------------------------------------------------------
     for i, ts in enumerate(time_index):
-        # Plug-Set vor Release
+        # --------------------------------------------------------
+        # 1) Plug-In / Unplug Events
+        # --------------------------------------------------------
         plugged_before = sum(1 for c in chargers if c is not None)
 
         # Departures: Ladepunkte freigeben
         n_departures = release_departed_sessions(ts, chargers)
-
         plugged_after_release = sum(1 for c in chargers if c is not None)
         did_unplug_event = (plugged_after_release < plugged_before) or (n_departures > 0)
 
@@ -2121,7 +2693,7 @@ def simulate_load_profile(
         plugged_after_assign = sum(1 for c in chargers if c is not None)
         did_plug_event = (plugged_after_assign > plugged_before_assign)
 
-        # Event-basiertes Replanning (Option 1) bei Änderung der Plug-Menge
+        # Event-basiertes Replanning (Generation) bei Änderung der Plug-Menge
         if charging_strategy == "generation" and pv_available_kw is not None and pv_reserved_kw is not None:
             if did_plug_event or did_unplug_event:
                 replan_pv_for_plugged_sessions_on_event(
@@ -2135,66 +2707,72 @@ def simulate_load_profile(
                     time_step_hours=time_step_hours,
                     charger_efficiency=charger_efficiency,
                 )
+        
+        # Market-Fallback-Replanning (Generation-Hybrid): NUR für Restenergie nach PV-Plan
+        if charging_strategy == "generation" and market_map is not None and market_unit is not None and market_reserved_kw is not None:
+            if did_plug_event or did_unplug_event:
+                replan_market_fallback_for_generation_on_event(
+                    ts=ts,
+                    now_idx=i,
+                    time_index=time_index,
+                    chargers=chargers,
+                    market_map=market_map,
+                    market_resolution_min=STRATEGY_RESOLUTION_MIN,
+                    market_unit=str(market_unit),
+                    step_hours_strategy=strategy_step_hours,
+                    market_reserved_kw=market_reserved_kw,
+                    grid_limit_p_avb_kw=grid_limit_p_avb_kw,
+                    rated_power_kw=rated_power_kw,
+                    time_step_hours=time_step_hours,
+                    charger_efficiency=charger_efficiency,
+                )
 
+
+        # Event-basiertes Replanning (Market) bei Plug/Unplug
+        if charging_strategy == "market" and market_map is not None and market_unit is not None and market_reserved_kw is not None:
+            if did_plug_event or did_unplug_event:
+                replan_market_on_event(
+                    ts=ts,
+                    now_idx=i,
+                    time_index=time_index,
+                    chargers=chargers,
+                    market_map=market_map,
+                    market_resolution_min=STRATEGY_RESOLUTION_MIN,
+                    market_unit=str(market_unit),
+                    step_hours_strategy=strategy_step_hours,
+                    market_reserved_kw=market_reserved_kw,
+                    grid_limit_p_avb_kw=grid_limit_p_avb_kw,
+                    rated_power_kw=rated_power_kw,
+                    time_step_hours=time_step_hours,
+                    charger_efficiency=charger_efficiency,
+                )
+
+
+        # Sessions, die jetzt physisch anwesend sind + noch Bedarf haben
         present_sessions = get_present_plugged_sessions(ts, chargers)
         charging_count_series.append(len(present_sessions))
 
-        if not present_sessions:
-            load_profile_kw[i] = 0.0
-            continue
+        # --------------------------------------------------------
+        # 2) Defaults für diesen Zeitschritt (wichtig: keine continues)
+        # --------------------------------------------------------
+        total_power_kw = 0.0
 
-        # --- Strategien anwenden ---
+        # Debug/Labels
+        mode_label_for_debug = "IDLE"
+        fell_back_market_to_immediate = False
+
+        # Generation-spezifisch
+        pv_surplus_kw_now = 0.0
+        grid_import_kw_site = 0.0
+        did_use_grid = False
+        did_finish_event = False
+        did_cleanup_event = False
+
+        # --------------------------------------------------------
+        # 3) Strategien anwenden
+        # --------------------------------------------------------
         if charging_strategy == "immediate":
-            total_power_kw = run_step_immediate(
-                ts=ts,
-                i=i,
-                present_sessions=present_sessions,
-                grid_limit_p_avb_kw=grid_limit_p_avb_kw,
-                rated_power_kw=rated_power_kw,
-                time_step_hours=time_step_hours,
-                charger_efficiency=charger_efficiency,
-            )
-            load_profile_kw[i] = float(total_power_kw)
-
-            if record_debug:
-                debug_rows.append(
-                    {
-                        "ts": ts,
-                        "mode": "IMMEDIATE",
-                        "site_total_power_kw": float(total_power_kw),
-                        "grid_import_kw_site": float(max(0.0, total_power_kw)),
-                    }
-                )
-            continue
-
-        if charging_strategy == "market":
-            total_power_kw, fell_back = run_step_market(
-                ts=ts,
-                i=i,
-                present_sessions=present_sessions,
-                grid_limit_p_avb_kw=grid_limit_p_avb_kw,
-                rated_power_kw=rated_power_kw,
-                time_step_hours=time_step_hours,
-                charger_efficiency=charger_efficiency,
-                emergency_slack_minutes=emergency_slack_minutes,
-            )
-            load_profile_kw[i] = float(total_power_kw)
-
-            if record_debug:
-                debug_rows.append(
-                    {
-                        "ts": ts,
-                        "mode": "MARKET" if not fell_back else "MARKET->IMMEDIATE",
-                        "site_total_power_kw": float(total_power_kw),
-                        "grid_import_kw_site": float(max(0.0, total_power_kw)),
-                    }
-                )
-            continue
-
-        # generation
-        if charging_strategy == "generation":
-            # Fehlende PV-Signale => als Immediate behandeln
-            if generation_map is None or generation_unit is None or pv_available_kw is None or pv_reserved_kw is None:
+            if present_sessions:
                 total_power_kw = run_step_immediate(
                     ts=ts,
                     i=i,
@@ -2204,81 +2782,241 @@ def simulate_load_profile(
                     time_step_hours=time_step_hours,
                     charger_efficiency=charger_efficiency,
                 )
-                load_profile_kw[i] = float(total_power_kw)
+            mode_label_for_debug = "IMMEDIATE"
+            grid_import_kw_site = max(0.0, float(total_power_kw))
 
-                if record_debug:
-                    debug_rows.append(
+        elif charging_strategy == "market":
+            did_market_event = False
+
+            missing_signal = (market_map is None or market_unit is None or market_reserved_kw is None)
+            if missing_signal:
+                # ohne Market-Signal => immediate
+                if present_sessions:
+                    total_power_kw = run_step_immediate(
+                        ts=ts,
+                        i=i,
+                        present_sessions=present_sessions,
+                        grid_limit_p_avb_kw=grid_limit_p_avb_kw,
+                        rated_power_kw=rated_power_kw,
+                        time_step_hours=time_step_hours,
+                        charger_efficiency=charger_efficiency,
+                    )
+                mode_label_for_debug = "MARKET_MISSING_SIGNAL->IMMEDIATE"
+                grid_import_kw_site = max(0.0, float(total_power_kw))
+
+            else:
+                if present_sessions:
+                    total_power_kw, fell_back_market_to_immediate, mode_label_for_debug, did_market_event = run_step_market(
+                        ts=ts,
+                        i=i,
+                        present_sessions=present_sessions,
+                        chargers=chargers,
+                        time_index=time_index,
+                        market_map=market_map,
+                        market_unit=str(market_unit),
+                        market_reserved_kw=market_reserved_kw,
+                        grid_limit_p_avb_kw=grid_limit_p_avb_kw,
+                        rated_power_kw=rated_power_kw,
+                        time_step_hours=time_step_hours,
+                        charger_efficiency=charger_efficiency,
+                        emergency_slack_minutes=emergency_slack_minutes,
+                        strategy_resolution_min=STRATEGY_RESOLUTION_MIN,
+                        strategy_step_hours=strategy_step_hours,
+                    )
+                else:
+                    mode_label_for_debug = "MARKET_IDLE"
+                    fell_back_market_to_immediate = False
+                    total_power_kw = 0.0
+
+                grid_import_kw_site = max(0.0, float(total_power_kw))
+
+                # Wenn Cleanup/Finish Reservierungen geändert hat => ab nächstem Schritt replanen
+                if did_market_event and (i + 1) < n_steps:
+                    replan_market_on_event(
+                        ts=ts,
+                        now_idx=i + 1,
+                        time_index=time_index,
+                        chargers=chargers,
+                        market_map=market_map,
+                        market_resolution_min=STRATEGY_RESOLUTION_MIN,
+                        market_unit=str(market_unit),
+                        step_hours_strategy=strategy_step_hours,
+                        market_reserved_kw=market_reserved_kw,
+                        grid_limit_p_avb_kw=grid_limit_p_avb_kw,
+                        rated_power_kw=rated_power_kw,
+                        time_step_hours=time_step_hours,
+                        charger_efficiency=charger_efficiency,
+                    )
+
+        elif charging_strategy == "generation":
+            # Fehlende PV-Signale => als Immediate behandeln
+            missing_signal = (
+                generation_map is None
+                or generation_unit is None
+                or pv_available_kw is None
+                or pv_reserved_kw is None
+            )
+
+            if missing_signal:
+                if present_sessions:
+                    total_power_kw = run_step_immediate(
+                        ts=ts,
+                        i=i,
+                        present_sessions=present_sessions,
+                        grid_limit_p_avb_kw=grid_limit_p_avb_kw,
+                        rated_power_kw=rated_power_kw,
+                        time_step_hours=time_step_hours,
+                        charger_efficiency=charger_efficiency,
+                    )
+                mode_label_for_debug = "GENERATION_MISSING_SIGNAL->IMMEDIATE"
+                pv_surplus_kw_now = 0.0
+                grid_import_kw_site = max(0.0, float(total_power_kw))
+
+            else:
+                pv_surplus_kw_now = float(pv_available_kw[i])
+
+                if present_sessions:
+                    total_power_kw, mode_label_for_debug, _fell_back_immediate, did_use_grid, did_finish_event = (
+                        run_step_generation_planned_pv_with_critical_fallback(
+                            ts=ts,
+                            i=i,
+                            time_index=time_index,
+                            present_sessions=present_sessions,
+                            pv_surplus_kw_now=pv_surplus_kw_now,
+                            pv_reserved_kw=pv_reserved_kw,
+                            grid_limit_p_avb_kw=grid_limit_p_avb_kw,
+                            rated_power_kw=rated_power_kw,
+                            time_step_hours=time_step_hours,
+                            charger_efficiency=charger_efficiency,
+                            emergency_slack_minutes=emergency_slack_minutes,
+
+                            market_enabled=(market_map is not None and market_unit is not None),
+                            market_map=market_map,
+                            market_unit=market_unit,
+                            strategy_resolution_min=STRATEGY_RESOLUTION_MIN,
+                            strategy_step_hours=strategy_step_hours,
+                            hard_immediate_slack_minutes=0.0,
+                        )
+                    )
+                else:
+                    # Niemand lädt, aber PV-Überschuss kann existieren
+                    mode_label_for_debug = "PV_ONLY"
+
+                # Physikalischer Grid-Import
+                grid_import_kw_site = max(0.0, float(total_power_kw) - float(pv_surplus_kw_now))
+
+                # PV-Plan Cleanup für fertige Sessions (Reservierungen freigeben)
+                did_cleanup_event = clear_future_pv_plan_if_finished(
+                    sessions=[s for s in chargers if s is not None],
+                    current_idx=i,
+                    pv_reserved_kw=pv_reserved_kw,
+                )
+
+                # Event-basiertes Replanning für die Zukunft, wenn Grid genutzt wurde oder Sessions fertig wurden
+                if (did_use_grid or did_finish_event or did_cleanup_event) and (i + 1) < n_steps:
+                    replan_pv_for_plugged_sessions_on_event(
+                         ts=ts,                      # Slack-Bewertung zum aktuellen Zeitpunkt
+                         now_idx=i + 1,               # Planung beginnt erst ab nächstem Schritt
+                         time_index=time_index,
+                         chargers=chargers,
+                         pv_available_kw=pv_available_kw,
+                         pv_reserved_kw=pv_reserved_kw,
+                         rated_power_kw=rated_power_kw,
+                         time_step_hours=time_step_hours,
+                         charger_efficiency=charger_efficiency,
+                    )
+                    
+                    replan_pv_for_plugged_sessions_on_event(...)
+ 
+                    if market_map is not None and market_unit is not None and market_reserved_kw is not None:
+                         replan_market_fallback_for_generation_on_event(
+                             ts=ts,
+                             now_idx=i + 1,
+                             time_index=time_index,
+                             chargers=chargers,
+                             market_map=market_map,
+                             market_resolution_min=STRATEGY_RESOLUTION_MIN,
+                             market_unit=str(market_unit),
+                             step_hours_strategy=strategy_step_hours,
+                             market_reserved_kw=market_reserved_kw,
+                             grid_limit_p_avb_kw=grid_limit_p_avb_kw,
+                             rated_power_kw=rated_power_kw,
+                             time_step_hours=time_step_hours,
+                             charger_efficiency=charger_efficiency,
+                        )
+        else:
+            raise ValueError(f"Unbekannte charging_strategy='{charging_strategy}'")
+
+        # --------------------------------------------------------
+        # 4) Ergebnis je Zeitschritt setzen
+        # --------------------------------------------------------
+        load_profile_kw[i] = float(total_power_kw)
+
+        # --------------------------------------------------------
+        # 5) Charger Traces (optional): pro Zeitschritt, pro Ladepunkt
+        # --------------------------------------------------------
+        if record_charger_traces:
+            for cid, s in enumerate(chargers):
+                if s is None:
+                    charger_trace_rows.append(
                         {
                             "ts": ts,
-                            "mode": "GENERATION_MISSING_SIGNAL->IMMEDIATE",
-                            "pv_surplus_kw": 0.0,
-                            "site_total_power_kw": float(total_power_kw),
-                            "grid_import_kw_site": float(max(0.0, total_power_kw)),
+                            "charger_id": cid,
+                            "occupied": False,
+                            "session_id": None,
+                            "vehicle_name": None,
+                            "vehicle_class": None,
+                            "soc": np.nan,
+                            "power_kw": 0.0,
                         }
                     )
-                continue
+                    continue
 
-            pv_surplus_kw_now = float(pv_available_kw[i])
+                delivered = float(s.get("delivered_energy_kwh", 0.0))
+                cap = float(s.get("battery_capacity_kwh", np.nan))
+                soc_arr = float(s.get("soc_arrival", np.nan))
+                soc_target = float(s.get("soc_target", 1.0))
 
-            total_power_kw, mode_label, fell_back_immediate, did_use_grid, did_finish_event = (
-                run_step_generation_planned_pv_with_critical_fallback(
-                    ts=ts,
-                    i=i,
-                    time_index=time_index,
-                    present_sessions=present_sessions,
-                    pv_surplus_kw_now=pv_surplus_kw_now,
-                    pv_reserved_kw=pv_reserved_kw,
-                    grid_limit_p_avb_kw=grid_limit_p_avb_kw,
-                    rated_power_kw=rated_power_kw,
-                    time_step_hours=time_step_hours,
-                    charger_efficiency=charger_efficiency,
-                    emergency_slack_minutes=emergency_slack_minutes,
-                    market_enabled=(market_map is not None and market_unit is not None),
-                )
-            )
-            load_profile_kw[i] = float(total_power_kw)
+                soc = np.nan
+                if cap > 1e-9 and not np.isnan(cap) and not np.isnan(soc_arr):
+                    soc = soc_arr + delivered / cap
+                    soc = min(soc, soc_target)
 
-            # Physikalischer Grid-Import
-            grid_import_kw_site = max(0.0, float(total_power_kw) - float(pv_surplus_kw_now))
+                p = float(s.get("_actual_power_kw", 0.0))
 
-            # PV-Plan Cleanup für fertige Sessions (Reservierungen freigeben)
-            did_cleanup_event = clear_future_pv_plan_if_finished(
-                sessions=[s for s in chargers if s is not None],
-                current_idx=i,
-                pv_reserved_kw=pv_reserved_kw,
-            )
-
-            # Event-basiertes Replanning für die Zukunft, wenn Grid genutzt wurde oder Sessions fertig wurden
-            # (damit Reservierungen nicht blockieren und PV maximal genutzt wird)
-            if (did_use_grid or did_finish_event or did_cleanup_event) and (i + 1) < n_steps:
-                replan_pv_for_plugged_sessions_on_event(
-                    ts=ts,                      # Slack-Bewertung zum aktuellen Zeitpunkt
-                    now_idx=i + 1,               # Planung beginnt erst ab nächstem Schritt
-                    time_index=time_index,
-                    chargers=chargers,
-                    pv_available_kw=pv_available_kw,
-                    pv_reserved_kw=pv_reserved_kw,
-                    rated_power_kw=rated_power_kw,
-                    time_step_hours=time_step_hours,
-                    charger_efficiency=charger_efficiency,
-                )
-
-            if record_debug:
-                debug_rows.append(
+                charger_trace_rows.append(
                     {
                         "ts": ts,
-                        "mode": mode_label,
+                        "charger_id": cid,
+                        "occupied": True,
+                        "session_id": s.get("session_id"),
+                        "vehicle_name": s.get("vehicle_name"),
+                        "vehicle_class": s.get("vehicle_class"),
+                        "soc": soc,
+                        "power_kw": p,
+                    }
+                )
+
+        # --------------------------------------------------------
+        # 6) Debug-Row je Zeitschritt (optional)
+        # --------------------------------------------------------
+        if record_debug:
+            row = {
+                "ts": ts,
+                "mode": mode_label_for_debug,
+                "site_total_power_kw": float(total_power_kw),
+                "grid_import_kw_site": float(grid_import_kw_site),
+            }
+            if charging_strategy == "generation":
+                row.update(
+                    {
                         "pv_surplus_kw": float(pv_surplus_kw_now),
-                        "site_total_power_kw": float(total_power_kw),
-                        "grid_import_kw_site": float(grid_import_kw_site),
-                        "fell_back_immediate": bool(fell_back_immediate),
                         "did_use_grid": bool(did_use_grid),
                         "did_finish_event": bool(did_finish_event),
                         "did_cleanup_event": bool(did_cleanup_event),
                     }
                 )
-
-            continue
+            debug_rows.append(row)
 
     # ------------------------------------------------------------
     # G) Strategie-Status
@@ -2301,7 +3039,9 @@ def simulate_load_profile(
         charging_strategy,
         strategy_status,
         debug_rows if record_debug else None,
+        charger_trace_rows if record_charger_traces else None,
     )
+
 
 
 # =============================================================================
