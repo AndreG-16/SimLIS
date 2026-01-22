@@ -2844,25 +2844,60 @@ def simulate_load_profile(
         # 3) Strategien anwenden
         # --------------------------------------------------------
         if charging_strategy == "immediate":
+            # --- PV + Base im aktuellen Schritt (falls keine PV-CSV vorhanden -> 0) ---
+            base_kw_now = float(base_load_series_kw[i]) if base_load_series_kw is not None else 0.0
+            if np.isnan(base_kw_now):
+                base_kw_now = 0.0
+            base_kw_now = max(0.0, base_kw_now)
+
+            pv_gen_now = 0.0
+            if pv_generation_kw is not None:
+                pv_gen_now = float(pv_generation_kw[i])
+                if np.isnan(pv_gen_now):
+                    pv_gen_now = 0.0
+            pv_gen_now = max(0.0, pv_gen_now)
+
+            # PV-Überschuss, der fürs EV-Laden zur Verfügung steht
+            pv_surplus_kw_now = max(0.0, pv_gen_now - base_kw_now)
+
+            # Immediate: "sofort laden", aber physikalisch darf EV mit PV+Grid laufen
+            total_power_kw = 0.0
             if present_sessions:
-                total_power_kw = run_step_immediate(
-                    ts=ts,
-                    i=i,
-                    present_sessions=present_sessions,
-                    grid_limit_p_avb_kw=grid_limit_p_avb_kw,
+                total_budget_kw = float(pv_surplus_kw_now + grid_limit_p_avb_kw)
+
+                alloc = allocate_power_water_filling(
+                    sessions=present_sessions,
+                    total_budget_kw=total_budget_kw,
                     rated_power_kw=rated_power_kw,
                     time_step_hours=time_step_hours,
                     charger_efficiency=charger_efficiency,
                 )
-            mode_label_for_debug = "IMMEDIATE"
-            base_kw_now = float(base_kw_series[i]) if base_kw_series is not None else 0.0
-            pv_gen_now  = float(pv_generation_kw[i])
+                total_power_kw = apply_energy_update(
+                    ts=ts,
+                    sessions=present_sessions,
+                    power_alloc_kw=alloc,
+                    time_step_hours=time_step_hours,
+                    charger_efficiency=charger_efficiency,
+                    mode_label="immediate",
+                )
 
-            # site_load = EV + Base
-            site_load_kw_now = float(total_power_kw) + base_kw_now
+            mode_label_for_debug = "IMMEDIATE_PV"
 
-            # korrekter Netzimport
+            # Standortbilanz
+            site_load_kw_now = float(total_power_kw) + float(base_kw_now)
+
+            # Netzimport physikalisch korrekt
             grid_import_kw_site = max(0.0, site_load_kw_now - pv_gen_now)
+
+            # (optional) Safety clamp: niemals über grid_limit importieren (numerische Robustheit)
+            if grid_import_kw_site > grid_limit_p_avb_kw + 1e-6:
+                # Begrenze EV so, dass Importlimit exakt eingehalten wird
+                allowed_ev = max(0.0, pv_gen_now + grid_limit_p_avb_kw - base_kw_now)
+                if allowed_ev < total_power_kw:
+                    total_power_kw = allowed_ev
+                    site_load_kw_now = float(total_power_kw) + float(base_kw_now)
+                    grid_import_kw_site = max(0.0, site_load_kw_now - pv_gen_now)
+
 
 
         elif charging_strategy == "market":
@@ -3093,7 +3128,7 @@ def simulate_load_profile(
                 # explizit loggen (verhindert Missverständnisse in Plots)
                 "ev_power_kw": float(total_power_kw),
                 "base_load_kw": float(base_kw_now),
-                "site_load_kw": float(site_load_kw_now),
+                "site_total_load_kw": float(site_load_kw_now),
 
                 # PV (immer sinnvoll zu sehen, auch wenn 0)
                 "pv_generation_kw": float(pv_gen_now),
