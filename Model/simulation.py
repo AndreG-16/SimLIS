@@ -2818,6 +2818,29 @@ def simulate_load_profile(
         did_cleanup_event = False
 
         # --------------------------------------------------------
+        # 2b) Physikalische Step-Größen (Base / PV) für ALLE Strategien
+        # --------------------------------------------------------
+        base_kw_now = float(base_load_series_kw[i]) if base_load_series_kw is not None else 0.0
+        if np.isnan(base_kw_now):
+            base_kw_now = 0.0
+        base_kw_now = max(0.0, base_kw_now)
+
+        pv_gen_now = 0.0
+        if pv_generation_kw is not None:
+            pv_gen_now = float(pv_generation_kw[i])
+            if np.isnan(pv_gen_now):
+                pv_gen_now = 0.0
+        pv_gen_now = max(0.0, pv_gen_now)
+
+        pv_surplus_kw_now = 0.0
+        if pv_available_kw is not None:
+            pv_surplus_kw_now = float(pv_available_kw[i])
+            if np.isnan(pv_surplus_kw_now):
+                pv_surplus_kw_now = 0.0
+        pv_surplus_kw_now = max(0.0, pv_surplus_kw_now)
+
+
+        # --------------------------------------------------------
         # 3) Strategien anwenden
         # --------------------------------------------------------
         if charging_strategy == "immediate":
@@ -2929,7 +2952,8 @@ def simulate_load_profile(
                     )
                 mode_label_for_debug = "GENERATION_MISSING_SIGNAL->IMMEDIATE"
                 pv_surplus_kw_now = 0.0
-                grid_import_kw_site = max(0.0, float(total_power_kw))
+                site_load_kw_now = float(total_power_kw) + float(base_kw_now)
+                grid_import_kw_site = max(0.0, site_load_kw_now - float(pv_gen_now))
 
             else:
                 pv_surplus_kw_now = float(pv_available_kw[i])
@@ -3057,27 +3081,36 @@ def simulate_load_profile(
                 )
 
         # --------------------------------------------------------
-        # 6) Debug-Row je Zeitschritt (optional)
+        # 6) Debug-Row je Zeitschritt
         # --------------------------------------------------------
         if record_debug:
+            site_load_kw_now = float(total_power_kw) + float(base_kw_now)
+
             row = {
                 "ts": ts,
                 "mode": mode_label_for_debug,
-                "site_total_power_kw": float(total_power_kw),
+
+                # explizit loggen (verhindert Missverständnisse in Plots)
+                "ev_power_kw": float(total_power_kw),
+                "base_load_kw": float(base_kw_now),
+                "site_load_kw": float(site_load_kw_now),
+
+                # PV (immer sinnvoll zu sehen, auch wenn 0)
+                "pv_generation_kw": float(pv_gen_now),
+                "pv_surplus_kw": float(pv_surplus_kw_now),
+
+                # physikalisch korrekt (wenn oben in generation so berechnet)
                 "grid_import_kw_site": float(grid_import_kw_site),
+
+                # optional Flags
+                "did_use_grid": bool(did_use_grid),
+                "did_finish_event": bool(did_finish_event),
+                "did_cleanup_event": bool(did_cleanup_event),
+                "fell_back_market_to_immediate": bool(fell_back_market_to_immediate),
             }
-            if charging_strategy == "generation":
-                row.update(
-                    {
-                        "pv_surplus_kw": float(pv_surplus_kw_now),
-                        "did_use_grid": bool(did_use_grid),
-                        "did_finish_event": bool(did_finish_event),
-                        "did_cleanup_event": bool(did_cleanup_event),
-                        "pv_generation_kw": float(pv_generation_kw_now),
-                        "pv_surplus_kw": float(pv_surplus_kw_now),
-                    }
-                )
+
             debug_rows.append(row)
+
 
     # ------------------------------------------------------------
     # G) Strategie-Status
