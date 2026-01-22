@@ -2844,23 +2844,10 @@ def simulate_load_profile(
         # 3) Strategien anwenden
         # --------------------------------------------------------
         if charging_strategy == "immediate":
-            # --- PV + Base im aktuellen Schritt (falls keine PV-CSV vorhanden -> 0) ---
-            base_kw_now = float(base_load_series_kw[i]) if base_load_series_kw is not None else 0.0
-            if np.isnan(base_kw_now):
-                base_kw_now = 0.0
-            base_kw_now = max(0.0, base_kw_now)
+            # Immediate soll PV nutzen können:
+            # Budget für EV = PV-Überschuss + zulässiger Netzimport (grid_limit)
+            pv_surplus_kw_now = max(0.0, float(pv_gen_now) - float(base_kw_now))
 
-            pv_gen_now = 0.0
-            if pv_generation_kw is not None:
-                pv_gen_now = float(pv_generation_kw[i])
-                if np.isnan(pv_gen_now):
-                    pv_gen_now = 0.0
-            pv_gen_now = max(0.0, pv_gen_now)
-
-            # PV-Überschuss, der fürs EV-Laden zur Verfügung steht
-            pv_surplus_kw_now = max(0.0, pv_gen_now - base_kw_now)
-
-            # Immediate: "sofort laden", aber physikalisch darf EV mit PV+Grid laufen
             total_power_kw = 0.0
             if present_sessions:
                 total_budget_kw = float(pv_surplus_kw_now + grid_limit_p_avb_kw)
@@ -2882,22 +2869,7 @@ def simulate_load_profile(
                 )
 
             mode_label_for_debug = "IMMEDIATE_PV"
-
-            # Standortbilanz
-            site_load_kw_now = float(total_power_kw) + float(base_kw_now)
-
-            # Netzimport physikalisch korrekt
-            grid_import_kw_site = max(0.0, site_load_kw_now - pv_gen_now)
-
-            # (optional) Safety clamp: niemals über grid_limit importieren (numerische Robustheit)
-            if grid_import_kw_site > grid_limit_p_avb_kw + 1e-6:
-                # Begrenze EV so, dass Importlimit exakt eingehalten wird
-                allowed_ev = max(0.0, pv_gen_now + grid_limit_p_avb_kw - base_kw_now)
-                if allowed_ev < total_power_kw:
-                    total_power_kw = allowed_ev
-                    site_load_kw_now = float(total_power_kw) + float(base_kw_now)
-                    grid_import_kw_site = max(0.0, site_load_kw_now - pv_gen_now)
-
+            # Bilanz wird unten EINHEITLICH berechnet
 
 
         elif charging_strategy == "market":
@@ -2905,7 +2877,8 @@ def simulate_load_profile(
 
             missing_signal = (market_map is None or market_unit is None or market_reserved_kw is None)
             if missing_signal:
-                # ohne Market-Signal => immediate
+                # ohne Market-Signal => immediate (ohne Planung)
+                total_power_kw = 0.0
                 if present_sessions:
                     total_power_kw = run_step_immediate(
                         ts=ts,
@@ -2917,9 +2890,6 @@ def simulate_load_profile(
                         charger_efficiency=charger_efficiency,
                     )
                 mode_label_for_debug = "MARKET_MISSING_SIGNAL->IMMEDIATE"
-                grid_import_kw_site = max(0.0, float(total_power_kw) + float(base_load_series_kw[i]))
-
-
             else:
                 if present_sessions:
                     total_power_kw, fell_back_market_to_immediate, mode_label_for_debug, did_market_event = run_step_market(
@@ -2944,9 +2914,6 @@ def simulate_load_profile(
                     fell_back_market_to_immediate = False
                     total_power_kw = 0.0
 
-                grid_import_kw_site = max(0.0, float(total_power_kw) + float(base_load_series_kw[i]))
-
-
                 # Wenn Cleanup/Finish Reservierungen geändert hat => ab nächstem Schritt replanen
                 if did_market_event and (i + 1) < n_steps:
                     replan_market_on_event(
@@ -2965,8 +2932,9 @@ def simulate_load_profile(
                         charger_efficiency=charger_efficiency,
                     )
 
+
         elif charging_strategy == "generation":
-            # Fehlende PV-Signale => als Immediate behandeln
+            # Fehlende PV-Signale => als Immediate behandeln (ohne PV-Planung)
             missing_signal = (
                 generation_map is None
                 or generation_unit is None
@@ -2975,6 +2943,7 @@ def simulate_load_profile(
             )
 
             if missing_signal:
+                total_power_kw = 0.0
                 if present_sessions:
                     total_power_kw = run_step_immediate(
                         ts=ts,
@@ -2987,12 +2956,10 @@ def simulate_load_profile(
                     )
                 mode_label_for_debug = "GENERATION_MISSING_SIGNAL->IMMEDIATE"
                 pv_surplus_kw_now = 0.0
-                site_load_kw_now = float(total_power_kw) + float(base_kw_now)
-                grid_import_kw_site = max(0.0, site_load_kw_now - float(pv_gen_now))
-
+                did_use_grid = True if total_power_kw > 1e-9 else False
             else:
-                pv_surplus_kw_now = float(pv_available_kw[i])
-                pv_generation_kw_now = float(pv_generation_kw[i]) if pv_generation_kw is not None else 0.0
+                pv_surplus_kw_now = float(pv_available_kw[i])  # = max(0, PV - Base)
+                _pv_generation_kw_now = float(pv_gen_now)      # PV-Erzeugung (ohne Base-Abzug)
 
                 if present_sessions:
                     total_power_kw, mode_label_for_debug, _fell_back_immediate, did_use_grid, did_finish_event = (
@@ -3008,7 +2975,6 @@ def simulate_load_profile(
                             time_step_hours=time_step_hours,
                             charger_efficiency=charger_efficiency,
                             emergency_slack_minutes=emergency_slack_minutes,
-
                             market_enabled=(market_map is not None and market_unit is not None),
                             market_map=market_map,
                             market_unit=market_unit,
@@ -3020,11 +2986,8 @@ def simulate_load_profile(
                 else:
                     # Niemand lädt, aber PV-Überschuss kann existieren
                     mode_label_for_debug = "PV_ONLY"
-
-                    # Standortbilanz: Netzimport = max(0, (EV + Base) - PV_generation)
-                    site_load_kw_now = float(total_power_kw) + float(base_kw_now)
-                    grid_import_kw_site = max(0.0, site_load_kw_now - float(pv_gen_now))
-
+                    total_power_kw = 0.0
+                    did_use_grid = False
 
                 # PV-Plan Cleanup für fertige Sessions (Reservierungen freigeben)
                 did_cleanup_event = clear_future_pv_plan_if_finished(
@@ -3036,44 +2999,64 @@ def simulate_load_profile(
                 # Event-basiertes Replanning für die Zukunft, wenn Grid genutzt wurde oder Sessions fertig wurden
                 if (did_use_grid or did_finish_event or did_cleanup_event) and (i + 1) < n_steps:
                     replan_pv_for_plugged_sessions_on_event(
-                         ts=ts,                      # Slack-Bewertung zum aktuellen Zeitpunkt
-                         now_idx=i + 1,               # Planung beginnt erst ab nächstem Schritt
-                         time_index=time_index,
-                         chargers=chargers,
-                         pv_available_kw=pv_available_kw,
-                         pv_reserved_kw=pv_reserved_kw,
-                         rated_power_kw=rated_power_kw,
-                         time_step_hours=time_step_hours,
-                         charger_efficiency=charger_efficiency,
+                        ts=ts,
+                        now_idx=i + 1,
+                        time_index=time_index,
+                        chargers=chargers,
+                        pv_available_kw=pv_available_kw,
+                        pv_reserved_kw=pv_reserved_kw,
+                        rated_power_kw=rated_power_kw,
+                        time_step_hours=time_step_hours,
+                        charger_efficiency=charger_efficiency,
                     )
-                    
- 
+
                     if market_map is not None and market_unit is not None and market_reserved_kw is not None:
-                         replan_market_fallback_for_generation_on_event(
-                             ts=ts,
-                             now_idx=i + 1,
-                             time_index=time_index,
-                             chargers=chargers,
-                             market_map=market_map,
-                             market_resolution_min=STRATEGY_RESOLUTION_MIN,
-                             market_unit=str(market_unit),
-                             step_hours_strategy=strategy_step_hours,
-                             market_reserved_kw=market_reserved_kw,
-                             grid_limit_p_avb_kw=grid_limit_p_avb_kw,
-                             rated_power_kw=rated_power_kw,
-                             time_step_hours=time_step_hours,
-                             charger_efficiency=charger_efficiency,
+                        replan_market_fallback_for_generation_on_event(
+                            ts=ts,
+                            now_idx=i + 1,
+                            time_index=time_index,
+                            chargers=chargers,
+                            market_map=market_map,
+                            market_resolution_min=STRATEGY_RESOLUTION_MIN,
+                            market_unit=str(market_unit),
+                            step_hours_strategy=strategy_step_hours,
+                            market_reserved_kw=market_reserved_kw,
+                            grid_limit_p_avb_kw=grid_limit_p_avb_kw,
+                            rated_power_kw=rated_power_kw,
+                            time_step_hours=time_step_hours,
+                            charger_efficiency=charger_efficiency,
                         )
         else:
             raise ValueError(f"Unbekannte charging_strategy='{charging_strategy}'")
 
+
         # --------------------------------------------------------
-        # 4) Ergebnis je Zeitschritt setzen
+        # 4) Physikalische Standortbilanz (EINHEITLICH für ALLE Strategien)
+        # --------------------------------------------------------
+
+        # Standortlast = EV + Basislast
+        site_load_kw_now = float(total_power_kw) + float(base_kw_now)
+
+        # Netzimport = max(0, Standortlast - PV-Erzeugung)
+        grid_import_kw_site = max(0.0, site_load_kw_now - float(pv_gen_now))
+
+        # Optional: Safety clamp (Import darf Grid-Limit nicht überschreiten)
+        # -> reduziert notfalls EV-Leistung, sodass Importlimit eingehalten wird
+        if grid_import_kw_site > grid_limit_p_avb_kw + 1e-6:
+            allowed_ev = max(0.0, float(pv_gen_now) + float(grid_limit_p_avb_kw) - float(base_kw_now))
+            if allowed_ev < total_power_kw:
+                total_power_kw = float(allowed_ev)
+                site_load_kw_now = float(total_power_kw) + float(base_kw_now)
+                grid_import_kw_site = max(0.0, site_load_kw_now - float(pv_gen_now))
+
+
+        # --------------------------------------------------------
+        # 5) Ergebnis je Zeitschritt setzen
         # --------------------------------------------------------
         load_profile_kw[i] = float(total_power_kw)
 
         # --------------------------------------------------------
-        # 5) Charger Traces (optional): pro Zeitschritt, pro Ladepunkt
+        # 6) Charger Traces (optional): pro Zeitschritt, pro Ladepunkt
         # --------------------------------------------------------
         if record_charger_traces:
             for cid, s in enumerate(chargers):
@@ -3118,7 +3101,7 @@ def simulate_load_profile(
                 )
 
         # --------------------------------------------------------
-        # 6) Debug-Row je Zeitschritt
+        # 7) Debug-Row je Zeitschritt
         # --------------------------------------------------------
         if record_debug:
             site_load_kw_now = float(total_power_kw) + float(base_kw_now)
