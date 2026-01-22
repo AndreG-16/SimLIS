@@ -2487,6 +2487,30 @@ def run_step_generation_planned_pv_with_critical_fallback(
 
     return total_power_kw, mode_label, bool(did_fallback_immediate), bool(did_use_grid), bool(did_finish_event)
 
+def compute_pv_generation_kw(
+    ts: datetime,
+    generation_map: dict[datetime, float],
+    generation_unit: str,
+    strategy_resolution_min: int,
+    step_hours_strategy: float,
+) -> float:
+    """
+    PV-Erzeugung (kW) aus dem Generation-CSV, ohne Abzug der Grundlast.
+    """
+    raw = lookup_signal(generation_map, ts, strategy_resolution_min)
+    if raw is None:
+        return 0.0
+
+    pv_kw = float(
+        convert_strategy_value_to_internal(
+            charging_strategy="generation",
+            raw_value=float(raw),
+            strategy_unit=str(generation_unit),
+            step_hours=step_hours_strategy,
+        )
+    )
+    return max(0.0, pv_kw)
+
 
 # =============================================================================
 # 14) Hauptsimulation
@@ -2645,23 +2669,35 @@ def simulate_load_profile(
 
 
     # PV-Serien nur für generation
-    pv_available_kw = None
+    pv_available_kw = None          # das bleibt: PV-ÜBERSCHUSS als Budget
+    pv_generation_kw = None         # neu: PV-ERZEUGUNG fürs Reporting/Plot
     pv_reserved_kw = None
+
     if charging_strategy == "generation" and generation_map is not None and generation_unit is not None:
-        pv_available_kw = np.zeros(n_steps, dtype=float)
+        pv_available_kw = np.zeros(n_steps, dtype=float)     # Überschuss
+        pv_generation_kw = np.zeros(n_steps, dtype=float)    # Erzeugung (neu)
         pv_reserved_kw = np.zeros(n_steps, dtype=float)
+
         for i0, ts0 in enumerate(time_index):
-            pv_available_kw[i0] = float(
-                compute_pv_surplus_kw(
-                    ts=ts0,
-                    i=i0,
-                    generation_map=generation_map,
-                    generation_unit=str(generation_unit),
-                    base_load_series_kw=base_load_series_kw,
-                    strategy_resolution_min=STRATEGY_RESOLUTION_MIN,
-                    step_hours_strategy=strategy_step_hours,
-                )
+            # 1) PV-Erzeugung (ohne Grundlastabzug)
+            pv_gen = compute_pv_generation_kw(
+                ts=ts0,
+                generation_map=generation_map,
+                generation_unit=str(generation_unit),
+                strategy_resolution_min=STRATEGY_RESOLUTION_MIN,
+                step_hours_strategy=strategy_step_hours,
             )
+            pv_generation_kw[i0] = float(pv_gen)
+
+            # 2) Grundlast (kW) an diesem Schritt
+            base_kw = 0.0
+            if base_load_series_kw is not None:
+                v = float(base_load_series_kw[i0])
+                base_kw = 0.0 if np.isnan(v) else max(0.0, v)
+
+            # 3) PV-Überschuss als Budget = max(0, PV - Grundlast)
+            pv_available_kw[i0] = float(max(0.0, pv_gen - base_kw))
+
 
     # ------------------------------------------------------------
     # E) Plug-In Policy (FCFS, drive_off)
@@ -2878,6 +2914,7 @@ def simulate_load_profile(
 
             else:
                 pv_surplus_kw_now = float(pv_available_kw[i])
+                pv_generation_kw_now = float(pv_generation_kw[i]) if pv_generation_kw is not None else 0.0
 
                 if present_sessions:
                     total_power_kw, mode_label_for_debug, _fell_back_immediate, did_use_grid, did_finish_event = (
@@ -3017,6 +3054,8 @@ def simulate_load_profile(
                         "did_use_grid": bool(did_use_grid),
                         "did_finish_event": bool(did_finish_event),
                         "did_cleanup_event": bool(did_cleanup_event),
+                        "pv_generation_kw": float(pv_generation_kw_now),
+                        "pv_surplus_kw": float(pv_surplus_kw_now),
                     }
                 )
             debug_rows.append(row)
