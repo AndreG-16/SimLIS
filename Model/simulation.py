@@ -3130,7 +3130,7 @@ def simulate_load_profile(
                 # explizit loggen (verhindert Missverständnisse in Plots)
                 "ev_power_kw": float(total_power_kw),
                 "base_load_kw": float(base_kw_now),
-                "site_total_load_kw": float(site_load_kw_now),
+                "site_load_kw": float(site_load_kw_now),
 
                 # PV (immer sinnvoll zu sehen, auch wenn 0)
                 "pv_generation_kw": float(pv_gen_now),
