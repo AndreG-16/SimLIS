@@ -39,7 +39,7 @@ site:
   # =============================================================================
   
   # Option A: konstante Grundlast (kW)
-  base_load_kw: 200
+  base_load_kw: 100
   
   # Option B: Grundlast aus CSV-Datei (hat Vorrang gegenüber Option A)
   base_load_csv:                                              # optional; nur für "generation": "../data/loads/base_load.csv"
