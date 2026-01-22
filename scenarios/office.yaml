@@ -1,6 +1,6 @@
 site_type: office      # Standort des Ladepunkts
 
-time_resolution_min: 5          # Zeitschritt, in der die Simulation berechnet wird
+time_resolution_min: 15          # Zeitschritt, in der die Simulation berechnet wird
 simulation_horizon_days: 1       # gewünschter Analysehorizont in Tagen
 
 start_datetime: "2025-12-01 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen soll
@@ -11,8 +11,8 @@ holidays:
      
 
 site:
-  number_chargers: 1                                         # Anzahl der Ladepunkte am Standort
-  rated_power_kw: 300                                         # Verfügbare Leistung pro Ladepunkt
+  number_chargers: 2                                         # Anzahl der Ladepunkte am Standort
+  rated_power_kw: 200                                         # Verfügbare Leistung pro Ladepunkt
   grid_limit_p_avb_kw: 500                                    # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
   expected_sessions_per_charger_per_day: [3.0, 4.0]           # erwartete Ladevorgänge pro LP und Tag
   charger_efficiency: 0.95                                    # Verhäl0tnis Fahrzeugaufnahme zu abgegebener LP-Leistung
@@ -22,7 +22,7 @@ site:
   # Lademanagementstrategie des Standorts
   # =============================================================================
   
-  charging_strategy: "immediate"                              # Lademanagementstrategie: "immediate" (default), "market", "generation"
+  charging_strategy: "market"                              # Lademanagementstrategie: "immediate" (default), "market", "generation"
   
   # CSV-Datei: PV-Erzeugung (generation)
   generation_strategy_csv: "../data/strategies/generation/latest.csv"      # Pfad bei vorhandenen Daten zur Stromgeneration: "../data/strategies//generation/latest.csv"
@@ -138,7 +138,7 @@ parking_duration_distribution:
 soc_at_arrival_distribution:
   type: mixture
   value_unit: fraction          # 0.0 bis 1.0
-  max_soc: 0.20                 # maximales SoC bei Ankunft
+  max_soc: 0.70                 # maximales SoC bei Ankunft
 
   components:
   # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden

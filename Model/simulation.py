@@ -2634,14 +2634,15 @@ def simulate_load_profile(
 
     emergency_slack_minutes = float(emergency_slack_minutes)
 
-    # Basislast nur für generation
-    base_load_series_kw = None
-    if charging_strategy == "generation":
-        base_load_series_kw = build_base_load_series(
-            scenario=scenario,
-            timestamps=time_index,
-            base_load_resolution_min=STRATEGY_RESOLUTION_MIN,
-        )
+    # Basislast immer (für korrekten Netzimport = EV + Grundlast)
+    base_load_series_kw = build_base_load_series(
+        scenario=scenario,
+        timestamps=time_index,
+        base_load_resolution_min=STRATEGY_RESOLUTION_MIN,
+    )
+    if base_load_series_kw is None:
+        base_load_series_kw = np.zeros(n_steps, dtype=float)
+
 
     # PV-Serien nur für generation
     pv_available_kw = None
@@ -2926,7 +2927,6 @@ def simulate_load_profile(
                          charger_efficiency=charger_efficiency,
                     )
                     
-                    replan_pv_for_plugged_sessions_on_event(...)
  
                     if market_map is not None and market_unit is not None and market_reserved_kw is not None:
                          replan_market_fallback_for_generation_on_event(
