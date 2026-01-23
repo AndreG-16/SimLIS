@@ -1128,12 +1128,12 @@ def allocate_power_water_filling(
         if p <= 1e-9:
             continue
 
-        # HARTE Fahrzeuggrenze (immer zuletzt)
-        pmax_vehicle = float(vehicle_power_at_soc(s))  # basiert auf aktuellem SoC in der Session
+        # HARTE, fahrzeugspezifische Grenze (CSV!)
+        pmax_vehicle = float(vehicle_power_at_soc(s))
         if pmax_vehicle < 0.0:
             pmax_vehicle = 0.0
 
-        alloc[sid] = float(min(p, pmax_vehicle))
+        alloc[sid] = min(p, pmax_vehicle)
 
     return alloc
 
