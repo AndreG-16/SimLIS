@@ -1209,11 +1209,14 @@ def apply_energy_update(
                 s["finished_charging_time"] = ts
 
             p_eff = (e_del / denom) if (e_del > 0.0 and denom > 1e-12) else 0.0
-            s["_actual_power_kw"] = float(p_eff)
+
+            # ✅ additiv statt überschreiben:
+            s["_actual_power_kw"] = prev_p + float(p_eff)
         else:
             e_del = float(possible_energy_kwh)
             s["energy_required_kwh"] = float(e_need) - float(possible_energy_kwh)
             p_eff = float(p_req)
+            s["_actual_power_kw"] = prev_p + float(p_eff)
 
         # --- Bookkeeping Energie ---
         s["delivered_energy_kwh"] = float(s.get("delivered_energy_kwh", 0.0)) + float(e_del)
@@ -3047,6 +3050,9 @@ def simulate_load_profile(
                             "soc_raw": np.nan,
                             "power_kw": 0.0,
                             "mode": None,
+                            "power_kw": p,
+                            "power_generation_kw": pv_p,
+                            "power_grid_kw": grid_p,
                         }
                     )
                     continue
