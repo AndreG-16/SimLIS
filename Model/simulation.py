@@ -3014,7 +3014,9 @@ def simulate_load_profile(
 
 
         # --------------------------------------------------------
-        # 7) Charger Traces – Mode = PHYSIKALISCHE QUELLE
+        # 7) Charger Traces
+        #   - Quelle (physikalisch): PV vs Netz  -> power_generation_kw / power_grid_kw
+        #   - Mode (strategisch): generation / market / immediate -> power_mode_*_kw
         # --------------------------------------------------------
         if record_charger_traces:
             active = [s for s in chargers if s is not None and float(s.get("_actual_power_kw", 0.0)) > 1e-9]
@@ -3036,18 +3038,33 @@ def simulate_load_profile(
                             "vehicle_class": None,
                             "soc": np.nan,
                             "soc_raw": np.nan,
+                            "soc_arrival": np.nan,
+
+                            # Gesamtleistung
                             "power_kw": 0.0,
+
+                            # Quelle (physikalisch)
                             "power_generation_kw": 0.0,
                             "power_grid_kw": 0.0,
+
+                            # Mode (strategisch)
+                            "power_mode_generation_kw": 0.0,
+                            "power_mode_market_kw": 0.0,
+                            "power_mode_immediate_kw": 0.0,
                         }
                     )
                     continue
 
-
+                # -----------------------------
+                # Gesamtleistung am Ladepunkt
+                # -----------------------------
                 p = float(s.get("_actual_power_kw", 0.0) or 0.0)
                 if np.isnan(p) or p < 0.0:
                     p = 0.0
 
+                # -----------------------------
+                # SoC-Rekonstruktion (raw + clipped)
+                # -----------------------------
                 delivered = float(s.get("delivered_energy_kwh", 0.0))
                 cap = float(s.get("battery_capacity_kwh", np.nan))
                 soc_arr = float(s.get("soc_arrival", np.nan))
@@ -3059,9 +3076,31 @@ def simulate_load_profile(
                     soc_raw = soc_arr + delivered / cap
                     soc_clipped = min(soc_raw, soc_target)
 
-                # PV/Grid Split
+                # -----------------------------
+                # Quelle (physikalisch): PV/Grid Split proportional
+                # -----------------------------
                 pv_p = p * pv_ratio
                 grid_p = max(0.0, p - pv_p)
+
+                # -----------------------------
+                # Mode (strategisch): kommt aus apply_energy_update(...):
+                # s["_power_by_mode_kw_step"] enthält pro Step die zugewiesene Leistung je Mode
+                # (generation / market / immediate) – kann auch leer sein.
+                # -----------------------------
+                p_mode = s.get("_power_by_mode_kw_step", {}) or {}
+                p_mode_gen = float(p_mode.get("generation", 0.0))
+                p_mode_market = float(p_mode.get("market", 0.0))
+                p_mode_imm = float(p_mode.get("immediate", 0.0))
+
+                # Robust: keine negativen / NaNs
+                for _name, _val in (("gen", p_mode_gen), ("market", p_mode_market), ("imm", p_mode_imm)):
+                    pass
+                if np.isnan(p_mode_gen) or p_mode_gen < 0.0:
+                    p_mode_gen = 0.0
+                if np.isnan(p_mode_market) or p_mode_market < 0.0:
+                    p_mode_market = 0.0
+                if np.isnan(p_mode_imm) or p_mode_imm < 0.0:
+                    p_mode_imm = 0.0
 
                 charger_trace_rows.append(
                     {
@@ -3074,11 +3113,21 @@ def simulate_load_profile(
                         "soc": soc_clipped,
                         "soc_raw": soc_raw,
                         "soc_arrival": float(s.get("soc_arrival", np.nan)),
+
+                        # Gesamtleistung
                         "power_kw": p,
+
+                        # Quelle (physikalisch)
                         "power_generation_kw": pv_p,
                         "power_grid_kw": grid_p,
+
+                        # Mode (strategisch)
+                        "power_mode_generation_kw": p_mode_gen,
+                        "power_mode_market_kw": p_mode_market,
+                        "power_mode_immediate_kw": p_mode_imm,
                     }
                 )
+
 
 
         if record_debug:
