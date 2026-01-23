@@ -1054,21 +1054,43 @@ def _session_step_power_cap_kw(
     charger_efficiency: float,
 ) -> float:
     """
-    Diese Funktion bestimmt das effektive Power-Cap einer Session in diesem Zeitschritt.
+    Effektives Power-Cap dieser Session im aktuellen Zeitschritt.
+    Beachtet:
+      - Fahrzeuggrenze aus Masterkurve (CSV) bei SoC *vor* dem Step
+      - HW/Charger-Grenze
+      - Rated-Power
+      - Restenergie (nicht mehr Leistung als nötig für diesen Step)
     """
     if float(s.get("energy_required_kwh", 0.0)) <= 1e-9:
         return 0.0
 
-    vehicle_limit_kw = vehicle_power_at_soc(s)
+    # SoC am Step-Start (wichtig für Masterkurve)
+    soc_start = float(s.get("soc", 0.0))
+    if np.isnan(soc_start):
+        soc_start = 0.0
+    soc_start = min(1.0, max(0.0, soc_start))
+
+    vehicle_limit_kw = float(vehicle_power_at_soc(s, soc_start=soc_start))
+    if np.isnan(vehicle_limit_kw) or vehicle_limit_kw < 0.0:
+        vehicle_limit_kw = 0.0
+
     hw_limit_kw = float(s.get("max_charging_power_kw", rated_power_kw))
-    cap_kw = max(0.0, min(rated_power_kw, vehicle_limit_kw, hw_limit_kw))
+    if np.isnan(hw_limit_kw) or hw_limit_kw < 0.0:
+        hw_limit_kw = 0.0
 
-    # Zusätzlich wird verhindert, dass mehr Leistung zugeteilt wird als für die Restenergie nötig ist.
+    cap_kw = max(0.0, min(float(rated_power_kw), vehicle_limit_kw, hw_limit_kw))
+
+    # Zusätzlich: nicht mehr Leistung als nötig für die Restenergie in diesem Step
     e_need = float(s.get("energy_required_kwh", 0.0))
-    p_need_for_full_step = e_need / (time_step_hours * charger_efficiency)
-    cap_kw = min(cap_kw, max(0.0, p_need_for_full_step))
+    if np.isnan(e_need) or e_need < 0.0:
+        e_need = 0.0
 
-    return max(0.0, cap_kw)
+    denom = float(time_step_hours) * float(charger_efficiency)
+    if denom > 1e-12:
+        p_need_for_full_step = e_need / denom
+        cap_kw = min(cap_kw, max(0.0, float(p_need_for_full_step)))
+
+    return max(0.0, float(cap_kw))
 
 
 def allocate_power_water_filling(
@@ -1079,22 +1101,27 @@ def allocate_power_water_filling(
     charger_efficiency: float,
 ) -> dict[int, float]:
     """
-    Diese Funktion verteilt eine Standort-Leistungsbudget (kW) fair auf Sessions (Water-Filling).
-
-    Fair-Share bedeutet:
-      - Jede aktive Session erhält zunächst gleich viel.
-      - Falls eine Session ihr Cap erreicht, wird der Rest umverteilt.
-      - Das Verfahren wiederholt sich, bis Budget verbraucht ist oder alle Caps erreicht sind.
+    Verteilt das Standort-Leistungsbudget (kW) fair auf Sessions (Water-Filling).
 
     Rückgabe:
       - Mapping id(session) -> zugewiesene Leistung (kW)
+
+    WICHTIG:
+      - Keys sind id(session) (nicht Index).
+      - Fahrzeuggrenze aus Masterkurve ist bereits in _session_step_power_cap_kw enthalten.
+        (zusätzlicher Clamp am Ende bleibt als "doppelte Sicherheit".)
     """
     alloc: dict[int, float] = {}
-    if not sessions or total_budget_kw <= 1e-9:
+    if not sessions or float(total_budget_kw) <= 1e-9:
         return alloc
 
-    caps = {id(s): _session_step_power_cap_kw(s, rated_power_kw, time_step_hours, charger_efficiency) for s in sessions}
-    active = [s for s in sessions if caps.get(id(s), 0.0) > 1e-9]
+    # Caps je Session (inkl. Fahrzeuggrenze)
+    caps = {
+        id(s): _session_step_power_cap_kw(s, rated_power_kw, time_step_hours, charger_efficiency)
+        for s in sessions
+    }
+
+    active = [s for s in sessions if float(caps.get(id(s), 0.0)) > 1e-9]
     if not active:
         return alloc
 
@@ -1114,28 +1141,34 @@ def allocate_power_water_filling(
             take = min(per, remaining[sid])
             if take <= 1e-12:
                 continue
-            current[sid] += take
-            remaining[sid] -= take
-            used_this_round += take
+            current[sid] += float(take)
+            remaining[sid] -= float(take)
+            used_this_round += float(take)
 
         if used_this_round <= 1e-9:
             break
         remaining_budget = max(0.0, remaining_budget - used_this_round)
 
+    # Finalisieren + Safety Clamp (CSV-Fahrzeuggrenze nochmal, aber korrekt per id(session))
     for s in active:
         sid = id(s)
         p = float(current.get(sid, 0.0))
         if p <= 1e-9:
             continue
 
-        # HARTE, fahrzeugspezifische Grenze (CSV!)
-        pmax_vehicle = float(vehicle_power_at_soc(s))
-        if pmax_vehicle < 0.0:
+        soc_start = float(s.get("soc", 0.0))
+        if np.isnan(soc_start):
+            soc_start = 0.0
+        soc_start = min(1.0, max(0.0, soc_start))
+
+        pmax_vehicle = float(vehicle_power_at_soc(s, soc_start=soc_start))
+        if np.isnan(pmax_vehicle) or pmax_vehicle < 0.0:
             pmax_vehicle = 0.0
 
         alloc[sid] = min(p, pmax_vehicle)
 
     return alloc
+
 
 def apply_energy_update(
     ts: datetime,
@@ -1146,43 +1179,59 @@ def apply_energy_update(
     mode_label: str,
 ) -> float:
     """
-    Diese Funktion überführt eine Leistungszuteilung in Energiezuwachs und aktualisiert Sessions.
-
-    Zusätzlich protokolliert sie pro Session, in welchem Modus Energie geliefert wurde.
-    Dadurch kann im Notebook später gezählt werden, wie viele Sessions mit
-    generation/market/immediate geladen wurden.
+    Überführt eine Leistungszuteilung in Energiezuwachs und aktualisiert Sessions.
 
     Rückgabe:
       - total_power_kw (Summe der tatsächlich gefahrenen Ladeleistung)
+
+    WICHTIG:
+      - Liest power_alloc_kw immer über id(session)
+      - Schreibt _actual_power_kw (für Charger-Traces / Debug)
     """
     total_power_kw = 0.0
     mode = (mode_label or "").strip().lower()
 
-    for s in sessions:
-        p = float(power_alloc_kw.get(id(s), 0.0))
-        s["_actual_power_kw"] = float(p)
+    denom = float(time_step_hours) * float(charger_efficiency)
 
-        if p <= 1e-9:
+    for s in sessions:
+        sid = id(s)
+        p_req = float(power_alloc_kw.get(sid, 0.0))
+
+        # optional: numerische Robustheit
+        if np.isnan(p_req) or p_req < 0.0:
+            p_req = 0.0
+
+        # setze zunächst die gewünschte Leistung (wird ggf. unten angepasst)
+        s["_actual_power_kw"] = float(p_req)
+
+        if p_req <= 1e-9:
             continue
 
-        possible_energy_kwh = p * time_step_hours * charger_efficiency
+        possible_energy_kwh = float(p_req) * float(time_step_hours) * float(charger_efficiency)
         e_need = float(s.get("energy_required_kwh", 0.0))
+        if np.isnan(e_need) or e_need < 0.0:
+            e_need = 0.0
 
         if possible_energy_kwh >= e_need:
-            e_del = e_need
+            # Step liefert mehr als benötigt -> clamp auf Restenergie
+            e_del = float(e_need)
             s["energy_required_kwh"] = 0.0
+
             if "finished_charging_time" not in s:
                 s["finished_charging_time"] = ts
 
-            p = e_del / (time_step_hours * charger_efficiency) if e_del > 0 else 0.0
-            s["_actual_power_kw"] = float(p)
+            # effektive Leistung passend zur gelieferten Energie
+            p_eff = (e_del / denom) if (e_del > 0.0 and denom > 1e-12) else 0.0
+            s["_actual_power_kw"] = float(p_eff)
         else:
-            e_del = possible_energy_kwh
-            s["energy_required_kwh"] = e_need - possible_energy_kwh
+            e_del = float(possible_energy_kwh)
+            s["energy_required_kwh"] = float(e_need) - float(possible_energy_kwh)
+            p_eff = float(p_req)
 
         s["delivered_energy_kwh"] = float(s.get("delivered_energy_kwh", 0.0)) + float(e_del)
-        total_power_kw += float(p)
+        total_power_kw += float(p_eff)
 
+        # Mode Tracking
         if "_energy_by_mode_kwh" not in s or not isinstance(s["_energy_by_mode_kwh"], dict):
             s["_energy_by_mode_kwh"] = {}
         s["_energy_by_mode_kwh"][mode] = float(s["_energy_by_mode_kwh"].get(mode, 0.0)) + float(e_del)
@@ -1192,6 +1241,7 @@ def apply_energy_update(
         s["_modes_used"].add(mode)
 
     return float(total_power_kw)
+
 
 
 # =============================================================================
