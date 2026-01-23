@@ -3077,7 +3077,8 @@ def simulate_load_profile(
                             "session_id": None,
                             "vehicle_name": None,
                             "vehicle_class": None,
-                            "soc": np.nan,
+                            "soc": np.nan,        # bleibt für bestehende Plots
+                            "soc_raw": np.nan,    # neu
                             "power_kw": 0.0,
                         }
                     )
@@ -3088,10 +3089,11 @@ def simulate_load_profile(
                 soc_arr = float(s.get("soc_arrival", np.nan))
                 soc_target = float(s.get("soc_target", 1.0))
 
-                soc = np.nan
+                soc_raw = np.nan
+                soc_clipped = np.nan
                 if cap > 1e-9 and not np.isnan(cap) and not np.isnan(soc_arr):
-                    soc = soc_arr + delivered / cap
-                    soc = min(soc, soc_target)
+                    soc_raw = soc_arr + delivered / cap          # <-- UNGECLIPPT
+                    soc_clipped = min(soc_raw, soc_target)       # <-- nur fürs Plotten/Lesbarkeit
 
                 p = float(s.get("_actual_power_kw", 0.0))
 
@@ -3103,10 +3105,12 @@ def simulate_load_profile(
                         "session_id": s.get("session_id"),
                         "vehicle_name": s.get("vehicle_name"),
                         "vehicle_class": s.get("vehicle_class"),
-                        "soc": soc,
+                        "soc": soc_clipped,     # kompatibel zu deinen bisherigen Plots
+                        "soc_raw": soc_raw,     # neu: für Kurven-Validierung nutzen!
                         "power_kw": p,
                     }
                 )
+
 
         # --------------------------------------------------------
         # 7) Debug-Row je Zeitschritt
