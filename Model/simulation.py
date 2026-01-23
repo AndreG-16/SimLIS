@@ -1122,12 +1122,20 @@ def allocate_power_water_filling(
             break
         remaining_budget = max(0.0, remaining_budget - used_this_round)
 
-    for sid, p in current.items():
-        if p > 1e-9:
-            alloc[sid] = float(p)
+    for s in active:
+        sid = id(s)
+        p = float(current.get(sid, 0.0))
+        if p <= 1e-9:
+            continue
+
+        # HARTE Fahrzeuggrenze (immer zuletzt)
+        pmax_vehicle = float(vehicle_power_at_soc(s))  # basiert auf aktuellem SoC in der Session
+        if pmax_vehicle < 0.0:
+            pmax_vehicle = 0.0
+
+        alloc[sid] = float(min(p, pmax_vehicle))
 
     return alloc
-
 
 def apply_energy_update(
     ts: datetime,
