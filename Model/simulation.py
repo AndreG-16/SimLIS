@@ -1545,16 +1545,15 @@ def get_present_plugged_sessions(
     chargers: list[dict[str, Any] | None],
 ) -> list[dict[str, Any]]:
     """
-    Diese Funktion liefert alle eingesteckten Sessions, die aktuell anwesend sind und noch Energiebedarf haben.
+    Liefert REFERENZEN auf eingesteckte Sessions,
+    die aktuell anwesend sind und noch Energiebedarf haben.
     """
-    plugged_sessions = [s for s in chargers if s is not None]
-    present = [
-        s for s in plugged_sessions
-        if s["arrival_time"] <= ts < s["departure_time"]
-        and float(s.get("energy_required_kwh", 0.0)) > 1e-9
-    ]
-    for s in present:
-        s["_actual_power_kw"] = 0.0
+    present = []
+    for s in chargers:
+        if s is None:
+            continue
+        if s["arrival_time"] <= ts < s["departure_time"] and float(s.get("energy_required_kwh", 0.0)) > 1e-9:
+            present.append(s)
     return present
 
 
