@@ -2996,17 +2996,6 @@ def simulate_load_profile(
 
 
         # --------------------------------------------------------
-        # 5b) SAFETY: _actual_power_kw für alle belegten Ladepunkte korrekt setzen
-        #     (verhindert "hängende" Leistungen nach Ladeende)
-        # --------------------------------------------------------
-        for s in chargers:
-            if s is not None:
-                # Wenn kein Ladebedarf mehr da ist, darf keine Leistung im Trace stehen
-                if float(s.get("energy_required_kwh", 0.0)) <= 1e-9:
-                    s["_actual_power_kw"] = 0.0
-
-
-        # --------------------------------------------------------
         # 6) Ergebnis je Zeitschritt setzen (KEIN nachträglicher Clamp mehr nötig)
         # --------------------------------------------------------
         load_profile_kw[i] = float(max(0.0, total_power_kw))
