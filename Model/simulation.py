@@ -1054,33 +1054,29 @@ def _session_step_power_cap_kw(
     charger_efficiency: float,
 ) -> float:
     """
-    Effektives Power-Cap dieser Session im aktuellen Zeitschritt.
-    Beachtet:
-      - Fahrzeuggrenze aus Masterkurve (CSV) bei SoC *vor* dem Step
-      - HW/Charger-Grenze
-      - Rated-Power
-      - Restenergie (nicht mehr Leistung als nötig für diesen Step)
+    Effektives Power-Cap einer Session im aktuellen Zeitschritt.
+
+    Annahme:
+      - s["soc"] ist der SoC *vor* dem Step (Step-Start-SoC).
+        (Wenn du SoC erst nach apply_energy_update hochziehst, passt das!)
     """
     if float(s.get("energy_required_kwh", 0.0)) <= 1e-9:
         return 0.0
 
-    # SoC am Step-Start (wichtig für Masterkurve)
-    soc_start = float(s.get("soc", 0.0))
-    if np.isnan(soc_start):
-        soc_start = 0.0
-    soc_start = min(1.0, max(0.0, soc_start))
-
-    vehicle_limit_kw = float(vehicle_power_at_soc(s, soc_start=soc_start))
+    # Fahrzeuglimit (CSV) bei aktuellem Session-SoC
+    # -> vehicle_power_at_soc() liest s["soc"]
+    vehicle_limit_kw = float(vehicle_power_at_soc(s))
     if np.isnan(vehicle_limit_kw) or vehicle_limit_kw < 0.0:
         vehicle_limit_kw = 0.0
 
+    # Hardware/Charger-Limit (Session-spezifisch)
     hw_limit_kw = float(s.get("max_charging_power_kw", rated_power_kw))
     if np.isnan(hw_limit_kw) or hw_limit_kw < 0.0:
         hw_limit_kw = 0.0
 
     cap_kw = max(0.0, min(float(rated_power_kw), vehicle_limit_kw, hw_limit_kw))
 
-    # Zusätzlich: nicht mehr Leistung als nötig für die Restenergie in diesem Step
+    # Nicht mehr Leistung als nötig (Restenergie)
     e_need = float(s.get("energy_required_kwh", 0.0))
     if np.isnan(e_need) or e_need < 0.0:
         e_need = 0.0
@@ -1101,21 +1097,16 @@ def allocate_power_water_filling(
     charger_efficiency: float,
 ) -> dict[int, float]:
     """
-    Verteilt das Standort-Leistungsbudget (kW) fair auf Sessions (Water-Filling).
+    Fair-Share / Water-Filling Allokation.
 
     Rückgabe:
       - Mapping id(session) -> zugewiesene Leistung (kW)
-
-    WICHTIG:
-      - Keys sind id(session) (nicht Index).
-      - Fahrzeuggrenze aus Masterkurve ist bereits in _session_step_power_cap_kw enthalten.
-        (zusätzlicher Clamp am Ende bleibt als "doppelte Sicherheit".)
     """
     alloc: dict[int, float] = {}
     if not sessions or float(total_budget_kw) <= 1e-9:
         return alloc
 
-    # Caps je Session (inkl. Fahrzeuggrenze)
+    # Caps je Session (inkl. Fahrzeuggrenze aus CSV via vehicle_power_at_soc(s))
     caps = {
         id(s): _session_step_power_cap_kw(s, rated_power_kw, time_step_hours, charger_efficiency)
         for s in sessions
@@ -1149,19 +1140,14 @@ def allocate_power_water_filling(
             break
         remaining_budget = max(0.0, remaining_budget - used_this_round)
 
-    # Finalisieren + Safety Clamp (CSV-Fahrzeuggrenze nochmal, aber korrekt per id(session))
+    # Finalisieren + Safety Clamp (nochmal Fahrzeuggrenze, aber korrekt via id(session))
     for s in active:
         sid = id(s)
         p = float(current.get(sid, 0.0))
         if p <= 1e-9:
             continue
 
-        soc_start = float(s.get("soc", 0.0))
-        if np.isnan(soc_start):
-            soc_start = 0.0
-        soc_start = min(1.0, max(0.0, soc_start))
-
-        pmax_vehicle = float(vehicle_power_at_soc(s, soc_start=soc_start))
+        pmax_vehicle = float(vehicle_power_at_soc(s))
         if np.isnan(pmax_vehicle) or pmax_vehicle < 0.0:
             pmax_vehicle = 0.0
 
@@ -1179,14 +1165,8 @@ def apply_energy_update(
     mode_label: str,
 ) -> float:
     """
-    Überführt eine Leistungszuteilung in Energiezuwachs und aktualisiert Sessions.
-
-    Rückgabe:
-      - total_power_kw (Summe der tatsächlich gefahrenen Ladeleistung)
-
-    WICHTIG:
-      - Liest power_alloc_kw immer über id(session)
-      - Schreibt _actual_power_kw (für Charger-Traces / Debug)
+    Führt Energy-Update aus und setzt pro Session die tatsächlich gefahrene Leistung.
+    Erwartet power_alloc_kw Keys = id(session).
     """
     total_power_kw = 0.0
     mode = (mode_label or "").strip().lower()
@@ -1197,11 +1177,9 @@ def apply_energy_update(
         sid = id(s)
         p_req = float(power_alloc_kw.get(sid, 0.0))
 
-        # optional: numerische Robustheit
         if np.isnan(p_req) or p_req < 0.0:
             p_req = 0.0
 
-        # setze zunächst die gewünschte Leistung (wird ggf. unten angepasst)
         s["_actual_power_kw"] = float(p_req)
 
         if p_req <= 1e-9:
@@ -1213,14 +1191,11 @@ def apply_energy_update(
             e_need = 0.0
 
         if possible_energy_kwh >= e_need:
-            # Step liefert mehr als benötigt -> clamp auf Restenergie
             e_del = float(e_need)
             s["energy_required_kwh"] = 0.0
-
             if "finished_charging_time" not in s:
                 s["finished_charging_time"] = ts
 
-            # effektive Leistung passend zur gelieferten Energie
             p_eff = (e_del / denom) if (e_del > 0.0 and denom > 1e-12) else 0.0
             s["_actual_power_kw"] = float(p_eff)
         else:
@@ -1231,7 +1206,6 @@ def apply_energy_update(
         s["delivered_energy_kwh"] = float(s.get("delivered_energy_kwh", 0.0)) + float(e_del)
         total_power_kw += float(p_eff)
 
-        # Mode Tracking
         if "_energy_by_mode_kwh" not in s or not isinstance(s["_energy_by_mode_kwh"], dict):
             s["_energy_by_mode_kwh"] = {}
         s["_energy_by_mode_kwh"][mode] = float(s["_energy_by_mode_kwh"].get(mode, 0.0)) + float(e_del)
@@ -1241,7 +1215,6 @@ def apply_energy_update(
         s["_modes_used"].add(mode)
 
     return float(total_power_kw)
-
 
 
 # =============================================================================
