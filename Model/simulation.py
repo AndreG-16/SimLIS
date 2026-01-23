@@ -3073,6 +3073,7 @@ def simulate_load_profile(
                         "vehicle_class": s.get("vehicle_class"),
                         "soc": soc_clipped,
                         "soc_raw": soc_raw,
+                        "soc_arrival": float(s.get("soc_arrival", np.nan)),
                         "power_kw": p,
                         "power_generation_kw": pv_p,
                         "power_grid_kw": grid_p,
