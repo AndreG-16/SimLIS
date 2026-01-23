@@ -1167,6 +1167,10 @@ def apply_energy_update(
     """
     Führt Energy-Update aus und setzt pro Session die tatsächlich gefahrene Leistung.
     Erwartet power_alloc_kw Keys = id(session).
+
+    NEU:
+      - schreibt pro Session den Step-Mode (_last_mode) + Timestamp (_last_mode_ts),
+        aber NUR wenn in diesem Step tatsächlich Energie geliefert wurde.
     """
     total_power_kw = 0.0
     mode = (mode_label or "").strip().lower()
@@ -1180,6 +1184,7 @@ def apply_energy_update(
         if np.isnan(p_req) or p_req < 0.0:
             p_req = 0.0
 
+        # Default: keine Lieferung in diesem Step
         s["_actual_power_kw"] = float(p_req)
 
         if p_req <= 1e-9:
@@ -1203,6 +1208,7 @@ def apply_energy_update(
             s["energy_required_kwh"] = float(e_need) - float(possible_energy_kwh)
             p_eff = float(p_req)
 
+        # --- Bookkeeping Energie ---
         s["delivered_energy_kwh"] = float(s.get("delivered_energy_kwh", 0.0)) + float(e_del)
         total_power_kw += float(p_eff)
 
@@ -1214,7 +1220,13 @@ def apply_energy_update(
             s["_modes_used"] = set()
         s["_modes_used"].add(mode)
 
+        # --- NEU: Step-Mode (nur wenn wirklich Energie geliefert wurde) ---
+        if float(e_del) > 1e-9:
+            s["_last_mode"] = mode
+            s["_last_mode_ts"] = ts
+
     return float(total_power_kw)
+
 
 
 # =============================================================================
@@ -2775,6 +2787,14 @@ def simulate_load_profile(
         charging_count_series.append(len(present_sessions))
 
         # --------------------------------------------------------
+        # Reset: Step-spezifische Felder für alle belegten Sessions
+        # --------------------------------------------------------
+        for s in chargers:
+            if s is not None:
+                s["_actual_power_kw"] = 0.0   
+                s["_last_mode"] = None        
+
+        # --------------------------------------------------------
         # 2) Step-Größen (Base / PV) + KORREKTES EV-BUDGET
         # --------------------------------------------------------
         base_kw_now = float(base_load_series_kw[i]) if base_load_series_kw is not None else 0.0
@@ -3075,15 +3095,46 @@ def simulate_load_profile(
         # --------------------------------------------------------
         load_profile_kw[i] = float(max(0.0, total_power_kw))
 
+
         # --------------------------------------------------------
-        # 7) Charger Traces (optional) + Debug Row bleibt wie bei dir
+        # 6a) PHYSIKALISCHER SPLIT: EV-Leistung aus PV vs Grid
+        # --------------------------------------------------------
+        # Base frisst PV zuerst → nur Überschuss kann EV decken
+        pv_used_for_ev_kw = max(
+            0.0,
+            min(float(total_power_kw), float(pv_gen_now) - float(base_kw_now))
+        )
+
+        grid_used_for_ev_kw = max(0.0, float(total_power_kw) - pv_used_for_ev_kw)
+
+
+        # --------------------------------------------------------
+        # 7) Charger Traces – Mode = PHYSIKALISCHE QUELLE
         # --------------------------------------------------------
         if record_charger_traces:
+            # PV-Anteil proportional auf aktuell ladende Sessions verteilen
+            active = [s for s in chargers if s is not None and float(s.get("_actual_power_kw", 0.0)) > 1e-9]
+            total_active_power = sum(float(s.get("_actual_power_kw", 0.0)) for s in active)
+
+            pv_ratio = 0.0
+            if total_active_power > 1e-9:
+                pv_ratio = min(1.0, pv_used_for_ev_kw / total_active_power)
+
             for cid, s in enumerate(chargers):
                 if s is None:
                     charger_trace_rows.append(
-                        {"ts": ts, "charger_id": cid, "occupied": False, "session_id": None,
-                        "vehicle_name": None, "vehicle_class": None, "soc": np.nan, "soc_raw": np.nan, "power_kw": 0.0}
+                        {
+                            "ts": ts,
+                            "charger_id": cid,
+                            "occupied": False,
+                            "session_id": None,
+                            "vehicle_name": None,
+                            "vehicle_class": None,
+                            "soc": np.nan,
+                            "soc_raw": np.nan,
+                            "power_kw": 0.0,
+                            "mode": None,
+                        }
                     )
                     continue
 
@@ -3100,11 +3151,32 @@ def simulate_load_profile(
 
                 p = float(s.get("_actual_power_kw", 0.0))
 
+                pv_p = p * pv_ratio
+                grid_p = max(0.0, p - pv_p)
+
+                # 🔑 MODE = physikalische Quelle
+                if pv_p > 1e-9:
+                    mode_src = "generation"
+                elif grid_p > 1e-9:
+                    mode_src = "immediate"
+                else:
+                    mode_src = None
+
                 charger_trace_rows.append(
-                    {"ts": ts, "charger_id": cid, "occupied": True, "session_id": s.get("session_id"),
-                    "vehicle_name": s.get("vehicle_name"), "vehicle_class": s.get("vehicle_class"),
-                    "soc": soc_clipped, "soc_raw": soc_raw, "power_kw": p}
+                    {
+                        "ts": ts,
+                        "charger_id": cid,
+                        "occupied": True,
+                        "session_id": s.get("session_id"),
+                        "vehicle_name": s.get("vehicle_name"),
+                        "vehicle_class": s.get("vehicle_class"),
+                        "soc": soc_clipped,
+                        "soc_raw": soc_raw,
+                        "power_kw": p,
+                        "mode": mode_src,
+                    }
                 )
+
 
         if record_debug:
             site_load_kw_now = float(load_profile_kw[i]) + float(base_kw_now)
@@ -3120,11 +3192,13 @@ def simulate_load_profile(
                     "pv_generation_kw": float(pv_gen_now),
                     "pv_surplus_kw": float(pv_surplus_kw_now),
                     "grid_import_kw_site": float(grid_import_kw_site),
-                    "ev_budget_kw": float(ev_budget_kw_now),  # ✅ neu: sehr hilfreich fürs Notebook
+                    "ev_budget_kw": float(ev_budget_kw_now), 
                     "did_use_grid": bool(did_use_grid),
                     "did_finish_event": bool(did_finish_event),
                     "did_cleanup_event": bool(did_cleanup_event),
                     "fell_back_market_to_immediate": bool(fell_back_market_to_immediate),
+                    "pv_used_for_ev_kw": float(pv_used_for_ev_kw),
+                    "grid_used_for_ev_kw": float(grid_used_for_ev_kw),
                 }
             )
 
