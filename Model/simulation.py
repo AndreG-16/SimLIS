@@ -1180,15 +1180,22 @@ def apply_energy_update(
     for s in sessions:
         sid = id(s)
         p_req = float(power_alloc_kw.get(sid, 0.0))
-
         if np.isnan(p_req) or p_req < 0.0:
             p_req = 0.0
 
-        # Default: keine Lieferung in diesem Step
-        s["_actual_power_kw"] = float(p_req)
+        # ✅ nicht überschreiben, sondern addieren (weil mehrere apply_energy_update Calls pro Step möglich sind)
+        prev_p = float(s.get("_actual_power_kw", 0.0) or 0.0)
+        s["_actual_power_kw"] = prev_p + float(p_req)
+
+        # Mode bookkeeping
+        s["_last_mode"] = mode
+        if "_power_by_mode_kw_step" not in s or not isinstance(s["_power_by_mode_kw_step"], dict):
+            s["_power_by_mode_kw_step"] = {}
+        s["_power_by_mode_kw_step"][mode] = float(s["_power_by_mode_kw_step"].get(mode, 0.0)) + float(p_req)
 
         if p_req <= 1e-9:
             continue
+
 
         possible_energy_kwh = float(p_req) * float(time_step_hours) * float(charger_efficiency)
         e_need = float(s.get("energy_required_kwh", 0.0))
@@ -2696,7 +2703,9 @@ def simulate_load_profile(
         for s in chargers:
             if s is not None:
                 s["_actual_power_kw"] = 0.0   
-                s["_last_mode"] = None        
+                s["_last_mode"] = None
+                s["_power_by_mode_kw_step"] = {}
+        
 
         # --------------------------------------------------------
         # 2) Step-Größen (Base / PV) + KORREKTES EV-BUDGET
