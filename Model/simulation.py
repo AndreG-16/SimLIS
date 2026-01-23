@@ -3028,7 +3028,6 @@ def simulate_load_profile(
         # 7) Charger Traces – Mode = PHYSIKALISCHE QUELLE
         # --------------------------------------------------------
         if record_charger_traces:
-            # PV-Anteil proportional auf aktuell ladende Sessions verteilen
             active = [s for s in chargers if s is not None and float(s.get("_actual_power_kw", 0.0)) > 1e-9]
             total_active_power = sum(float(s.get("_actual_power_kw", 0.0)) for s in active)
 
@@ -3049,13 +3048,16 @@ def simulate_load_profile(
                             "soc": np.nan,
                             "soc_raw": np.nan,
                             "power_kw": 0.0,
-                            "mode": None,
-                            "power_kw": p,
-                            "power_generation_kw": pv_p,
-                            "power_grid_kw": grid_p,
+                            "power_generation_kw": 0.0,
+                            "power_grid_kw": 0.0,
                         }
                     )
                     continue
+
+
+                p = float(s.get("_actual_power_kw", 0.0) or 0.0)
+                if np.isnan(p) or p < 0.0:
+                    p = 0.0
 
                 delivered = float(s.get("delivered_energy_kwh", 0.0))
                 cap = float(s.get("battery_capacity_kwh", np.nan))
@@ -3068,18 +3070,9 @@ def simulate_load_profile(
                     soc_raw = soc_arr + delivered / cap
                     soc_clipped = min(soc_raw, soc_target)
 
-                p = float(s.get("_actual_power_kw", 0.0))
-
+                # PV/Grid Split
                 pv_p = p * pv_ratio
                 grid_p = max(0.0, p - pv_p)
-
-                # 🔑 MODE = physikalische Quelle
-                if pv_p > 1e-9:
-                    mode_src = "generation"
-                elif grid_p > 1e-9:
-                    mode_src = "immediate"
-                else:
-                    mode_src = None
 
                 charger_trace_rows.append(
                     {
@@ -3092,7 +3085,8 @@ def simulate_load_profile(
                         "soc": soc_clipped,
                         "soc_raw": soc_raw,
                         "power_kw": p,
-                        "mode": mode_src,
+                        "power_generation_kw": pv_p,
+                        "power_grid_kw": grid_p,
                     }
                 )
 
