@@ -2699,7 +2699,7 @@ def simulate_load_profile(
         # Sessions, die jetzt physisch anwesend sind + noch Bedarf haben
         present_sessions = get_present_plugged_sessions(ts, chargers)
         charging_count_series.append(len(present_sessions))
-
+        
         # --------------------------------------------------------
         # Reset: Step-spezifische Felder für alle belegten Sessions
         # --------------------------------------------------------
@@ -2708,7 +2708,6 @@ def simulate_load_profile(
                 s["_actual_power_kw"] = 0.0   
                 s["_last_mode"] = None
                 s["_power_by_mode_kw_step"] = {}
-        
 
         # --------------------------------------------------------
         # 2) Step-Größen (Base / PV) + KORREKTES EV-BUDGET
