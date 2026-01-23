@@ -2229,115 +2229,104 @@ def run_step_generation_planned_pv_with_critical_fallback(
     market_unit: str | None,
     strategy_resolution_min: int,
     strategy_step_hours: float,
-    hard_immediate_slack_minutes: float = 0.0,   # <-- neu: "Market nicht umsetzbar" Schwelle
+    hard_immediate_slack_minutes: float = 0.0,
 ) -> tuple[float, str, bool, bool, bool]:
     """
-    Generation-Hybrid (PV max) + Market NUR als Fallback:
+    Generation-Hybrid (PV max) + Market NUR als Fallback + Immediate nur Notfall.
 
-    Schritt:
-      1) PV nur aus PV-Reservierung (pv_plan_kw_by_idx)
-      2) Market-Fallback aus Market-Reservierung (market_plan_kw_by_idx) für Restenergie nach PV-Plan
-         -> ABER: wenn Slack <= hard_immediate_slack_minutes => Market für diese Session nicht mehr umsetzbar
-      3) Immediate nur als Notfall (kritisch: Slack <= emergency_slack_minutes) oder Market nicht mehr umsetzbar
+    Reihenfolge pro Step:
+      1) PV-Plan (pv_plan_kw_by_idx)
+      2) Market-Fallback-Plan (market_plan_kw_by_idx) NUR wenn Slack > hard_immediate_slack_minutes
+      3) Immediate-Notfall für kritische oder nicht mehr market-fähige Sessions
+         (Slack <= emergency_slack_minutes ODER Slack <= hard_immediate_slack_minutes bei Restbedarf)
 
     Physik:
-      grid_import = max(0, total_power - pv_surplus_kw_now) <= grid_limit_p_avb_kw
-      => total_power <= pv_surplus_kw_now + grid_limit_p_avb_kw
+      total_power <= pv_surplus_kw_now + grid_limit_p_avb_kw
+      did_use_grid = (total_power > pv_surplus_kw_now)
     """
     if not present_sessions:
         return 0.0, "PV_ONLY", False, False, False
+
+    pv_surplus_kw_now = float(max(0.0, pv_surplus_kw_now))
+    grid_limit_p_avb_kw = float(max(0.0, grid_limit_p_avb_kw))
+
+    total_power_upper = pv_surplus_kw_now + grid_limit_p_avb_kw  # absolute Obergrenze für EV in diesem Step
 
     did_finish_event = False
     did_use_grid = False
     did_fallback_immediate = False
 
-    # Upper bound (PV + Grid Importlimit)
-    total_power_upper = float(max(0.0, float(pv_surplus_kw_now) + float(grid_limit_p_avb_kw)))
+    total_power_kw = 0.0
+    mode_label = "PV_PLANNED"
 
-    # ------------------------------------------------------------------
-    # 1) PV-Ausführung (nur reservierte PV, Slack-priorisiert)
-    # ------------------------------------------------------------------
-    pv_budget = float(max(0.0, pv_surplus_kw_now))
+    # ------------------------------------------------------------
+    # Helper: finished in this sub-step?
+    # ------------------------------------------------------------
+    def _mark_finished_before_after(sessions_subset: list[dict[str, Any]], before_need: dict[int, float]) -> bool:
+        for s in sessions_subset:
+            b = float(before_need.get(id(s), 0.0))
+            a = float(s.get("energy_required_kwh", 0.0))
+            if b > 1e-9 and a <= 1e-9:
+                return True
+        return False
+
+    # ------------------------------------------------------------
+    # (1) PV-Plan ausführen (pv_plan_kw_by_idx)
+    # ------------------------------------------------------------
     pv_alloc: dict[int, float] = {}
+    pv_sessions: list[dict[str, Any]] = []
 
     for s in present_sessions:
-        s["_slack_minutes"] = float(_slack_minutes_for_session(s, ts, rated_power_kw, charger_efficiency))
-
-    pv_candidates: list[tuple[dict[str, Any], float]] = []
-    for s in present_sessions:
-        plan = s.get("pv_plan_kw_by_idx", {}) or {}
-        p_plan = float(plan.get(i, 0.0))
+        # Planleistung aus Session
+        p_plan = float((s.get("pv_plan_kw_by_idx", {}) or {}).get(i, 0.0))
         if p_plan <= 1e-9:
             continue
 
+        # physikalischer Cap (Fahrzeug + Charger)
         p_phys = _session_step_power_cap_kw(s, rated_power_kw, time_step_hours, charger_efficiency)
-        p_cap = max(0.0, min(p_plan, p_phys))
-        if p_cap <= 1e-9:
-            continue
+        p = min(p_plan, p_phys)
 
-        pv_candidates.append((s, p_cap))
+        if p > 1e-9:
+            pv_alloc[id(s)] = float(p)
+            pv_sessions.append(s)
 
-    pv_candidates.sort(key=lambda x: (x[0].get("_slack_minutes", 1e9), x[0]["departure_time"], x[0]["arrival_time"]))
+    if pv_sessions:
+        before_need = {id(s): float(s.get("energy_required_kwh", 0.0)) for s in pv_sessions}
 
-    for s, cap in pv_candidates:
-        if pv_budget <= 1e-9:
-            break
-        take = min(float(cap), pv_budget)
-        if take > 1e-9:
-            pv_alloc[id(s)] = float(take)
-            pv_budget -= float(take)
-
-    pv_sessions = [s for s in present_sessions if id(s) in pv_alloc]
-    pv_power_kw = apply_energy_update(
-        ts=ts,
-        sessions=pv_sessions,
-        power_alloc_kw=pv_alloc,
-        time_step_hours=time_step_hours,
-        charger_efficiency=charger_efficiency,
-        mode_label="generation",
-    )
-
-    for s in pv_sessions:
-        if float(s.get("energy_required_kwh", 0.0)) <= 1e-9 and "finished_charging_time" in s and s["finished_charging_time"] == ts:
-            did_finish_event = True
-
-    # Wenn nach PV niemand mehr Bedarf hat -> fertig
-    still_need = [s for s in present_sessions if float(s.get("energy_required_kwh", 0.0)) > 1e-9]
-    if not still_need:
-        return float(pv_power_kw), "PV_ONLY", False, False, did_finish_event
-
-    remaining_total_power_budget = max(0.0, total_power_upper - float(pv_power_kw))
-    if remaining_total_power_budget <= 1e-9:
-        return float(pv_power_kw), "PV_ONLY", False, False, did_finish_event
-
-    # ------------------------------------------------------------------
-    # 2) Market-Fallback AUSFÜHREN (nicht nur "critical"!)
-    #    Aber: wenn Market "nicht umsetzbar" (Slack <= hard_immediate_slack_minutes) -> nicht Market, sondern ggf. Immediate
-    # ------------------------------------------------------------------
-    market_power_kw = 0.0
-    market_sessions_used: list[dict[str, Any]] = []
-    immediate_due_to_hard: list[dict[str, Any]] = []
-
-    if market_enabled and market_map is not None and market_unit is not None:
-        planned_alloc: dict[int, float] = {}
-        remaining = float(remaining_total_power_budget)
-
-        # Slack-priorisiert ausführen (aber nicht nur critical)
-        need_sorted = sorted(
-            still_need,
-            key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"])
+        add_pv = apply_energy_update(
+            ts=ts,
+            sessions=pv_sessions,
+            power_alloc_kw=pv_alloc,
+            time_step_hours=time_step_hours,
+            charger_efficiency=charger_efficiency,
+            mode_label="generation",
         )
+        total_power_kw += float(add_pv)
+        did_finish_event = did_finish_event or _mark_finished_before_after(pv_sessions, before_need)
 
-        for s in need_sorted:
-            if remaining <= 1e-9:
-                break
+    # Safety clamp gegen Obergrenze (falls Planer mal überschießt)
+    if total_power_kw > total_power_upper:
+        total_power_kw = float(total_power_upper)
 
-            slack = float(s.get("_slack_minutes", _slack_minutes_for_session(s, ts, rated_power_kw, charger_efficiency)))
+    remaining_upper = max(0.0, total_power_upper - total_power_kw)
+
+    # ------------------------------------------------------------
+    # (2) Market-Fallback ausführen (market_plan_kw_by_idx), aber nur wenn umsetzbar
+    # ------------------------------------------------------------
+    market_alloc: dict[int, float] = {}
+    market_sessions: list[dict[str, Any]] = []
+
+    if market_enabled and market_map is not None and market_unit is not None and remaining_upper > 1e-9:
+        for s in present_sessions:
+            # nur wenn noch Bedarf
+            if float(s.get("energy_required_kwh", 0.0)) <= 1e-9:
+                continue
+
+            slack = float(_slack_minutes_for_session(s, ts, rated_power_kw, charger_efficiency))
             s["_slack_minutes"] = slack
 
-            # Market für diese Session "nicht umsetzbar" => wird später ggf. Immediate bekommen
+            # wenn zu wenig Slack: Market ist nicht mehr "fahrbar"
             if slack <= float(hard_immediate_slack_minutes):
-                immediate_due_to_hard.append(s)
                 continue
 
             p_plan = float((s.get("market_plan_kw_by_idx", {}) or {}).get(i, 0.0))
@@ -2345,189 +2334,105 @@ def run_step_generation_planned_pv_with_critical_fallback(
                 continue
 
             p_phys = _session_step_power_cap_kw(s, rated_power_kw, time_step_hours, charger_efficiency)
-            p_take = min(p_plan, p_phys, remaining)
-            if p_take > 1e-9:
-                planned_alloc[id(s)] = float(p_take)
-                remaining -= float(p_take)
+            p = min(p_plan, p_phys)
 
-        planned_sessions = [s for s in still_need if id(s) in planned_alloc]
-        if planned_sessions:
-            market_power_kw = apply_energy_update(
+            if p > 1e-9:
+                market_alloc[id(s)] = float(p)
+                market_sessions.append(s)
+
+        if market_sessions:
+            before_need = {id(s): float(s.get("energy_required_kwh", 0.0)) for s in market_sessions}
+
+            add_market = apply_energy_update(
                 ts=ts,
-                sessions=planned_sessions,
-                power_alloc_kw=planned_alloc,
+                sessions=market_sessions,
+                power_alloc_kw=market_alloc,
                 time_step_hours=time_step_hours,
                 charger_efficiency=charger_efficiency,
                 mode_label="market",
             )
-            if market_power_kw > 1e-9:
-                did_use_grid = True
-                market_sessions_used = planned_sessions
 
-    remaining_after_market = max(0.0, float(remaining_total_power_budget) - float(market_power_kw))
-    if remaining_after_market <= 1e-9:
-        # Kein Budget mehr für Grid-Notfall
-        total_power_kw = float(pv_power_kw + market_power_kw)
-        mode = "PV_ONLY->MARKET" if market_power_kw > 1e-9 else "PV_ONLY"
-        return total_power_kw, mode, False, did_use_grid, did_finish_event
+            # auch hier: nicht über Obergrenze
+            add_market = min(float(add_market), remaining_upper)
+            total_power_kw += float(add_market)
 
-    # ------------------------------------------------------------------
-    # 3) Immediate-Notfall:
-    #    - nur für CRITICAL (Slack <= emergency_slack_minutes)
-    #    - plus die "hard" Fälle (Market nicht umsetzbar)
-    # ------------------------------------------------------------------
-    critical_or_hard: list[dict[str, Any]] = []
-    for s in still_need:
-        slack = float(s.get("_slack_minutes", _slack_minutes_for_session(s, ts, rated_power_kw, charger_efficiency)))
-        s["_slack_minutes"] = slack
-        if slack <= float(emergency_slack_minutes):
-            critical_or_hard.append(s)
+            did_finish_event = did_finish_event or _mark_finished_before_after(market_sessions, before_need)
 
-    # hard rule adden (Market nicht umsetzbar)
-    for s in immediate_due_to_hard:
-        if s not in critical_or_hard:
-            critical_or_hard.append(s)
+            mode_label = "PV->MARKET"
 
-    add_power = 0.0
-    if critical_or_hard and remaining_after_market > 1e-9:
-        alloc = allocate_power_water_filling(
-            sessions=critical_or_hard,
-            total_budget_kw=remaining_after_market,
-            rated_power_kw=rated_power_kw,
-            time_step_hours=time_step_hours,
-            charger_efficiency=charger_efficiency,
-        )
-        add_power = apply_energy_update(
-            ts=ts,
-            sessions=critical_or_hard,
-            power_alloc_kw=alloc,
-            time_step_hours=time_step_hours,
-            charger_efficiency=charger_efficiency,
-            mode_label="immediate",
-        )
-        if add_power > 1e-9:
-            did_use_grid = True
-            did_fallback_immediate = True
+    remaining_upper = max(0.0, total_power_upper - total_power_kw)
 
-    for s in present_sessions:
-        if float(s.get("energy_required_kwh", 0.0)) <= 1e-9 and "finished_charging_time" in s and s["finished_charging_time"] == ts:
-            did_finish_event = True
-
-    total_power_kw = float(pv_power_kw + market_power_kw + add_power)
-
-    # Labeling
-    if market_power_kw > 1e-9 and add_power > 1e-9:
-        mode_label = "PV->MARKET->IMMEDIATE"
-    elif market_power_kw > 1e-9:
-        mode_label = "PV->MARKET"
-    elif add_power > 1e-9:
-        mode_label = "PV->IMMEDIATE"
-    else:
-        mode_label = "PV_ONLY"
-
-    return total_power_kw, mode_label, bool(did_fallback_immediate), bool(did_use_grid), bool(did_finish_event)
-
-
-    # ------------------------------------------------------------------
-    # 3) Market-Fallback (geplant) für critical: günstige Slots, aber wenn "zu spät" -> Immediate
-    # ------------------------------------------------------------------
-    mode_label = "CRITICAL_ONLY"
-    total_power_upper = float(max(0.0, float(pv_surplus_kw_now) + float(grid_limit_p_avb_kw)))
-    remaining_total_power_budget = max(0.0, total_power_upper - float(pv_power_kw))
-
-    if remaining_total_power_budget <= 1e-9:
-        return float(pv_power_kw), "PV_ONLY", False, False, did_finish_event
-
-    # Critical bestimmen
-    critical = []
-    for s in still_need:
-        slack_m = float(s.get("_slack_minutes", _slack_minutes_for_session(s, ts, rated_power_kw, charger_efficiency)))
-        s["_slack_minutes"] = slack_m
-        if slack_m <= emergency_slack_minutes:
-            critical.append(s)
-
-    if not critical:
-        # Nicht-kritische Sessions bleiben PV-only (max PV bleibt)
-        return float(pv_power_kw), "PV_ONLY", False, False, did_finish_event
-
-    # 3a) Market-Plan (Fallback) zuerst ausführen – aber nur für critical (und nur wenn market_enabled)
-    market_power_kw = 0.0
-    if market_enabled:
-        planned_alloc: dict[int, float] = {}
-        # Slack-priorisierte Ausführung der geplanten Slot-Leistung in diesem Schritt
-        crit_sorted = sorted(
-            critical,
-            key=lambda s: (s.get("_slack_minutes", 1e9), s["departure_time"], s["arrival_time"])
-        )
-
-        remaining = float(remaining_total_power_budget)
-        for s in crit_sorted:
-            if remaining <= 1e-9:
-                break
-            p_plan = float((s.get("market_plan_kw_by_idx", {}) or {}).get(i, 0.0))
-            if p_plan <= 1e-9:
+    # ------------------------------------------------------------
+    # (3) Immediate Notfall: kritisch oder Market nicht mehr umsetzbar / kein Plan
+    # ------------------------------------------------------------
+    fallback_candidates: list[dict[str, Any]] = []
+    if remaining_upper > 1e-9:
+        for s in present_sessions:
+            if float(s.get("energy_required_kwh", 0.0)) <= 1e-9:
                 continue
 
-            # Physik-Cap
-            p_phys = _session_step_power_cap_kw(s, rated_power_kw, time_step_hours, charger_efficiency)
-            p_take = min(p_plan, p_phys, remaining)
-            if p_take > 1e-9:
-                planned_alloc[id(s)] = float(p_take)
-                remaining -= float(p_take)
+            slack = float(s.get("_slack_minutes", np.nan))
+            if np.isnan(slack):
+                slack = float(_slack_minutes_for_session(s, ts, rated_power_kw, charger_efficiency))
+                s["_slack_minutes"] = slack
 
-        planned_sessions = [s for s in critical if id(s) in planned_alloc]
-        if planned_sessions:
-            market_power_kw = apply_energy_update(
-                ts=ts,
-                sessions=planned_sessions,
-                power_alloc_kw=planned_alloc,
+            # kritische Sessions immer
+            is_critical = slack <= float(emergency_slack_minutes)
+
+            # Market nicht mehr umsetzbar (zu wenig Slack) -> sofort immediate
+            market_not_feasible_anymore = (
+                market_enabled
+                and slack <= float(hard_immediate_slack_minutes)
+            )
+
+            # keine Planung bekommen (weder PV noch Market) -> immediate (hilft “Lücken”)
+            has_pv_plan = float((s.get("pv_plan_kw_by_idx", {}) or {}).get(i, 0.0)) > 1e-9
+            has_market_plan = float((s.get("market_plan_kw_by_idx", {}) or {}).get(i, 0.0)) > 1e-9
+            no_plan = (not has_pv_plan) and (not has_market_plan)
+
+            if is_critical or market_not_feasible_anymore or no_plan:
+                fallback_candidates.append(s)
+
+        if fallback_candidates:
+            before_need = {id(s): float(s.get("energy_required_kwh", 0.0)) for s in fallback_candidates}
+
+            alloc = allocate_power_water_filling(
+                sessions=fallback_candidates,
+                total_budget_kw=remaining_upper,
+                rated_power_kw=rated_power_kw,
                 time_step_hours=time_step_hours,
                 charger_efficiency=charger_efficiency,
-                mode_label="market",
             )
-            if market_power_kw > 1e-9:
-                did_use_grid = True
 
-    # 3b) Immediate-Notfall: wenn nach Market-Plan critical noch Bedarf haben (Slack klein => jetzt laden)
-    remaining_after_market = max(0.0, float(remaining_total_power_budget) - float(market_power_kw))
-    critical_still_need = [s for s in critical if float(s.get("energy_required_kwh", 0.0)) > 1e-9]
+            add_imm = apply_energy_update(
+                ts=ts,
+                sessions=fallback_candidates,
+                power_alloc_kw=alloc,
+                time_step_hours=time_step_hours,
+                charger_efficiency=charger_efficiency,
+                mode_label="immediate",
+            )
 
-    add_power = 0.0
-    if critical_still_need and remaining_after_market > 1e-9:
-        alloc = allocate_power_water_filling(
-            sessions=critical_still_need,
-            total_budget_kw=remaining_after_market,
-            rated_power_kw=rated_power_kw,
-            time_step_hours=time_step_hours,
-            charger_efficiency=charger_efficiency,
-        )
-        add_power = apply_energy_update(
-            ts=ts,
-            sessions=critical_still_need,
-            power_alloc_kw=alloc,
-            time_step_hours=time_step_hours,
-            charger_efficiency=charger_efficiency,
-            mode_label="immediate",
-        )
-        if add_power > 1e-9:
-            did_use_grid = True
-            did_fallback_immediate = True
+            add_imm = min(float(add_imm), remaining_upper)
+            if add_imm > 1e-9:
+                total_power_kw += float(add_imm)
+                did_fallback_immediate = True
+                did_finish_event = did_finish_event or _mark_finished_before_after(fallback_candidates, before_need)
 
-    # Finish-Event prüfen
-    for s in critical:
-        if float(s.get("energy_required_kwh", 0.0)) <= 1e-9 and "finished_charging_time" in s and s["finished_charging_time"] == ts:
-            did_finish_event = True
+                if mode_label == "PV_PLANNED":
+                    mode_label = "PV->IMMEDIATE"
+                elif mode_label == "PV->MARKET":
+                    mode_label = "PV->MARKET->IMMEDIATE"
+                else:
+                    mode_label = mode_label + "->IMMEDIATE"
 
-    total_power_kw = float(pv_power_kw + float(market_power_kw) + float(add_power))
+    # ------------------------------------------------------------
+    # Flags
+    # ------------------------------------------------------------
+    total_power_kw = float(max(0.0, min(total_power_kw, total_power_upper)))
+    did_use_grid = bool(total_power_kw > pv_surplus_kw_now + 1e-9)
 
-    if market_enabled and market_power_kw > 1e-9 and add_power <= 1e-9:
-        mode_label = "CRITICAL->MARKET"
-    elif market_enabled and add_power > 1e-9:
-        mode_label = "CRITICAL->MARKET->IMMEDIATE"
-    else:
-        mode_label = "CRITICAL->IMMEDIATE"
-
-    return total_power_kw, mode_label, bool(did_fallback_immediate), bool(did_use_grid), bool(did_finish_event)
+    return total_power_kw, str(mode_label), bool(did_fallback_immediate), bool(did_use_grid), bool(did_finish_event)
 
 def compute_pv_generation_kw(
     ts: datetime,
@@ -2922,7 +2827,7 @@ def simulate_load_profile(
                         ts=ts,
                         i=i,
                         present_sessions=present_sessions,
-                        grid_limit_p_avb_kw=ev_budget_kw_now,   # ✅ EV-Budget statt Gridlimit
+                        grid_limit_p_avb_kw=ev_budget_kw_now,  
                         rated_power_kw=rated_power_kw,
                         time_step_hours=time_step_hours,
                         charger_efficiency=charger_efficiency,
@@ -2939,7 +2844,7 @@ def simulate_load_profile(
                         market_map=market_map,
                         market_unit=str(market_unit),
                         market_reserved_kw=market_reserved_kw,
-                        grid_limit_p_avb_kw=ev_budget_kw_now,   # ✅ EV-Budget statt Gridlimit
+                        grid_limit_p_avb_kw=ev_budget_kw_now,   
                         rated_power_kw=rated_power_kw,
                         time_step_hours=time_step_hours,
                         charger_efficiency=charger_efficiency,
