@@ -312,7 +312,6 @@ def validate_scenario(scenario: dict[str, Any]) -> None:
     rated = float(site.get("rated_power_kw", -1))
     if rated <= 0:
         raise ValueError("site.rated_power_kw muss > 0 sein.")
-
     grid_lim = float(site.get("grid_limit_p_avb_kw", -1))
     if grid_lim <= 0:
         raise ValueError("site.grid_limit_p_avb_kw muss > 0 sein.")
@@ -320,6 +319,28 @@ def validate_scenario(scenario: dict[str, Any]) -> None:
     eff = float(site.get("charger_efficiency", -1))
     if not (0.0 < eff <= 1.0):
         raise ValueError("site.charger_efficiency muss in (0, 1] liegen.")
+
+    # --- Base load (optional) ---
+    # Diese Prüfung stellt sicher, dass die optionalen Felder konsistent sind,
+    # wenn ein Gebäudeprofil via CSV genutzt wird.
+    base_csv = site.get("base_load_csv", None)
+    if isinstance(base_csv, str) and base_csv.strip() == "":
+        base_csv = None
+
+    if base_csv is not None:
+        col = site.get("base_load_value_col", None)
+        unit = str(site.get("base_load_unit", "") or "").strip()
+
+        if not isinstance(col, int) or col < 2:
+            raise ValueError("site.base_load_value_col muss int >= 2 sein.")
+        if unit not in ("kW", "kWh"):
+            raise ValueError("site.base_load_unit muss 'kW' oder 'kWh' sein.")
+        if "base_load_annual" not in site:
+            raise ValueError("site.base_load_annual fehlt (für Skalierung erforderlich).")
+
+        annual = float(site.get("base_load_annual", 0))
+        if annual <= 0:
+            raise ValueError("site.base_load_annual muss > 0 sein.")
 
     # --- Strategy ---
     strat = str(site.get("charging_strategy", "immediate")).lower()
@@ -811,6 +832,135 @@ def build_base_model(
 
 CSV_DT_FORMATS = ("%d.%m.%Y %H:%M", "%d.%m.%y %H:%M")
 
+# NEU: zusätzliche Datumsformate, die typischerweise in HTW- oder ISO-CSVs vorkommen.
+BASELOAD_DT_FORMATS = (
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    *CSV_DT_FORMATS,
+)
+
+def _sniff_delimiter(sample: str) -> str:
+    """
+    Diese Funktion versucht, den CSV-Delimiter aus einem Text-Sample zu erkennen.
+
+    Sie wird genutzt, um Gebäudeprofile robuster einlesen zu können,
+    weil HTW-Daten häufig mit ',' vorliegen, während andere Exporte ';' nutzen.
+    """
+    if sample.count(";") >= sample.count(","):
+        return ";"
+    return ","
+
+
+def read_timeseries_first_col_time_flexible(
+    csv_path: str,
+    value_col_1_based: int,
+    delimiter: str | None = None,
+    dt_formats: tuple[str, ...] = BASELOAD_DT_FORMATS,
+) -> tuple[dict[datetime, float], dict[tuple[int, int, int, int], float]]:
+    """
+    Diese Funktion liest eine Zeitreihe aus einer CSV-Datei mit flexibler Formatunterstützung.
+
+    Erwartung:
+      - Spalte 1: Timestamp
+      - value_col_1_based: Wertespalte (1-basiert)
+
+    Rückgabe:
+      1) exact_map: {datetime -> value}
+         - exakte Zeitstempel aus der Datei (für direkte Matches)
+      2) mdhm_map: {(month, day, hour, minute) -> value}
+         - Jahres-unabhängige Abbildung (für Fälle, in denen die Datei z.B. 2018 enthält,
+           die Simulation aber 2025/2026 läuft).
+
+    Zahlen werden über parse_number_de_or_en() robust geparst.
+    """
+    if not isinstance(value_col_1_based, int) or value_col_1_based < 2:
+        raise ValueError("value_col_1_based muss int >= 2 sein.")
+
+    exact_map: dict[datetime, float] = {}
+    mdhm_map: dict[tuple[int, int, int, int], float] = {}
+
+    with open(csv_path, "r", encoding="utf-8-sig") as f:
+        if delimiter is None:
+            head = f.read(4096)
+            f.seek(0)
+            delimiter = _sniff_delimiter(head)
+
+        reader = csv.reader(f, delimiter=delimiter)
+
+        for row in reader:
+            if not row or len(row) < value_col_1_based:
+                continue
+
+            t_raw = (row[0] or "").strip()
+            v_raw = (row[value_col_1_based - 1] or "").strip()
+
+            # Header/Leerzeilen robust ignorieren
+            if not t_raw or t_raw.lower() in ("datetime", "timestamp", "time", "date"):
+                continue
+            if not v_raw or v_raw == "-":
+                continue
+
+            ts = None
+            for fmt in dt_formats:
+                try:
+                    ts = datetime.strptime(t_raw, fmt)
+                    break
+                except ValueError:
+                    pass
+            if ts is None:
+                try:
+                    ts = datetime.fromisoformat(t_raw)
+                except Exception:
+                    continue
+
+            try:
+                val = parse_number_de_or_en(v_raw)
+            except ValueError:
+                continue
+
+            exact_map[ts] = float(val)
+            mdhm_map[(ts.month, ts.day, ts.hour, ts.minute)] = float(val)
+
+    if not exact_map:
+        raise ValueError(f"Keine gültigen Datenzeilen im CSV gefunden: {csv_path}")
+
+    return exact_map, mdhm_map
+
+
+def lookup_signal_with_mdhm_fallback(
+    exact_map: dict[datetime, float],
+    mdhm_map: dict[tuple[int, int, int, int], float],
+    ts: datetime,
+    resolution_min: int,
+) -> float | None:
+    """
+    Diese Funktion führt einen zweistufigen Lookup durch:
+
+      1) exakter Lookup auf das Raster (datetime inklusive Jahr)
+      2) Fallback-Lookup auf Basis (Monat, Tag, Stunde, Minute), d.h. jahresunabhängig
+
+    Dadurch kann ein Jahresprofil aus einem beliebigen Jahr (z.B. 2018)
+    als "Shape" für eine Simulation in 2025/2026 genutzt werden.
+
+    Sonderfall:
+      - 29.02. wird auf 28.02. gemappt, wenn kein eigener 29.02.-Wert existiert.
+    """
+    t0 = floor_to_resolution(ts, resolution_min)
+
+    v = exact_map.get(t0, None)
+    if v is not None:
+        return v
+
+    key = (t0.month, t0.day, t0.hour, t0.minute)
+    v2 = mdhm_map.get(key, None)
+    if v2 is not None:
+        return v2
+
+    if t0.month == 2 and t0.day == 29:
+        return mdhm_map.get((2, 28, t0.hour, t0.minute), None)
+
+    return None
+
 
 def read_strategy_series_from_csv_first_col_time(
     csv_path: str,
@@ -958,52 +1108,106 @@ def build_base_load_series(
     base_load_resolution_min: int = 15,
 ) -> np.ndarray | None:
     """
-    Diese Funktion baut eine Basislast-Zeitreihe (kW) für den Standort.
+    Diese Funktion baut eine Grundlast-Zeitreihe (intern kW) für den Standort.
 
     Priorität:
-      1) base_load_csv (wenn gesetzt)
-      2) base_load_kw (konstant)
+      1) site.base_load_csv (wenn gesetzt)
+      2) site.base_load_kw (konstant)
       3) sonst: None
+
+    Interpretation und Skalierung:
+      - unit == "kWh":
+          Die CSV-Werte werden als Energie pro Zeitschritt interpretiert (kWh/Step).
+          Typischer HTW-Fall:
+            - Die Jahres-Summe der Steps ist ungefähr 1000 kWh/a (Normierung).
+            - base_load_annual ist der Standort-Jahresverbrauch [kWh/a].
+            - Skalierung: step_kWh_scaled = step_kWh * (base_load_annual / 1000)
+            - Umrechnung: step_kW = step_kWh_scaled / step_hours
+
+      - unit == "kW":
+          Die CSV-Werte werden als mittlere Leistung pro Zeitschritt interpretiert.
+          base_load_annual ist dann ein Ziel-Mittelwert [kW].
+          Das Profil wird auf diesen Mittelwert skaliert (Shape bleibt gleich).
+
+    Zusätzlich:
+      - Für Gebäudeprofile wird ein jahresunabhängiger Lookup unterstützt (Monat/Tag/Uhrzeit),
+        damit z.B. ein Profil aus 2018 für eine Simulation in 2025 nutzbar ist.
     """
     if not timestamps:
         return None
 
     site_cfg = scenario.get("site", {}) or {}
 
+    # ------------------------------------------------------------
+    # (1) CSV-basierte Grundlast (Gebäudeprofil)
+    # ------------------------------------------------------------
     base_load_csv = site_cfg.get("base_load_csv", None)
     if base_load_csv:
-        base_load_col = site_cfg.get("base_load_value_col", None)
-        base_load_unit = str(site_cfg.get("base_load_unit", "") or "").strip()
+        col_1_based = site_cfg.get("base_load_value_col", None)
+        unit = str(site_cfg.get("base_load_unit", "") or "").strip()
+        annual = site_cfg.get("base_load_annual", None)
 
-        if not isinstance(base_load_col, int) or base_load_col < 2:
+        if not isinstance(col_1_based, int) or col_1_based < 2:
             raise ValueError("'site.base_load_value_col' fehlt/ungültig (int >= 2).")
-        if base_load_unit not in ("kW", "kWh", "MWh"):
-            raise ValueError("'site.base_load_unit' muss kW, kWh oder MWh sein.")
+        if unit not in ("kW", "kWh"):
+            raise ValueError("'site.base_load_unit' muss 'kW' oder 'kWh' sein.")
+        if annual is None:
+            raise ValueError("'site.base_load_annual' fehlt (für Skalierung erforderlich).")
 
         csv_path = resolve_path_relative_to_scenario(scenario, str(base_load_csv))
-        base_map = read_strategy_series_from_csv_first_col_time(
+
+        # Flexibles Einlesen (Delimiter auto, ISO-Timestamps, deutsches Zahlenformat)
+        exact_map, mdhm_map = read_timeseries_first_col_time_flexible(
             csv_path=csv_path,
-            value_col_1_based=int(base_load_col),
-            delimiter=";",
+            value_col_1_based=int(col_1_based),
+            delimiter=None,
+            dt_formats=BASELOAD_DT_FORMATS,
         )
 
-        step_hours = base_load_resolution_min / 60.0
+        step_hours = float(base_load_resolution_min) / 60.0
 
-        series_kw = np.full(len(timestamps), np.nan, dtype=float)
+        raw = np.full(len(timestamps), np.nan, dtype=float)
         for i, ts in enumerate(timestamps):
-            v = lookup_signal(base_map, ts, base_load_resolution_min)
+            v = lookup_signal_with_mdhm_fallback(
+                exact_map=exact_map,
+                mdhm_map=mdhm_map,
+                ts=ts,
+                resolution_min=base_load_resolution_min,
+            )
             if v is None:
                 continue
+            raw[i] = float(v)
 
-            if base_load_unit == "kW":
-                series_kw[i] = float(v)
-            elif base_load_unit == "kWh":
-                series_kw[i] = float(v) / step_hours
-            else:
-                series_kw[i] = float(v) * 1000.0 / step_hours
+        if np.all(np.isnan(raw)):
+            raise ValueError(
+                "Grundlast-CSV konnte nicht auf Simulationszeitachse gemappt werden "
+                f"(CSV: {csv_path}). Prüfe Zeitstempel/Delimiter."
+            )
 
-        return series_kw
+        # --- Einheit kWh: HTW-Profile als kWh/Step, typ. 1000 kWh/a normiert ---
+        if unit == "kWh":
+            annual_kwh = float(annual)
+            if annual_kwh <= 0:
+                raise ValueError("'site.base_load_annual' muss > 0 sein (kWh/a).")
 
+            scale = annual_kwh / 1000.0
+            series_kw = (raw * scale) / step_hours
+            return series_kw.astype(float)
+
+        # --- Einheit kW: Profil ist direkt Leistung, Skalierung auf Zielmittelwert ---
+        series_kw = raw.copy()
+
+        target_mean_kw = float(annual)
+        if target_mean_kw > 0:
+            current_mean = float(np.nanmean(series_kw))
+            if current_mean > 1e-9:
+                series_kw = series_kw * (target_mean_kw / current_mean)
+
+        return series_kw.astype(float)
+
+    # ------------------------------------------------------------
+    # (2) Konstante Grundlast
+    # ------------------------------------------------------------
     base_load_kw = site_cfg.get("base_load_kw", None)
     if base_load_kw is not None:
         return np.full(len(timestamps), float(base_load_kw), dtype=float)
