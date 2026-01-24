@@ -1,7 +1,7 @@
 site_type: office      # Standort des Ladepunkts
 
 time_resolution_min: 15          # Zeitschritt, in der die Simulation berechnet wird
-simulation_horizon_days: 2       # gewünschter Analysehorizont in Tagen
+simulation_horizon_days: 3       # gewünschter Analysehorizont in Tagen
 
 start_datetime: "2025-12-01 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen soll
 holidays:
@@ -11,9 +11,9 @@ holidays:
      
 
 site:
-  number_chargers: 15                                         # Anzahl der Ladepunkte am Standort
+  number_chargers: 9                                         # Anzahl der Ladepunkte am Standort
   rated_power_kw: 50                                         # Verfügbare Leistung pro Ladepunkt
-  grid_limit_p_avb_kw: 600                                    # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  grid_limit_p_avb_kw: 200                                    # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
   expected_sessions_per_charger_per_day: [3.0, 4.0]           # erwartete Ladevorgänge pro LP und Tag
   charger_efficiency: 0.95                                    # Verhäl0tnis Fahrzeugaufnahme zu abgegebener LP-Leistung
   allow_cross_day_charging: false                             # Ermöglicht keine Ladungen über Mitternacht hinaus
@@ -27,7 +27,7 @@ site:
   # CSV-Datei: PV-Erzeugung (generation)
   generation_strategy_csv: "../data/strategies/generation/latest.csv"      # Pfad bei vorhandenen Daten zur Stromgeneration: "../data/strategies//generation/latest.csv"
   generation_strategy_value_col: 3                             # Spalte, die entsprechende Werte ("MWh", "kWh", o.ä.) enthalten, woran sich die Lademanagementstrategie richtet (1-basierter Code: 1 = erste Spalte)
-  generation_strategy_unit: "kW"                               # Einheit, die für den Wert im Lademanagement verwendet wird ("MWh", "kWh", "kW", "€/MWh")
+  generation_strategy_unit: "MWh"                               # Einheit, die für den Wert im Lademanagement verwendet wird ("MWh", "kWh", "kW", "€/MWh")
   
   # CSV-Datei: Marktpreise (market)
   market_strategy_csv: "../data/strategies/market/latest.csv"         # Pfad bei vorhandenen Daten zu Strompreisen: "../data/strategies//market/latest.csv"

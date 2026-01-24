@@ -1816,7 +1816,60 @@ def run_step_immediate(
 
 
 # =============================================================================
-# 12) Lademanagement: Market
+# 11) Lademanagement: Immediate  (KORRIGIERT: EV-Budget statt Grid-Limit)
+# =============================================================================
+
+def run_step_immediate(
+    ts: datetime,
+    i: int,
+    present_sessions: list[dict[str, Any]],
+    ev_budget_kw_now: float,   # ✅ war: grid_limit_p_avb_kw
+    rated_power_kw: float,
+    time_step_hours: float,
+    charger_efficiency: float,
+) -> float:
+    """
+    Immediate nach FCFS-Plug-In + Fair-Share (Water-Filling).
+
+    KORREKTUR:
+      - Nicht mehr "grid_limit_p_avb_kw" (reines Importlimit),
+        sondern "ev_budget_kw_now" (PV + GridLimit - Base) verwenden.
+      - Damit ist die Verteilung physikalisch konsistent zur Standortbilanz.
+
+    Regel:
+      - Alle anwesenden, eingesteckten Sessions werden berücksichtigt.
+      - Budget = ev_budget_kw_now (kW) für EV in diesem Schritt.
+      - Verteilung per Water-Filling.
+    """
+    if not present_sessions:
+        return 0.0
+
+    total_budget_kw = max(0.0, float(ev_budget_kw_now))
+    if total_budget_kw <= 1e-9:
+        return 0.0
+
+    alloc = allocate_power_water_filling(
+        sessions=present_sessions,
+        total_budget_kw=total_budget_kw,
+        rated_power_kw=rated_power_kw,
+        time_step_hours=time_step_hours,
+        charger_efficiency=charger_efficiency,
+    )
+
+    total_power_kw = apply_energy_update(
+        ts=ts,
+        sessions=present_sessions,
+        power_alloc_kw=alloc,
+        time_step_hours=time_step_hours,
+        charger_efficiency=charger_efficiency,
+        mode_label="immediate",
+    )
+
+    return float(total_power_kw)
+
+
+# =============================================================================
+# 12) Lademanagement: Market  (KORRIGIERT: EV-Budget statt Grid-Limit)
 # =============================================================================
 
 def run_step_market(
@@ -1828,7 +1881,7 @@ def run_step_market(
     market_map: dict[datetime, float],
     market_unit: str,
     market_reserved_kw: np.ndarray,
-    grid_limit_p_avb_kw: float,
+    ev_budget_kw_now: float,   # ✅ war: grid_limit_p_avb_kw
     rated_power_kw: float,
     time_step_hours: float,
     charger_efficiency: float,
@@ -1838,6 +1891,10 @@ def run_step_market(
 ) -> tuple[float, bool, str, bool]:
     """
     Market mit Slot-Reservierung.
+
+    KORREKTUR:
+      - Restbudget/Fallback rechnet mit ev_budget_kw_now (PV + GridLimit - Base),
+        nicht mit dem reinen Importlimit.
 
     Ablauf pro Schritt:
       1) Geplante Market-Leistung ausführen (Plan pro Session/idx).
@@ -1893,8 +1950,8 @@ def run_step_market(
         if no_plan or slack <= emergency_slack_minutes:
             fallback_candidates.append(s)
 
-    # (C) Immediate fallback mit Restbudget
-    remaining_budget = max(0.0, float(grid_limit_p_avb_kw) - float(total_power_kw))
+    # (C) Immediate fallback mit Restbudget (✅ EV-Budget)
+    remaining_budget = max(0.0, float(ev_budget_kw_now) - float(total_power_kw))
     if fallback_candidates and remaining_budget > 1e-9:
         alloc = allocate_power_water_filling(
             sessions=fallback_candidates,
@@ -1925,7 +1982,7 @@ def run_step_market(
 
 
 # =============================================================================
-# 12b) Market-Planung: Slot-Reservierung (NEU)
+# 12b) Market-Planung: Slot-Reservierung (KORRIGIERT: EV-Budget-Serie)
 # =============================================================================
 
 def unreserve_market_plan_for_sessions(
@@ -1971,7 +2028,7 @@ def plan_and_reserve_market_for_session_from_now(
     market_unit: str,
     step_hours_strategy: float,
     market_reserved_kw: np.ndarray,
-    grid_limit_p_avb_kw: float,
+    ev_budget_series_kw: np.ndarray,   # ✅ NEU: statt grid_limit_p_avb_kw
     rated_power_kw: float,
     time_step_hours: float,
     charger_efficiency: float,
@@ -1980,6 +2037,10 @@ def plan_and_reserve_market_for_session_from_now(
     Plant ab now_idx bis Abfahrt die günstigsten Slots und reserviert sie.
     Wenn Slots voll sind => nächstgünstiger Slot.
     Ergebnis steht in s["market_plan_kw_by_idx"].
+
+    KORREKTUR:
+      - Slot-Budget = ev_budget_series_kw[idx] (PV + GridLimit - Base) pro Zeitschritt,
+        nicht ein konstantes Importlimit.
     """
     e_need = float(s.get("energy_required_kwh", 0.0))
     if e_need <= 1e-9:
@@ -1998,8 +2059,8 @@ def plan_and_reserve_market_for_session_from_now(
     # 1) Alle Kandidaten-Slots im Anwesenheitsfenster bewerten
     scored: list[tuple[float, int]] = []
     for idx in range(now_idx, end_idx):
-        ts = time_index[idx]
-        raw = lookup_signal(market_map, ts, market_resolution_min)
+        ts_i = time_index[idx]
+        raw = lookup_signal(market_map, ts_i, market_resolution_min)
         if raw is None:
             continue
         price = float(
@@ -2020,9 +2081,12 @@ def plan_and_reserve_market_for_session_from_now(
     for _, idx in scored:
         if e_left <= 1e-9:
             break
+        if not (0 <= idx < len(market_reserved_kw)):
+            continue
 
-        # freie Grid-Leistung im Slot (site budget)
-        free_kw = max(0.0, float(grid_limit_p_avb_kw) - float(market_reserved_kw[idx]))
+        # ✅ freie EV-Leistung im Slot = EV-Budget(slot) - bereits reserviert(slot)
+        slot_budget = float(ev_budget_series_kw[idx]) if 0 <= idx < len(ev_budget_series_kw) else 0.0
+        free_kw = max(0.0, slot_budget - float(market_reserved_kw[idx]))
         if free_kw <= 1e-9:
             continue
 
@@ -2056,7 +2120,7 @@ def replan_market_on_event(
     market_unit: str,
     step_hours_strategy: float,
     market_reserved_kw: np.ndarray,
-    grid_limit_p_avb_kw: float,
+    ev_budget_series_kw: np.ndarray,   # ✅ NEU: statt grid_limit_p_avb_kw
     rated_power_kw: float,
     time_step_hours: float,
     charger_efficiency: float,
@@ -2066,6 +2130,9 @@ def replan_market_on_event(
       - alte Reservierungen ab now_idx entfernen
       - plugged Sessions nach Slack priorisieren
       - in Reihenfolge neu reservieren
+
+    KORREKTUR:
+      - Plant/Reserviert gegen ev_budget_series_kw (zeitvariabel) statt konstantes Limit.
     """
     plugged = [s for s in chargers if s is not None]
     if not plugged:
@@ -2104,7 +2171,7 @@ def replan_market_on_event(
             market_unit=market_unit,
             step_hours_strategy=step_hours_strategy,
             market_reserved_kw=market_reserved_kw,
-            grid_limit_p_avb_kw=grid_limit_p_avb_kw,
+            ev_budget_series_kw=ev_budget_series_kw,   # ✅
             rated_power_kw=rated_power_kw,
             time_step_hours=time_step_hours,
             charger_efficiency=charger_efficiency,
@@ -2148,6 +2215,7 @@ def clear_future_market_plan_if_finished(
 
     return changed
 
+
 def _session_step_power_cap_kw_for_energy(
     s: dict[str, Any],
     rated_power_kw: float,
@@ -2181,7 +2249,7 @@ def plan_and_reserve_market_fallback_energy_from_now(
     market_unit: str,
     step_hours_strategy: float,
     market_reserved_kw: np.ndarray,
-    grid_limit_p_avb_kw: float,
+    ev_budget_series_kw: np.ndarray,   # ✅ NEU: statt grid_limit_p_avb_kw
     rated_power_kw: float,
     time_step_hours: float,
     charger_efficiency: float,
@@ -2190,6 +2258,9 @@ def plan_and_reserve_market_fallback_energy_from_now(
     """
     Plant Market-Slots nur für fallback_energy_need_kwh (Restenergie, die PV nicht deckt).
     Schreibt in s["market_plan_kw_by_idx"] und reserviert in market_reserved_kw.
+
+    KORREKTUR:
+      - Slot-Budget = ev_budget_series_kw[idx] statt konstantes Limit.
     """
     e_need = float(fallback_energy_need_kwh)
     if e_need <= 1e-9:
@@ -2207,8 +2278,8 @@ def plan_and_reserve_market_fallback_energy_from_now(
 
     scored: list[tuple[float, int]] = []
     for idx in range(now_idx, end_idx):
-        ts = time_index[idx]
-        raw = lookup_signal(market_map, ts, market_resolution_min)
+        ts_i = time_index[idx]
+        raw = lookup_signal(market_map, ts_i, market_resolution_min)
         if raw is None:
             continue
         price = float(
@@ -2229,8 +2300,11 @@ def plan_and_reserve_market_fallback_energy_from_now(
     for _, idx in scored:
         if e_left <= 1e-9:
             break
+        if not (0 <= idx < len(market_reserved_kw)):
+            continue
 
-        free_kw = max(0.0, float(grid_limit_p_avb_kw) - float(market_reserved_kw[idx]))
+        slot_budget = float(ev_budget_series_kw[idx]) if 0 <= idx < len(ev_budget_series_kw) else 0.0
+        free_kw = max(0.0, slot_budget - float(market_reserved_kw[idx]))
         if free_kw <= 1e-9:
             continue
 
@@ -2264,7 +2338,7 @@ def replan_market_fallback_for_generation_on_event(
     market_unit: str,
     step_hours_strategy: float,
     market_reserved_kw: np.ndarray,
-    grid_limit_p_avb_kw: float,
+    ev_budget_series_kw: np.ndarray,   # ✅ NEU: statt grid_limit_p_avb_kw
     rated_power_kw: float,
     time_step_hours: float,
     charger_efficiency: float,
@@ -2273,6 +2347,9 @@ def replan_market_fallback_for_generation_on_event(
     Generation-Hybrid: Market wird NUR für Restenergie nach PV-Plan geplant.
     Voraussetzung: PV-Planung wurde vorher bereits replanned, sodass
     s["_pv_remaining_after_plan_kwh"] stimmt.
+
+    KORREKTUR:
+      - Reservierung gegen ev_budget_series_kw (zeitvariabel).
     """
     plugged = [s for s in chargers if s is not None]
     if not plugged:
@@ -2314,13 +2391,12 @@ def replan_market_fallback_for_generation_on_event(
             market_unit=str(market_unit),
             step_hours_strategy=step_hours_strategy,
             market_reserved_kw=market_reserved_kw,
-            grid_limit_p_avb_kw=grid_limit_p_avb_kw,
+            ev_budget_series_kw=ev_budget_series_kw,   # ✅
             rated_power_kw=rated_power_kw,
             time_step_hours=time_step_hours,
             charger_efficiency=charger_efficiency,
             fallback_energy_need_kwh=fallback_need,
         )
-
 
 
 # =============================================================================
@@ -2337,7 +2413,7 @@ def compute_pv_surplus_kw(
     step_hours_strategy: float,
 ) -> float:
     """
-    Diese Funktion berechnet den PV-Überschuss (kW) als:
+    PV-Überschuss (kW) als:
       pv_surplus = PV_generation - base_load
     """
     raw = lookup_signal(generation_map, ts, strategy_resolution_min)
@@ -2362,6 +2438,7 @@ def compute_pv_surplus_kw(
 
     return max(0.0, pv_kw - base_kw)
 
+
 def split_critical_sessions_market_vs_immediate(
     ts: datetime,
     critical_sessions: list[dict[str, Any]],
@@ -2377,15 +2454,6 @@ def split_critical_sessions_market_vs_immediate(
     """
     Entscheidet im Generation-Mode (critical-only Grid-Fallback), welche Sessions
     als 'market' gelabelt werden können und welche zwingend 'immediate' brauchen.
-
-    Market gilt als NICHT umsetzbar für eine Session, wenn z.B.:
-      - kein Preis-Signal vorhanden ist
-      - Slack <= hard_immediate_slack_minutes (z.B. <= 0) => jetzt sofort laden
-
-    Rückgabe:
-      - market_sessions
-      - immediate_sessions
-      - any_market_used (bool)
     """
     if not critical_sessions:
         return [], [], False
@@ -2393,12 +2461,10 @@ def split_critical_sessions_market_vs_immediate(
     if not market_enabled or market_map is None or market_unit is None:
         return [], list(critical_sessions), False
 
-    # Market-Signal muss für den aktuellen Zeitpunkt existieren
     raw_price = lookup_signal(market_map, ts, strategy_resolution_min)
     if raw_price is None:
         return [], list(critical_sessions), False
 
-    # Preis-Konvertierung (nur als Plausibilitätscheck; wir nutzen hier keine Reservierung/Planung)
     try:
         _ = convert_strategy_value_to_internal(
             charging_strategy="market",
@@ -2416,7 +2482,6 @@ def split_critical_sessions_market_vs_immediate(
         slack = float(s.get("_slack_minutes", _slack_minutes_for_session(s, ts, rated_power_kw, charger_efficiency)))
         s["_slack_minutes"] = slack
 
-        # "Market nicht umsetzbar" => harte Regel: sofort laden
         if slack <= float(hard_immediate_slack_minutes):
             immediate_sessions.append(s)
         else:
@@ -2433,7 +2498,7 @@ def run_step_generation_planned_pv_with_critical_fallback(
     present_sessions: list[dict[str, Any]],
     pv_surplus_kw_now: float,
     pv_reserved_kw: np.ndarray,
-    grid_limit_p_avb_kw: float,
+    ev_budget_kw_now: float,   # ✅ war: grid_limit_p_avb_kw (jetzt das echte EV-Budget)
     rated_power_kw: float,
     time_step_hours: float,
     charger_efficiency: float,
@@ -2448,23 +2513,17 @@ def run_step_generation_planned_pv_with_critical_fallback(
     """
     Generation-Hybrid (PV max) + Market NUR als Fallback + Immediate nur Notfall.
 
-    Reihenfolge pro Step:
-      1) PV-Plan (pv_plan_kw_by_idx)
-      2) Market-Fallback-Plan (market_plan_kw_by_idx) NUR wenn Slack > hard_immediate_slack_minutes
-      3) Immediate-Notfall für kritische oder nicht mehr market-fähige Sessions
-         (Slack <= emergency_slack_minutes ODER Slack <= hard_immediate_slack_minutes bei Restbedarf)
-
-    Physik:
-      total_power <= pv_surplus_kw_now + grid_limit_p_avb_kw
-      did_use_grid = (total_power > pv_surplus_kw_now)
+    KORREKTUR:
+      - Physikalische Obergrenze = ev_budget_kw_now (= PV + GridLimit - Base),
+        nicht pv_surplus + grid_limit (das wäre bei PV < Base zu groß).
     """
     if not present_sessions:
         return 0.0, "PV_ONLY", False, False, False
 
     pv_surplus_kw_now = float(max(0.0, pv_surplus_kw_now))
-    grid_limit_p_avb_kw = float(max(0.0, grid_limit_p_avb_kw))
+    ev_budget_kw_now = float(max(0.0, ev_budget_kw_now))
 
-    total_power_upper = pv_surplus_kw_now + grid_limit_p_avb_kw  # absolute Obergrenze für EV in diesem Step
+    total_power_upper = ev_budget_kw_now  # ✅ absolute Obergrenze für EV in diesem Step
 
     did_finish_event = False
     did_use_grid = False
@@ -2473,9 +2532,6 @@ def run_step_generation_planned_pv_with_critical_fallback(
     total_power_kw = 0.0
     mode_label = "PV_PLANNED"
 
-    # ------------------------------------------------------------
-    # Helper: finished in this sub-step?
-    # ------------------------------------------------------------
     def _mark_finished_before_after(sessions_subset: list[dict[str, Any]], before_need: dict[int, float]) -> bool:
         for s in sessions_subset:
             b = float(before_need.get(id(s), 0.0))
@@ -2792,7 +2848,6 @@ def simulate_load_profile(
     else:
         raise ValueError(f"Unbekannte charging_strategy='{charging_strategy}'")
 
-
     # ------------------------------------------------------------
     # D) Parameter & Ergebniscontainer
     # ------------------------------------------------------------
@@ -2827,18 +2882,21 @@ def simulate_load_profile(
     if base_load_series_kw is None:
         base_load_series_kw = np.zeros(n_steps, dtype=float)
 
+    # ✅ EV-Budget-Serie immer anlegen (wird für Market-Planung benötigt)
+    ev_budget_series_kw = np.zeros(n_steps, dtype=float)
 
-    # PV-Serien nur für generation
-    pv_available_kw = None          # PV-Überschuss-Budget (für EV-Laden)
-    pv_generation_kw = None         # PV-Erzeugung (ECHT aus CSV)
+    # PV-Serien
+    pv_available_kw = None          # PV-Überschuss-Budget (nur für generation)
+    pv_generation_kw = np.zeros(n_steps, dtype=float)  # ✅ immer definiert (sonst 0)
     pv_reserved_kw = None
-    base_kw_series = None           # Grundlast je Schritt (kW)
+    base_kw_series = np.zeros(n_steps, dtype=float)    # ✅ immer definiert (für Debug/Transparenz)
 
+    # ------------------------------------------------------------
+    # PV-Serien nur für generation (inkl. PV-Überschuss)
+    # ------------------------------------------------------------
     if charging_strategy == "generation" and generation_map is not None and generation_unit is not None:
         pv_available_kw = np.zeros(n_steps, dtype=float)      # Überschuss = max(0, PV - Base)
-        pv_generation_kw = np.zeros(n_steps, dtype=float)     # Erzeugung = PV (ohne Base-Abzug)
         pv_reserved_kw = np.zeros(n_steps, dtype=float)
-        base_kw_series = np.zeros(n_steps, dtype=float)
 
         for i0, ts0 in enumerate(time_index):
 
@@ -2853,7 +2911,7 @@ def simulate_load_profile(
                             charging_strategy="generation",
                             raw_value=float(raw),
                             strategy_unit=str(generation_unit),
-                            step_hours=strategy_step_hours,
+                            step_hours=strategy_step_hours,  # ✅ korrekt: strategy_step_hours
                         )
                     ),
                 )
@@ -2866,10 +2924,26 @@ def simulate_load_profile(
                 base_kw = 0.0 if np.isnan(v) else max(0.0, v)
             base_kw_series[i0] = float(base_kw)
 
-            # 3) Überschuss als EV-Budget
+            # 3) PV-Überschuss (nur Info / PV-Budget)
             pv_available_kw[i0] = float(max(0.0, pv_kw - base_kw))
 
+            # 4) EV-Budget (physikalisch korrekt, inkl. Netz)
+            #    EV <= PV + GridLimit - Base
+            ev_budget_series_kw[i0] = float(max(0.0, pv_kw + grid_limit_p_avb_kw - base_kw))
 
+    # ------------------------------------------------------------
+    # Wenn NICHT generation: EV-Budget-Serie aus PV=0 ableiten (PV-Import existiert nicht)
+    # => EV <= 0 + GridLimit - Base
+    # ------------------------------------------------------------
+    if charging_strategy != "generation":
+        for i0 in range(n_steps):
+            base_kw = float(base_load_series_kw[i0]) if base_load_series_kw is not None else 0.0
+            if np.isnan(base_kw):
+                base_kw = 0.0
+            base_kw = max(0.0, base_kw)
+            base_kw_series[i0] = float(base_kw)
+            ev_budget_series_kw[i0] = float(max(0.0, 0.0 + grid_limit_p_avb_kw - base_kw))
+        # pv_generation_kw bleibt 0 (siehe Initialisierung)
 
     # ------------------------------------------------------------
     # E) Plug-In Policy (FCFS, drive_off)
@@ -2878,7 +2952,7 @@ def simulate_load_profile(
     next_arrival_idx = 0
 
     # =============================================================================
-    # F) Zeitschritt-Simulation  (KORRIGIERT: EV-Budget berücksichtigt Base + PV)
+    # F) Zeitschritt-Simulation  (EV-Budget berücksichtigt Base + PV)
     # =============================================================================
     for i, ts in enumerate(time_index):
         # --------------------------------------------------------
@@ -2902,38 +2976,36 @@ def simulate_load_profile(
         # Sessions, die jetzt physisch anwesend sind + noch Bedarf haben
         present_sessions = get_present_plugged_sessions(ts, chargers)
         charging_count_series.append(len(present_sessions))
-        
+
         # --------------------------------------------------------
         # Reset: Step-spezifische Felder für alle belegten Sessions
         # --------------------------------------------------------
         for s in chargers:
             if s is not None:
-                s["_actual_power_kw"] = 0.0   
+                s["_actual_power_kw"] = 0.0
                 s["_last_mode"] = None
                 s["_power_by_mode_kw_step"] = {}
 
         # --------------------------------------------------------
-        # 2) Step-Größen (Base / PV) + KORREKTES EV-BUDGET
+        # 2) Step-Größen (Base / PV) + EV-BUDGET
         # --------------------------------------------------------
         base_kw_now = float(base_load_series_kw[i]) if base_load_series_kw is not None else 0.0
         if np.isnan(base_kw_now):
             base_kw_now = 0.0
         base_kw_now = max(0.0, base_kw_now)
 
-        pv_gen_now = 0.0
-        if pv_generation_kw is not None:
-            pv_gen_now = float(pv_generation_kw[i])
-            if np.isnan(pv_gen_now):
-                pv_gen_now = 0.0
+        pv_gen_now = float(pv_generation_kw[i]) if pv_generation_kw is not None else 0.0
+        if np.isnan(pv_gen_now):
+            pv_gen_now = 0.0
         pv_gen_now = max(0.0, pv_gen_now)
 
-        # PV-Überschuss (nur Info/Debug; für generation kommt pv_available_kw ohnehin schon als max(0, PV-Base))
+        # PV-Überschuss (nur Info/Debug)
         pv_surplus_kw_now = max(0.0, pv_gen_now - base_kw_now)
 
-        # ✅ Korrektes EV-Budget aus Importlimit:
+        # ✅ EV-Budget aus Importlimit:
         # grid_import = max(0, (EV + Base) - PV) <= grid_limit
         # => EV <= PV + grid_limit - Base
-        ev_budget_kw_now = max(0.0, float(pv_gen_now) + float(grid_limit_p_avb_kw) - float(base_kw_now))
+        ev_budget_kw_now = float(ev_budget_series_kw[i])
 
         # --------------------------------------------------------
         # 3) Defaults / Debug-Flags
@@ -2947,7 +3019,7 @@ def simulate_load_profile(
         did_cleanup_event = False
 
         # --------------------------------------------------------
-        # 4) Replanning-Events (optional, aber Budget-konsistent pro Step)
+        # 4) Replanning-Events (Budget-konsistent pro Step)
         # --------------------------------------------------------
         # Generation: PV-Plan replannen bei Plug/Unplug
         if charging_strategy == "generation" and pv_available_kw is not None and pv_reserved_kw is not None:
@@ -2965,10 +3037,12 @@ def simulate_load_profile(
                 )
 
         # Market-Fallback-Replanning (Generation-Hybrid) bei Plug/Unplug
-        # Hinweis: hier wird das Importlimit in der Fallback-Planung weiterhin als grid_limit_p_avb_kw interpretiert.
-        # Für volle Korrektheit über eine variable Grundlast müsstest du die Planner-Funktionen so erweitern,
-        # dass sie ein ev_budget_pro_idx (Array) bekommen. Für konstante Base ist das so bereits korrekt.
-        if charging_strategy == "generation" and market_map is not None and market_unit is not None and market_reserved_kw is not None:
+        if (
+            charging_strategy == "generation"
+            and market_map is not None
+            and market_unit is not None
+            and market_reserved_kw is not None
+        ):
             if did_plug_event or did_unplug_event:
                 replan_market_fallback_for_generation_on_event(
                     ts=ts,
@@ -2980,14 +3054,19 @@ def simulate_load_profile(
                     market_unit=str(market_unit),
                     step_hours_strategy=strategy_step_hours,
                     market_reserved_kw=market_reserved_kw,
-                    grid_limit_p_avb_kw=grid_limit_p_avb_kw,  # siehe Hinweis oben
+                    ev_budget_series_kw=ev_budget_series_kw,   # ✅ korrekt
                     rated_power_kw=rated_power_kw,
                     time_step_hours=time_step_hours,
                     charger_efficiency=charger_efficiency,
                 )
 
         # Market: replannen bei Plug/Unplug (Budget-konsistent pro Step)
-        if charging_strategy == "market" and market_map is not None and market_unit is not None and market_reserved_kw is not None:
+        if (
+            charging_strategy == "market"
+            and market_map is not None
+            and market_unit is not None
+            and market_reserved_kw is not None
+        ):
             if did_plug_event or did_unplug_event:
                 replan_market_on_event(
                     ts=ts,
@@ -2999,21 +3078,22 @@ def simulate_load_profile(
                     market_unit=str(market_unit),
                     step_hours_strategy=strategy_step_hours,
                     market_reserved_kw=market_reserved_kw,
-                    grid_limit_p_avb_kw=ev_budget_kw_now,  # ✅ wichtig: EV-Budget statt Gridlimit
+                    ev_budget_series_kw=ev_budget_series_kw,   # ✅ korrekt
                     rated_power_kw=rated_power_kw,
                     time_step_hours=time_step_hours,
                     charger_efficiency=charger_efficiency,
                 )
 
         # --------------------------------------------------------
-        # 5) Strategien anwenden (alle mit EV-Budget statt "grid_limit")
+        # 5) Strategien anwenden
         # --------------------------------------------------------
         if charging_strategy == "immediate":
             total_power_kw = 0.0
+
             if present_sessions and ev_budget_kw_now > 1e-9:
                 alloc = allocate_power_water_filling(
                     sessions=present_sessions,
-                    total_budget_kw=ev_budget_kw_now,     # ✅ korrektes EV-Budget
+                    total_budget_kw=ev_budget_kw_now,
                     rated_power_kw=rated_power_kw,
                     time_step_hours=time_step_hours,
                     charger_efficiency=charger_efficiency,
@@ -3028,7 +3108,7 @@ def simulate_load_profile(
                 )
 
             mode_label_for_debug = "IMMEDIATE_IMPORT_LIMIT"
-            did_use_grid = (total_power_kw > pv_surplus_kw_now + 1e-9)  # grobe Indikation
+            did_use_grid = (total_power_kw > pv_surplus_kw_now + 1e-9)
 
         elif charging_strategy == "market":
             did_market_event = False
@@ -3036,19 +3116,23 @@ def simulate_load_profile(
             missing_signal = (market_map is None or market_unit is None or market_reserved_kw is None)
             if missing_signal:
                 total_power_kw = 0.0
+
                 if present_sessions and ev_budget_kw_now > 1e-9:
+                    # ✅ run_step_immediate erwartet ev_budget_kw_now (nicht grid_limit_p_avb_kw)
                     total_power_kw = run_step_immediate(
                         ts=ts,
                         i=i,
                         present_sessions=present_sessions,
-                        grid_limit_p_avb_kw=ev_budget_kw_now,  
+                        ev_budget_kw_now=ev_budget_kw_now,
                         rated_power_kw=rated_power_kw,
                         time_step_hours=time_step_hours,
                         charger_efficiency=charger_efficiency,
                     )
                 mode_label_for_debug = "MARKET_MISSING_SIGNAL->IMMEDIATE"
+
             else:
                 if present_sessions and ev_budget_kw_now > 1e-9:
+                    # ✅ run_step_market erwartet ev_budget_kw_now (nicht grid_limit_p_avb_kw)
                     total_power_kw, fell_back_market_to_immediate, mode_label_for_debug, did_market_event = run_step_market(
                         ts=ts,
                         i=i,
@@ -3058,7 +3142,7 @@ def simulate_load_profile(
                         market_map=market_map,
                         market_unit=str(market_unit),
                         market_reserved_kw=market_reserved_kw,
-                        grid_limit_p_avb_kw=ev_budget_kw_now,   
+                        ev_budget_kw_now=ev_budget_kw_now,
                         rated_power_kw=rated_power_kw,
                         time_step_hours=time_step_hours,
                         charger_efficiency=charger_efficiency,
@@ -3070,23 +3154,8 @@ def simulate_load_profile(
                     mode_label_for_debug = "MARKET_IDLE"
                     total_power_kw = 0.0
 
-                # Optional: Replanning nach Cleanup/Finish (Budget-konsistent)
+                # Optional: Replanning nach Cleanup/Finish
                 if did_market_event and (i + 1) < n_steps:
-                    # Budget für i+1
-                    base_next = float(base_load_series_kw[i + 1]) if base_load_series_kw is not None else 0.0
-                    if np.isnan(base_next):
-                        base_next = 0.0
-                    base_next = max(0.0, base_next)
-
-                    pv_next = 0.0
-                    if pv_generation_kw is not None:
-                        pv_next = float(pv_generation_kw[i + 1])
-                        if np.isnan(pv_next):
-                            pv_next = 0.0
-                    pv_next = max(0.0, pv_next)
-
-                    ev_budget_next = max(0.0, pv_next + grid_limit_p_avb_kw - base_next)
-
                     replan_market_on_event(
                         ts=ts,
                         now_idx=i + 1,
@@ -3097,7 +3166,7 @@ def simulate_load_profile(
                         market_unit=str(market_unit),
                         step_hours_strategy=strategy_step_hours,
                         market_reserved_kw=market_reserved_kw,
-                        grid_limit_p_avb_kw=ev_budget_next,  # ✅
+                        ev_budget_series_kw=ev_budget_series_kw,   # ✅ korrekt
                         rated_power_kw=rated_power_kw,
                         time_step_hours=time_step_hours,
                         charger_efficiency=charger_efficiency,
@@ -3106,7 +3175,6 @@ def simulate_load_profile(
             did_use_grid = (total_power_kw > pv_surplus_kw_now + 1e-9)
 
         elif charging_strategy == "generation":
-            # Generation-Pfade bleiben weitgehend wie bei dir, weil pv_available_kw bereits (PV-Base) ist.
             missing_signal = (
                 generation_map is None
                 or generation_unit is None
@@ -3116,22 +3184,25 @@ def simulate_load_profile(
 
             if missing_signal:
                 total_power_kw = 0.0
+
                 if present_sessions and ev_budget_kw_now > 1e-9:
                     total_power_kw = run_step_immediate(
                         ts=ts,
                         i=i,
                         present_sessions=present_sessions,
-                        grid_limit_p_avb_kw=ev_budget_kw_now,  # ✅ EV-Budget statt Gridlimit
+                        ev_budget_kw_now=ev_budget_kw_now,   # ✅ korrekt
                         rated_power_kw=rated_power_kw,
                         time_step_hours=time_step_hours,
                         charger_efficiency=charger_efficiency,
                     )
                 mode_label_for_debug = "GENERATION_MISSING_SIGNAL->IMMEDIATE"
                 did_use_grid = (total_power_kw > pv_surplus_kw_now + 1e-9)
+
             else:
                 pv_surplus_kw_now = float(pv_available_kw[i])  # = max(0, PV - Base)
 
                 if present_sessions:
+                    # ✅ run_step_generation_planned... erwartet ev_budget_kw_now (nicht grid_limit_p_avb_kw)
                     total_power_kw, mode_label_for_debug, _fell_back_immediate, did_use_grid, did_finish_event = (
                         run_step_generation_planned_pv_with_critical_fallback(
                             ts=ts,
@@ -3140,7 +3211,7 @@ def simulate_load_profile(
                             present_sessions=present_sessions,
                             pv_surplus_kw_now=pv_surplus_kw_now,
                             pv_reserved_kw=pv_reserved_kw,
-                            grid_limit_p_avb_kw=grid_limit_p_avb_kw,
+                            ev_budget_kw_now=ev_budget_kw_now,  # ✅ korrekt
                             rated_power_kw=rated_power_kw,
                             time_step_hours=time_step_hours,
                             charger_efficiency=charger_efficiency,
@@ -3178,6 +3249,7 @@ def simulate_load_profile(
                     )
 
                     if market_map is not None and market_unit is not None and market_reserved_kw is not None:
+                        # ✅ Wichtig: Replanning ab nächstem Step (i+1), nicht i
                         replan_market_fallback_for_generation_on_event(
                             ts=ts,
                             now_idx=i + 1,
@@ -3188,45 +3260,43 @@ def simulate_load_profile(
                             market_unit=str(market_unit),
                             step_hours_strategy=strategy_step_hours,
                             market_reserved_kw=market_reserved_kw,
-                            grid_limit_p_avb_kw=grid_limit_p_avb_kw,
+                            ev_budget_series_kw=ev_budget_series_kw,   # ✅ korrekt
                             rated_power_kw=rated_power_kw,
                             time_step_hours=time_step_hours,
                             charger_efficiency=charger_efficiency,
                         )
+
         else:
             raise ValueError(f"Unbekannte charging_strategy='{charging_strategy}'")
 
-
         # --------------------------------------------------------
-        # 6) Ergebnis je Zeitschritt setzen (KEIN nachträglicher Clamp mehr nötig)
+        # 6) Ergebnis je Zeitschritt setzen
         # --------------------------------------------------------
         load_profile_kw[i] = float(max(0.0, total_power_kw))
 
-
         # --------------------------------------------------------
-        # 6a) PHYSIKALISCHER SPLIT: EV-Leistung aus PV vs Grid
+        # 6a) PHYSIKALISCHER SPLIT: EV-Leistung aus PV vs Grid (Standort-bilanziert)
         # --------------------------------------------------------
         # Base frisst PV zuerst → nur Überschuss kann EV decken
         pv_used_for_ev_kw = max(
             0.0,
             min(float(total_power_kw), float(pv_gen_now) - float(base_kw_now))
         )
-
         grid_used_for_ev_kw = max(0.0, float(total_power_kw) - pv_used_for_ev_kw)
-
 
         # --------------------------------------------------------
         # 7) Charger Traces
-        #   - Quelle (physikalisch): PV vs Netz  -> power_generation_kw / power_grid_kw
-        #   - Mode (strategisch): generation / market / immediate -> power_mode_*_kw
         # --------------------------------------------------------
         if record_charger_traces:
-            active = [s for s in chargers if s is not None and float(s.get("_actual_power_kw", 0.0)) > 1e-9]
-            total_active_power = sum(float(s.get("_actual_power_kw", 0.0)) for s in active)
+            active = [
+                s for s in chargers
+                if s is not None and float(s.get("_actual_power_kw", 0.0) or 0.0) > 1e-9
+            ]
+            total_active_power = sum(float(s.get("_actual_power_kw", 0.0) or 0.0) for s in active)
 
             pv_ratio = 0.0
             if total_active_power > 1e-9:
-                pv_ratio = min(1.0, pv_used_for_ev_kw / total_active_power)
+                pv_ratio = min(1.0, float(pv_used_for_ev_kw) / float(total_active_power))
 
             for cid, s in enumerate(chargers):
                 if s is None:
@@ -3242,14 +3312,10 @@ def simulate_load_profile(
                             "soc_raw": np.nan,
                             "soc_arrival": np.nan,
 
-                            # Gesamtleistung
                             "power_kw": 0.0,
-
-                            # Quelle (physikalisch)
                             "power_generation_kw": 0.0,
                             "power_grid_kw": 0.0,
 
-                            # Mode (strategisch)
                             "power_mode_generation_kw": 0.0,
                             "power_mode_market_kw": 0.0,
                             "power_mode_immediate_kw": 0.0,
@@ -3257,17 +3323,11 @@ def simulate_load_profile(
                     )
                     continue
 
-                # -----------------------------
-                # Gesamtleistung am Ladepunkt
-                # -----------------------------
                 p = float(s.get("_actual_power_kw", 0.0) or 0.0)
                 if np.isnan(p) or p < 0.0:
                     p = 0.0
 
-                # -----------------------------
-                # SoC-Rekonstruktion (raw + clipped)
-                # -----------------------------
-                delivered = float(s.get("delivered_energy_kwh", 0.0))
+                delivered = float(s.get("delivered_energy_kwh", 0.0) or 0.0)
                 cap = float(s.get("battery_capacity_kwh", np.nan))
                 soc_arr = float(s.get("soc_arrival", np.nan))
                 soc_target = float(s.get("soc_target", 1.0))
@@ -3278,25 +3338,14 @@ def simulate_load_profile(
                     soc_raw = soc_arr + delivered / cap
                     soc_clipped = min(soc_raw, soc_target)
 
-                # -----------------------------
-                # Quelle (physikalisch): PV/Grid Split proportional
-                # -----------------------------
                 pv_p = p * pv_ratio
                 grid_p = max(0.0, p - pv_p)
 
-                # -----------------------------
-                # Mode (strategisch): kommt aus apply_energy_update(...):
-                # s["_power_by_mode_kw_step"] enthält pro Step die zugewiesene Leistung je Mode
-                # (generation / market / immediate) – kann auch leer sein.
-                # -----------------------------
                 p_mode = s.get("_power_by_mode_kw_step", {}) or {}
-                p_mode_gen = float(p_mode.get("generation", 0.0))
-                p_mode_market = float(p_mode.get("market", 0.0))
-                p_mode_imm = float(p_mode.get("immediate", 0.0))
+                p_mode_gen = float(p_mode.get("generation", 0.0) or 0.0)
+                p_mode_market = float(p_mode.get("market", 0.0) or 0.0)
+                p_mode_imm = float(p_mode.get("immediate", 0.0) or 0.0)
 
-                # Robust: keine negativen / NaNs
-                for _name, _val in (("gen", p_mode_gen), ("market", p_mode_market), ("imm", p_mode_imm)):
-                    pass
                 if np.isnan(p_mode_gen) or p_mode_gen < 0.0:
                     p_mode_gen = 0.0
                 if np.isnan(p_mode_market) or p_mode_market < 0.0:
@@ -3316,78 +3365,56 @@ def simulate_load_profile(
                         "soc_raw": soc_raw,
                         "soc_arrival": float(s.get("soc_arrival", np.nan)),
 
-                        # Gesamtleistung
                         "power_kw": p,
-
-                        # Quelle (physikalisch)
                         "power_generation_kw": pv_p,
                         "power_grid_kw": grid_p,
 
-                        # Mode (strategisch)
                         "power_mode_generation_kw": p_mode_gen,
                         "power_mode_market_kw": p_mode_market,
                         "power_mode_immediate_kw": p_mode_imm,
                     }
                 )
 
-
-
-        if record_debug:
-            site_load_kw_now = float(load_profile_kw[i]) + float(base_kw_now)
-            grid_import_kw_site = max(0.0, site_load_kw_now - float(pv_gen_now))
-
-            debug_rows.append(
-                {
-                    "ts": ts,
-                    "mode": mode_label_for_debug,
-                    "ev_power_kw": float(load_profile_kw[i]),
-                    "base_load_kw": float(base_kw_now),
-                    "site_load_kw": float(site_load_kw_now),
-                    "pv_generation_kw": float(pv_gen_now),
-                    "pv_surplus_kw": float(pv_surplus_kw_now),
-                    "grid_import_kw_site": float(grid_import_kw_site),
-                    "ev_budget_kw": float(ev_budget_kw_now), 
-                    "did_use_grid": bool(did_use_grid),
-                    "did_finish_event": bool(did_finish_event),
-                    "did_cleanup_event": bool(did_cleanup_event),
-                    "fell_back_market_to_immediate": bool(fell_back_market_to_immediate),
-                    "pv_used_for_ev_kw": float(pv_used_for_ev_kw),
-                    "grid_used_for_ev_kw": float(grid_used_for_ev_kw),
-                }
-            )
-
+        # --------------------------------------------------------
+        # Reset: Step-spezifische Felder NACH dem Trace-Logging
+        # --------------------------------------------------------
+        for s in chargers:
+            if s is not None:
+                s["_actual_power_kw"] = 0.0
+                s["_last_mode"] = None
+                s["_power_by_mode_kw_step"] = {}
 
         # --------------------------------------------------------
         # 7) Debug-Row je Zeitschritt
         # --------------------------------------------------------
         if record_debug:
             site_load_kw_now = float(total_power_kw) + float(base_kw_now)
+            grid_import_kw_site = max(0.0, site_load_kw_now - float(pv_gen_now))
 
-            row = {
-                "ts": ts,
-                "mode": mode_label_for_debug,
+            debug_rows.append(
+                {
+                    "ts": ts,
+                    "mode": mode_label_for_debug,
 
-                # explizit loggen (verhindert Missverständnisse in Plots)
-                "ev_power_kw": float(total_power_kw),
-                "base_load_kw": float(base_kw_now),
-                "site_load_kw": float(site_load_kw_now),
+                    "ev_power_kw": float(total_power_kw),
+                    "base_load_kw": float(base_kw_now),
+                    "site_load_kw": float(site_load_kw_now),
 
-                # PV (immer sinnvoll zu sehen, auch wenn 0)
-                "pv_generation_kw": float(pv_gen_now),
-                "pv_surplus_kw": float(pv_surplus_kw_now),
+                    "pv_generation_kw": float(pv_gen_now),
+                    "pv_surplus_kw": float(pv_surplus_kw_now),
 
-                # physikalisch korrekt (wenn oben in generation so berechnet)
-                "grid_import_kw_site": float(grid_import_kw_site),
+                    "grid_import_kw_site": float(grid_import_kw_site),
+                    "ev_budget_kw": float(ev_budget_kw_now),
 
-                # optional Flags
-                "did_use_grid": bool(did_use_grid),
-                "did_finish_event": bool(did_finish_event),
-                "did_cleanup_event": bool(did_cleanup_event),
-                "fell_back_market_to_immediate": bool(fell_back_market_to_immediate),
-            }
+                    "did_use_grid": bool(did_use_grid),
+                    "did_finish_event": bool(did_finish_event),
+                    "did_cleanup_event": bool(did_cleanup_event),
+                    "fell_back_market_to_immediate": bool(fell_back_market_to_immediate),
 
-            debug_rows.append(row)
-
+                    "pv_used_for_ev_kw": float(pv_used_for_ev_kw),
+                    "grid_used_for_ev_kw": float(grid_used_for_ev_kw),
+                }
+            )
 
     # ------------------------------------------------------------
     # G) Strategie-Status
@@ -3412,7 +3439,6 @@ def simulate_load_profile(
         debug_rows if record_debug else None,
         charger_trace_rows if record_charger_traces else None,
     )
-
 
 
 # =============================================================================
