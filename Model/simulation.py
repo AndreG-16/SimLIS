@@ -2602,9 +2602,8 @@ def run_step_generation_planned_pv_with_critical_fallback(
             # keine Planung bekommen (weder PV noch Market) -> immediate (hilft “Lücken”)
             has_pv_plan = float((s.get("pv_plan_kw_by_idx", {}) or {}).get(i, 0.0)) > 1e-9
             has_market_plan = float((s.get("market_plan_kw_by_idx", {}) or {}).get(i, 0.0)) > 1e-9
-            no_plan = (not has_pv_plan) and (not has_market_plan)
 
-            if is_critical or market_not_feasible_anymore or no_plan:
+            if is_critical or market_not_feasible_anymore:
                 fallback_candidates.append(s)
 
         if fallback_candidates:
@@ -2682,7 +2681,7 @@ def simulate_load_profile(
     start_datetime: datetime | None = None,
     record_debug: bool = False,
     record_charger_traces: bool = False,
-    emergency_slack_minutes: float = 60.0,
+    emergency_slack_minutes: float = 30.0,
 ):
     """
     Diese Funktion führt die Lastgangsimulation aus.
@@ -3141,7 +3140,7 @@ def simulate_load_profile(
                             present_sessions=present_sessions,
                             pv_surplus_kw_now=pv_surplus_kw_now,
                             pv_reserved_kw=pv_reserved_kw,
-                            grid_limit_p_avb_kw=grid_limit_p_avb_kw,  # hier ist es wirklich Grid-Importlimit, PV ist separat
+                            grid_limit_p_avb_kw=grid_limit_p_avb_kw,
                             rated_power_kw=rated_power_kw,
                             time_step_hours=time_step_hours,
                             charger_efficiency=charger_efficiency,
