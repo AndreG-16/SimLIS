@@ -11,8 +11,8 @@ holidays:
      
 
 site:
-  number_chargers: 2                                         # Anzahl der Ladepunkte am Standort
-  rated_power_kw: 300                                         # Verfügbare Leistung pro Ladepunkt
+  number_chargers: 15                                         # Anzahl der Ladepunkte am Standort
+  rated_power_kw: 50                                         # Verfügbare Leistung pro Ladepunkt
   grid_limit_p_avb_kw: 600                                    # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
   expected_sessions_per_charger_per_day: [3.0, 4.0]           # erwartete Ladevorgänge pro LP und Tag
   charger_efficiency: 0.95                                    # Verhäl0tnis Fahrzeugaufnahme zu abgegebener LP-Leistung
@@ -54,10 +54,10 @@ site:
   base_load_kw: 50
 
   # Option B: Grundlast aus CSV-Datei (hat Vorrang gegenüber Option A)
-  base_load_csv: "../data/building_loads/office_htw_2018.csv"
-  base_load_value_col: 2          # Spalte mit dem Profilwert (1-basiert, z. B. Mean_Value)
-  base_load_unit: "kWh"           # "kWh" oder "kW"
-  base_load_annual: 50000         # jährlicher standortspezifischer Verbrauch (kWh oder kW, passend zur Einheit)
+  base_load_csv: "../data/building_loads/office_tub_2018.csv"
+  base_load_value_col: 2                                      # Spalte mit dem Profilwert (1-basiert, z. B. Mean_Value)
+  base_load_unit: "kWh"                                       # "kWh" oder "kW"
+  base_load_annual: 50000                                     # jährlicher standortspezifischer Verbrauch (kWh oder kW, passend zur Einheit)
 
 
 # =============================================================================
