@@ -35,16 +35,29 @@ site:
   market_strategy_unit: "€/MWh"                                   # Einheit, die für den Wert im Lademanagement verwendet wird (€/kWh", "€/MWh")
 
   # =============================================================================
-  # Grundlast des Standorts
+  # Grundlast des Standorts - Gebäudeprofil
   # =============================================================================
-  
+  # Die Grundlast beschreibt den zeitlich aufgelösten Stromverbrauch des Gebäudes im 15-Minuten-Raster 
+  #
+  # Wird eine CSV angegeben, wird deren Profil als zeitlicher Verlauf ("Shape") verwendet und auf den 
+  # angegebenen Standort skaliert:
+  # - base_load_unit = "kWh":
+  #     CSV-Werte sind Energie pro Zeitschritt (z. B. HTW-Profile, auf 1000 kWh/Jahr normiert).
+  #     Die Werte werden auf base_load_annual skaliert und anschließend in kW umgerechnet.
+  # - base_load_unit = "kW":
+  #     CSV-Werte sind mittlere Leistung je Zeitschritt.
+  #     Das Profil wird so skaliert, dass seine mittlere Leistung base_load_annual entspricht.
+  #
+  # Ist keine CSV angegeben, wird eine konstante Grundlast verwendet.
+
   # Option A: konstante Grundlast (kW)
   base_load_kw: 50
-  
+
   # Option B: Grundlast aus CSV-Datei (hat Vorrang gegenüber Option A)
-  base_load_csv:                                              # optional; nur für "generation": "../data/loads/base_load.csv"
-  base_load_value_col: 2                                      #  1-basiert (1=Zeit, 2..n=Wert)
-  base_load_unit: "kW"                                        # Einheit, die für den Wert der Grundlast verwendet wird ("kW", "kWh", "MWh")
+  base_load_csv: "../data/building_loads/office_htw_2018.csv"
+  base_load_value_col: 2          # Spalte mit dem Profilwert (1-basiert, z. B. Mean_Value)
+  base_load_unit: "kWh"           # "kWh" oder "kW"
+  base_load_annual: 50000         # jährlicher standortspezifischer Verbrauch (kWh oder kW, passend zur Einheit)
 
 
 # =============================================================================
@@ -52,7 +65,7 @@ site:
 # =============================================================================
 
 vehicles:
-  soc_target: 0.95                                         # Gewünschter Ladezustand am Ende des Ladeprozesses
+  soc_target: 0.95                                        # Gewünschter Ladezustand am Ende des Ladeprozesses
   vehicle_curve_csv: "../data/Ladekurven_Master.csv"      # Batteriekapazität und Ladekurve nach SOC
   fleet_mix:                                              # Gewichtung der Fahrzeugtypen - PKW & Transporter
     PKW: 0.98
