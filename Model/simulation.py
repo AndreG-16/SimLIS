@@ -2361,94 +2361,6 @@ def replan_market_fallback_for_generation_on_event(
 # 13) Lademanagement: Generation (PV) – PV-Planung + Critical-only Fallback
 # =============================================================================
 
-def compute_pv_surplus_kw(
-    ts: datetime,
-    i: int,
-    generation_map: dict[datetime, float],
-    generation_unit: str,
-    base_load_series_kw: np.ndarray | None,
-    strategy_resolution_min: int,
-    step_hours_strategy: float,
-) -> float:
-    """
-    PV-Überschuss (kW) als:
-      pv_surplus = PV_generation - base_load
-    """
-    raw = lookup_signal(generation_map, ts, strategy_resolution_min)
-    pv_kw = 0.0
-    if raw is not None:
-        pv_kw = max(
-            0.0,
-            float(
-                convert_strategy_value_to_internal(
-                    charging_strategy="generation",
-                    raw_value=float(raw),
-                    strategy_unit=str(generation_unit),
-                    step_hours=step_hours_strategy,
-                )
-            ),
-        )
-
-    base_kw = 0.0
-    if base_load_series_kw is not None:
-        v = float(base_load_series_kw[i])
-        base_kw = 0.0 if np.isnan(v) else max(0.0, v)
-
-    return max(0.0, pv_kw - base_kw)
-
-
-def split_critical_sessions_market_vs_immediate(
-    ts: datetime,
-    critical_sessions: list[dict[str, Any]],
-    market_enabled: bool,
-    market_map: dict[datetime, float] | None,
-    market_unit: str | None,
-    strategy_resolution_min: int,
-    strategy_step_hours: float,
-    rated_power_kw: float,
-    charger_efficiency: float,
-    hard_immediate_slack_minutes: float = 0.0,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
-    """
-    Entscheidet im Generation-Mode (critical-only Grid-Fallback), welche Sessions
-    als 'market' gelabelt werden können und welche zwingend 'immediate' brauchen.
-    """
-    if not critical_sessions:
-        return [], [], False
-
-    if not market_enabled or market_map is None or market_unit is None:
-        return [], list(critical_sessions), False
-
-    raw_price = lookup_signal(market_map, ts, strategy_resolution_min)
-    if raw_price is None:
-        return [], list(critical_sessions), False
-
-    try:
-        _ = convert_strategy_value_to_internal(
-            charging_strategy="market",
-            raw_value=float(raw_price),
-            strategy_unit=str(market_unit),
-            step_hours=float(strategy_step_hours),
-        )
-    except Exception:
-        return [], list(critical_sessions), False
-
-    market_sessions: list[dict[str, Any]] = []
-    immediate_sessions: list[dict[str, Any]] = []
-
-    for s in critical_sessions:
-        slack = float(s.get("_slack_minutes", _slack_minutes_for_session(s, ts, rated_power_kw, charger_efficiency)))
-        s["_slack_minutes"] = slack
-
-        if slack <= float(hard_immediate_slack_minutes):
-            immediate_sessions.append(s)
-        else:
-            market_sessions.append(s)
-
-    any_market_used = len(market_sessions) > 0
-    return market_sessions, immediate_sessions, any_market_used
-
-
 def run_step_generation_planned_pv_with_critical_fallback(
     ts: datetime,
     i: int,
@@ -2456,7 +2368,7 @@ def run_step_generation_planned_pv_with_critical_fallback(
     present_sessions: list[dict[str, Any]],
     pv_surplus_kw_now: float,
     pv_reserved_kw: np.ndarray,
-    ev_budget_kw_now: float,   # ✅ war: grid_limit_p_avb_kw (jetzt das echte EV-Budget)
+    ev_budget_kw_now: float,
     rated_power_kw: float,
     time_step_hours: float,
     charger_efficiency: float,
@@ -2660,30 +2572,6 @@ def run_step_generation_planned_pv_with_critical_fallback(
     did_use_grid = bool(total_power_kw > pv_surplus_kw_now + 1e-9)
 
     return total_power_kw, str(mode_label), bool(did_fallback_immediate), bool(did_use_grid), bool(did_finish_event)
-
-def compute_pv_generation_kw(
-    ts: datetime,
-    generation_map: dict[datetime, float],
-    generation_unit: str,
-    strategy_resolution_min: int,
-    step_hours_strategy: float,
-) -> float:
-    """
-    PV-Erzeugung (kW) aus dem Generation-CSV, ohne Abzug der Grundlast.
-    """
-    raw = lookup_signal(generation_map, ts, strategy_resolution_min)
-    if raw is None:
-        return 0.0
-
-    pv_kw = float(
-        convert_strategy_value_to_internal(
-            charging_strategy="generation",
-            raw_value=float(raw),
-            strategy_unit=str(generation_unit),
-            step_hours=step_hours_strategy,
-        )
-    )
-    return max(0.0, pv_kw)
 
 
 # =============================================================================
@@ -3740,32 +3628,6 @@ def build_strategy_signal_series(
 # -----------------------------
 # Traces -> aligned DataFrames helpers
 # -----------------------------
-def build_timeseries_index_df(
-    timestamps: list[datetime] | None,
-) -> "pd.DataFrame":
-    """
-    Baut df_ts mit einer einzigen Spalte 'ts' (DatetimeIndex-Referenz).
-    """
-    ts = pd.to_datetime(timestamps or [], errors="coerce")
-    df_ts = pd.DataFrame({"ts": ts}).dropna().reset_index(drop=True)
-    return df_ts
-
-
-def build_charger_traces_df(
-    charger_traces: list[dict[str, Any]] | None,
-) -> "pd.DataFrame":
-    """
-    Baut df_tr aus charger_traces (falls None -> leeres DF).
-    """
-
-    df_tr = pd.DataFrame(charger_traces or [])
-    if len(df_tr) == 0:
-        return df_tr
-    if "ts" in df_tr.columns:
-        df_tr["ts"] = pd.to_datetime(df_tr["ts"], errors="coerce")
-        df_tr = df_tr.dropna(subset=["ts"]).reset_index(drop=True)
-    return df_tr
-
 
 def build_plugged_sessions_preview_table(
     sessions: list[dict[str, Any]] | None,
