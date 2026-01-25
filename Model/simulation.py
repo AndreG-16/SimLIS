@@ -1,8 +1,9 @@
 import yaml
 import numpy as np
 import pandas as pd
-from pathlib import Path
+import matplotlib.pyplot as plt
 import csv
+from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime, timedelta, date
 from typing import Any
@@ -1774,50 +1775,6 @@ def get_present_plugged_sessions(
 
 # =============================================================================
 # 11) Lademanagement: Immediate
-# =============================================================================
-
-def run_step_immediate(
-    ts: datetime,
-    i: int,
-    present_sessions: list[dict[str, Any]],
-    grid_limit_p_avb_kw: float,
-    rated_power_kw: float,
-    time_step_hours: float,
-    charger_efficiency: float,
-) -> float:
-    """
-    Diese Funktion implementiert immediate nach FCFS-Plug-In + Fair-Share.
-
-    Regel:
-      - Alle anwesenden, eingesteckten Sessions werden berücksichtigt.
-      - Standort-Budget = grid_limit_p_avb_kw (import-limit, ohne PV).
-      - Verteilung per Water-Filling.
-    """
-    if not present_sessions:
-        return 0.0
-
-    total_budget_kw = max(0.0, float(grid_limit_p_avb_kw))
-    alloc = allocate_power_water_filling(
-        sessions=present_sessions,
-        total_budget_kw=total_budget_kw,
-        rated_power_kw=rated_power_kw,
-        time_step_hours=time_step_hours,
-        charger_efficiency=charger_efficiency,
-    )
-    total_power_kw = apply_energy_update(
-        ts=ts,
-        sessions=present_sessions,
-        power_alloc_kw=alloc,
-        time_step_hours=time_step_hours,
-        charger_efficiency=charger_efficiency,
-        mode_label="immediate",
-    )
-
-    return float(total_power_kw)
-
-
-# =============================================================================
-# 11) Lademanagement: Immediate  (KORRIGIERT: EV-Budget statt Grid-Limit)
 # =============================================================================
 
 def run_step_immediate(
@@ -3667,12 +3624,6 @@ def build_pv_unused_table(
     """
     Tabelle für Zeitschritte mit ungenutztem PV-Überschuss.
     """
-    try:
-        import pandas as pd
-        import numpy as np
-    except Exception:
-        return None
-
     if not debug_rows:
         return pd.DataFrame()
 
@@ -3795,8 +3746,6 @@ def build_timeseries_index_df(
     """
     Baut df_ts mit einer einzigen Spalte 'ts' (DatetimeIndex-Referenz).
     """
-    import pandas as pd
-
     ts = pd.to_datetime(timestamps or [], errors="coerce")
     df_ts = pd.DataFrame({"ts": ts}).dropna().reset_index(drop=True)
     return df_ts
@@ -3808,7 +3757,6 @@ def build_charger_traces_df(
     """
     Baut df_tr aus charger_traces (falls None -> leeres DF).
     """
-    import pandas as pd
 
     df_tr = pd.DataFrame(charger_traces or [])
     if len(df_tr) == 0:
@@ -3826,8 +3774,6 @@ def build_plugged_sessions_preview_table(
     """
     Preview-Tabelle: aktuell eingesteckte Sessions + wichtigste Felder.
     """
-    import pandas as pd
-    import numpy as np
 
     rows: list[dict[str, Any]] = []
     for s in (sessions or []):
@@ -3879,8 +3825,6 @@ def make_timeseries_df(
       3) site_load_kw = ev_load_kw + base_load_kw
       4) optionale Strategy-Signale (PV / Market) ergänzen
     """
-    import numpy as np
-    import pandas as pd
 
     df = pd.DataFrame(
         {
@@ -3956,8 +3900,7 @@ def plot_ev_power_by_source_stack(
     Aggregiert EV-Leistung nach Quelle (PV vs Netz) aus Charger-Traces und plottet gestapelt.
     Erwartete df_tr Spalten: power_generation_kw, power_grid_kw
     """
-    import pandas as pd
-    import matplotlib.pyplot as plt
+
 
     if df_tr is None or len(df_tr) == 0:
         print("plot_ev_power_by_source_stack: df_tr leer.")
@@ -4018,8 +3961,6 @@ def plot_ev_power_by_mode_stack_from_cols(
     Aggregiert EV-Leistung nach Mode (generation / market / immediate) aus Charger-Traces und plottet gestapelt.
     Erwartete df_tr Spalten: power_mode_generation_kw, power_mode_market_kw, power_mode_immediate_kw
     """
-    import pandas as pd
-    import matplotlib.pyplot as plt
 
     if df_tr is None or len(df_tr) == 0:
         print("plot_ev_power_by_mode_stack_from_cols: df_tr leer.")
@@ -4078,9 +4019,6 @@ def plot_soc_by_chargers(df_tr, charger_ids=None, start=None, end=None, use_raw=
     - pro Ladepunkt eine Farbe, Sessions als getrennte Linien
     - use_raw=True nutzt soc_raw (ungeclamped), sonst soc (clamped)
     """
-    import numpy as np
-    import pandas as pd
-    import matplotlib.pyplot as plt
 
     if df_tr is None or len(df_tr) == 0:
         print("plot_soc_by_chargers: df_tr leer.")
@@ -4182,9 +4120,6 @@ def validate_against_master_curves(
     Validiert die Simulationsleistung gegen die Master-Ladekurven.
     Verstoß: power_kw > pmax_vehicle_kw + eps_kw
     """
-    import numpy as np
-    import pandas as pd
-    import matplotlib.pyplot as plt
 
     if df_tr is None or len(df_tr) == 0:
         return pd.DataFrame(), pd.DataFrame()
@@ -4271,8 +4206,6 @@ def validate_against_master_curves(
 
 def plot_power_per_charger(df_tr, charger_id, start=None, end=None):
     """Plottet die Ladeleistung eines einzelnen Ladepunkts über die Zeit."""
-    import pandas as pd
-    import matplotlib.pyplot as plt
 
     if df_tr is None or len(df_tr) == 0:
         print("plot_power_per_charger: df_tr leer.")
@@ -4315,8 +4248,6 @@ def plot_site_overview(
       - Netzimport + Grid-Limit
       - optional: Marktpreis als 2. y-Achse
     """
-    import pandas as pd
-    import matplotlib.pyplot as plt
 
     # Farben: erwartet, dass diese global existieren (wie in deinem Notebook)
     global COLOR_LOAD, COLOR_GENERATION, COLOR_MARKET
@@ -4416,9 +4347,6 @@ def plot_site_overview(
 
 def plot_charger_power_heatmap(df_tr, charging_strategy, strategy_status, start=None, end=None):
     """Visualisiert die Ladeleistung je Ladepunkt als Heatmap."""
-    import numpy as np
-    import pandas as pd
-    import matplotlib.pyplot as plt
 
     if df_tr is None or len(df_tr) == 0:
         print("plot_charger_power_heatmap: df_tr leer.")
@@ -4472,157 +4400,3 @@ def plot_charger_power_heatmap(df_tr, charging_strategy, strategy_status, start=
     cbar.set_label("Leistung [kW]")
     plt.tight_layout()
     plt.show()
-
-
-def plot_ev_power_by_source_stack(df_tr, df_ts, title="EV-Leistung nach Quelle (PV vs Netz)"):
-    """
-    EV-Leistung nach Quelle (PV vs Netz), gestapelt.
-    Farben:
-      - PV = grün
-      - Netz = orange (soll so bleiben)
-    """
-    import pandas as pd
-    import matplotlib.pyplot as plt
-
-    global COLOR_GENERATION, COLOR_GRID, COLOR_TOTAL
-
-    if df_tr is None or len(df_tr) == 0:
-        print("plot_ev_power_by_source_stack: df_tr leer.")
-        return None
-    if df_ts is None or len(df_ts) == 0 or "ts" not in df_ts.columns:
-        print("plot_ev_power_by_source_stack: df_ts fehlt oder hat keine 'ts'.")
-        return None
-
-    d = df_tr.copy()
-    d["ts"] = pd.to_datetime(d["ts"], errors="coerce")
-    d = d.dropna(subset=["ts"]).copy()
-
-    for c in ("power_generation_kw", "power_grid_kw"):
-        if c not in d.columns:
-            d[c] = 0.0
-        d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0.0)
-
-    g = d.groupby("ts", as_index=False)[["power_generation_kw", "power_grid_kw"]].sum()
-
-    full_ts = pd.to_datetime(df_ts["ts"], errors="coerce")
-    src = g.set_index("ts").reindex(full_ts).fillna(0.0)
-
-    plt.figure(figsize=(12, 4))
-    plt.stackplot(
-        src.index,
-        src["power_generation_kw"].values,
-        src["power_grid_kw"].values,
-        labels=["EV aus PV", "EV aus Netz"],
-        colors=[COLOR_GENERATION, COLOR_GRID],
-        alpha=0.9,
-    )
-
-    total = src["power_generation_kw"] + src["power_grid_kw"]
-    plt.plot(src.index, total.values, color=COLOR_TOTAL, linewidth=1.2, label="EV gesamt")
-
-    plt.xlabel("Zeit")
-    plt.ylabel("EV-Leistung [kW]")
-    plt.title(title)
-    plt.grid(True, alpha=0.3)
-    plt.legend(loc="upper right")
-    plt.gcf().autofmt_xdate()
-    plt.tight_layout()
-    plt.show()
-
-    return src
-
-
-def plot_ev_power_by_mode_stack_from_cols(df_tr, df_ts, title="EV-Leistung nach Mode"):
-    """
-    EV-Leistung nach Mode (generation / market / immediate), gestapelt.
-    Farben:
-      - generation (PV) = grün
-      - market = blau
-      - immediate = orange
-    """
-    import pandas as pd
-    import matplotlib.pyplot as plt
-
-    global COLOR_GENERATION, COLOR_MARKET, COLOR_IMMEDIATE, COLOR_TOTAL
-
-    if df_tr is None or len(df_tr) == 0:
-        print("plot_ev_power_by_mode_stack_from_cols: df_tr leer.")
-        return None
-    if df_ts is None or len(df_ts) == 0 or "ts" not in df_ts.columns:
-        print("plot_ev_power_by_mode_stack_from_cols: df_ts fehlt oder hat keine 'ts'.")
-        return None
-
-    d = df_tr.copy()
-    d["ts"] = pd.to_datetime(d["ts"], errors="coerce")
-    d = d.dropna(subset=["ts"]).copy()
-
-    mode_cols = ("power_mode_generation_kw", "power_mode_market_kw", "power_mode_immediate_kw")
-    for c in mode_cols:
-        if c not in d.columns:
-            d[c] = 0.0
-        d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0.0)
-
-    g = d.groupby("ts", as_index=False)[list(mode_cols)].sum()
-
-    full_ts = pd.to_datetime(df_ts["ts"], errors="coerce")
-    m = g.set_index("ts").reindex(full_ts).fillna(0.0)
-
-    plt.figure(figsize=(12, 4))
-    plt.stackplot(
-        m.index,
-        m["power_mode_generation_kw"].values,
-        m["power_mode_market_kw"].values,
-        m["power_mode_immediate_kw"].values,
-        labels=["EV (Generation)", "EV (Market)", "EV (Immediate)"],
-        colors=[COLOR_GENERATION, COLOR_MARKET, COLOR_IMMEDIATE],
-        alpha=0.9,
-    )
-
-    total = m.sum(axis=1)
-    plt.plot(m.index, total.values, color=COLOR_TOTAL, linewidth=1.2, label="EV gesamt (Summe Modes)")
-
-    plt.xlabel("Zeit")
-    plt.ylabel("EV-Leistung [kW]")
-    plt.title(title)
-    plt.grid(True, alpha=0.3)
-    plt.legend(loc="upper right")
-    plt.gcf().autofmt_xdate()
-    plt.tight_layout()
-    plt.show()
-
-    return m
-
-
-def build_plugged_sessions_preview_table(sessions, n: int = 20):
-    """Baut eine kurze Preview-Tabelle der eingesteckten Sessions."""
-    import pandas as pd
-
-    if not sessions:
-        return pd.DataFrame()
-
-    plugged = [s for s in sessions if s.get("_plug_in_time") is not None]
-    if not plugged:
-        return pd.DataFrame()
-
-    plugged = sorted(plugged, key=lambda s: s.get("arrival_time"))
-    rows = []
-
-    for s in plugged[: int(n)]:
-        arr = s.get("arrival_time")
-        dep = s.get("departure_time")
-        parking_h = (dep - arr).total_seconds() / 3600.0 if (arr and dep) else None
-
-        rows.append(
-            {
-                "vehicle_name": s.get("vehicle_name", ""),
-                "date": arr.date() if arr else None,
-                "arrival_time": arr.strftime("%H:%M") if arr else None,
-                "departure_time": dep.strftime("%H:%M") if dep else None,
-                "parking_hours": round(parking_h, 2) if parking_h is not None else None,
-                "delivered_energy_kwh": round(float(s.get("delivered_energy_kwh", 0.0)), 2),
-                "remaining_energy_kwh": round(float(s.get("energy_required_kwh", 0.0)), 2),
-                "charger_id": s.get("_charger_id"),
-            }
-        )
-
-    return pd.DataFrame(rows)
