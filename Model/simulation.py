@@ -7,7 +7,8 @@ from pathlib import Path
 from dataclasses import dataclass
 from datetime import datetime, timedelta, date
 from typing import Any
-
+from typing import Optional, Union
+from zoneinfo import ZoneInfo
 
 # =============================================================================
 # Modulüberblick
@@ -24,7 +25,7 @@ from typing import Any
 
 
 # =============================================================================
-# 0) Projekt-/Pfad-Utilities
+# 0a) Projekt-/Pfad-Utilities
 # =============================================================================
 
 def resolve_path_relative_to_scenario(scenario: dict[str, Any], p: str) -> str:
@@ -44,9 +45,27 @@ def resolve_path_relative_to_scenario(scenario: dict[str, Any], p: str) -> str:
     base = Path(scenario.get("_scenario_dir", "."))
     return str((base / pp).resolve())
 
+# =============================================================================
+# 0b) Timezone-Utility
+# =============================================================================
+def get_local_tz(scenario: dict) -> ZoneInfo:
+    site = scenario.get("site", {}) or {}
+    tz_name = str(site.get("local_timezone", "Europe/Berlin") or "Europe/Berlin").strip()
+    return ZoneInfo(tz_name)
+
+def to_utc(dt_local: datetime) -> datetime:
+    if dt_local.tzinfo is None:
+        raise ValueError("to_utc() erwartet tz-aware datetime")
+    return dt_local.astimezone(ZoneInfo("UTC"))
+
+def to_local(dt_utc: datetime, tz_local: ZoneInfo) -> datetime:
+    if dt_utc.tzinfo is None:
+        raise ValueError("to_local() erwartet tz-aware datetime")
+    return dt_utc.astimezone(tz_local)
+
 
 # =============================================================================
-# 0b) Robustes Zahlen-Parsing
+# 0c) Robustes Zahlen-Parsing
 # =============================================================================
 
 def parse_number_de_or_en(raw: str) -> float:
@@ -86,7 +105,7 @@ def parse_number_de_or_en(raw: str) -> float:
 
 
 # =============================================================================
-# 0c) HTML-Statusausgabe (optional im Notebook)
+# 0d) HTML-Statusausgabe
 # =============================================================================
 
 def show_strategy_status_html(strategy: str, status: str) -> None:
@@ -450,16 +469,30 @@ def parse_holiday_dates_from_scenario(
 def determine_day_type_with_holidays(
     current_datetime: datetime,
     holiday_dates: set[date],
+    tz_local: Optional[Union[str, ZoneInfo]] = None,
 ) -> str:
     """
-    Diese Funktion klassifiziert einen Zeitpunkt als working_day/saturday/sunday_holiday.
+    Klassifiziert einen Zeitpunkt als working_day/saturday/sunday_holiday.
+
+    tz_local:
+      - None: keine Umrechnung, dt wird wie übergeben interpretiert
+      - str: z.B. "Europe/Berlin"
+      - ZoneInfo: z.B. ZoneInfo("Europe/Berlin")
     """
-    current_date = current_datetime.date()
+
+    dt = current_datetime
+
+    # Nur wenn dt tz-aware ist und tz_local gesetzt ist: nach lokal konvertieren
+    if tz_local is not None and dt.tzinfo is not None:
+        tz_obj = tz_local if isinstance(tz_local, ZoneInfo) else ZoneInfo(str(tz_local))
+        dt = dt.astimezone(tz_obj)
+
+    current_date = dt.date()
 
     if current_date in holiday_dates:
         return "sunday_holiday"
 
-    weekday_index = current_datetime.weekday()  # Mo=0 ... So=6
+    weekday_index = dt.weekday()  # Mo=0 ... So=6
     if weekday_index == 6:
         return "sunday_holiday"
     if weekday_index == 5:
@@ -469,24 +502,57 @@ def determine_day_type_with_holidays(
 
 def create_time_index(scenario: dict, start_datetime: datetime | None = None) -> list[datetime]:
     """
-    Diese Funktion erzeugt die Simulationszeitachse als Liste von datetime.
+    Erzeugt die Simulationszeitachse in: **UTC tz-aware** (Option A).
+
+    Prinzip:
+      - start_datetime aus YAML wird als **LOCAL (z.B. Europe/Berlin)** interpretiert
+      - danach **einmalig nach UTC konvertiert**
+      - interne Simulation läuft vollständig in UTC (DST-robust, lückenlos)
+
+    Vorteil:
+      - Keine fehlenden Zeitstempel bei DST (z.B. 30.03.2025 02:00–02:45)
+      - Saubere Kompatibilität mit SMARD / ENTSO-E / Marktpreisen
+      - Rechnen in UTC, Anzeigen später optional in LOCAL
     """
+    tz_local = get_local_tz(scenario)
+    tz_utc = ZoneInfo("UTC")
+
+    # ------------------------------------------------------------
+    # Startzeit bestimmen
+    # ------------------------------------------------------------
     if start_datetime is not None:
-        simulation_start_datetime = start_datetime
+        dt0 = start_datetime
     elif "start_datetime" in scenario:
-        simulation_start_datetime = datetime.fromisoformat(scenario["start_datetime"])
+        dt0 = datetime.fromisoformat(scenario["start_datetime"])
     else:
-        now = datetime.now()
-        simulation_start_datetime = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        dt0 = datetime.now(tz_local).replace(hour=0, minute=0, second=0, microsecond=0)
 
-    time_resolution_min = scenario["time_resolution_min"]
-    simulation_horizon_days = scenario["simulation_horizon_days"]
+    # ------------------------------------------------------------
+    # YAML-Zeit interpretieren:
+    # - naive datetime → als LOCAL verstehen
+    # - tz-aware → explizit nach LOCAL bringen
+    # ------------------------------------------------------------
+    if dt0.tzinfo is None:
+        dt0_local = dt0.replace(tzinfo=tz_local)
+    else:
+        dt0_local = dt0.astimezone(tz_local)
 
-    total_minutes_in_simulation = simulation_horizon_days * 24 * 60
-    number_of_time_steps = int(total_minutes_in_simulation / time_resolution_min)
+    # ------------------------------------------------------------
+    # ✅ INTERN: nach UTC konvertieren
+    # ------------------------------------------------------------
+    dt0_utc = dt0_local.astimezone(tz_utc)
 
-    time_step_delta = timedelta(minutes=time_resolution_min)
-    return [simulation_start_datetime + step_index * time_step_delta for step_index in range(number_of_time_steps)]
+    # ------------------------------------------------------------
+    # Zeitachse erzeugen (lückenlos in UTC)
+    # ------------------------------------------------------------
+    time_resolution_min = int(scenario["time_resolution_min"])
+    horizon_days = int(scenario["simulation_horizon_days"])
+
+    total_minutes = horizon_days * 24 * 60
+    n_steps = int(total_minutes / time_resolution_min)
+
+    step = timedelta(minutes=time_resolution_min)
+    return [dt0_utc + k * step for k in range(n_steps)]
 
 
 # =============================================================================
@@ -615,11 +681,52 @@ def sample_arrival_times_for_day(
     holiday_dates: set[date],
 ) -> list[datetime]:
     """
-    Diese Funktion erzeugt Ankunftszeiten für einen Tag.
-    """
-    day_type = determine_day_type_with_holidays(day_start_datetime, holiday_dates)
+    Erzeugt Ankunftszeiten für einen Tag – Option A (UTC-intern).
 
-    number_of_chargers = scenario["site"]["number_chargers"]
+    Logik:
+      1) Tageslogik (working_day/saturday/sunday_holiday) wird in LOKALER Zeit bestimmt,
+         damit Peaks (z.B. 7:30) und Feiertage korrekt sind.
+      2) Die gezogenen Ankünfte werden als lokale Zeiten erzeugt und anschließend nach UTC konvertiert.
+         → keine DST-Lücken im internen Zeitraster.
+
+    Input:
+      - day_start_datetime: kann tz-aware UTC oder tz-aware local oder naiv sein.
+        Naiv wird als LOCAL interpretiert.
+
+    Output:
+      - Liste tz-aware UTC datetimes (auf Minutenauflösung, nicht gerastert).
+    """
+    tz_local = get_local_tz(scenario)              # z.B. ZoneInfo("Europe/Berlin")
+    tz_utc = ZoneInfo("UTC")
+
+    # ------------------------------------------------------------
+    # 0) day_start_datetime robust als LOCAL interpretieren
+    # ------------------------------------------------------------
+    ds = day_start_datetime
+
+    # Falls naiv -> als lokal interpretieren
+    if ds.tzinfo is None:
+        ds_local = ds.replace(tzinfo=tz_local)
+    else:
+        # Falls tz-aware, nach lokal konvertieren
+        ds_local = ds.astimezone(tz_local)
+
+    # Sicherheit: wirklich Tagesstart (00:00 lokal) nutzen
+    ds_local = ds_local.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # ------------------------------------------------------------
+    # 1) Daytype (lokal) bestimmen
+    # ------------------------------------------------------------
+    # determine_day_type_with_holidays erwartet bei dir vermutlich naive dt.
+    # Feiertage sind date() -> lokale Sicht.
+    tz_local = get_local_tz(scenario)  # z.B. "Europe/Berlin"
+    day_type = determine_day_type_with_holidays(ds_local, holiday_dates, tz_local=tz_local)
+
+    # ------------------------------------------------------------
+    # 2) Anzahl Sessions für den Tag
+    # ------------------------------------------------------------
+    number_of_chargers = int(scenario["site"]["number_chargers"])
+
     expected_sessions_per_charger = sample_from_range(
         scenario["site"]["expected_sessions_per_charger_per_day"]
     )
@@ -632,6 +739,9 @@ def sample_arrival_times_for_day(
     if number_of_sessions_today <= 0:
         return []
 
+    # ------------------------------------------------------------
+    # 3) Mischverteilung realisieren & Minuten ziehen
+    # ------------------------------------------------------------
     templates = scenario["arrival_time_distribution"]["components_per_weekday"][day_type]
     mixture_components = realize_mixture_components(templates, allow_shift=True)
     if not mixture_components:
@@ -644,12 +754,23 @@ def sample_arrival_times_for_day(
         unit_description="minutes",
     )
 
+    # Clamp auf [0, 24h)
     sampled_minutes = np.maximum(sampled_minutes, 0.0)
     sampled_minutes = np.minimum(sampled_minutes, 24.0 * 60.0 - 1.0)
 
-    arrivals = [day_start_datetime + timedelta(minutes=float(m)) for m in sampled_minutes]
-    arrivals.sort()
-    return arrivals
+    # ------------------------------------------------------------
+    # 4) Lokale Ankunftszeiten bauen und nach UTC konvertieren
+    # ------------------------------------------------------------
+    arrivals_utc: list[datetime] = []
+    for m in sampled_minutes:
+        a_local = ds_local + timedelta(minutes=float(m))
+
+        # a_local ist tz-aware local -> nach UTC
+        a_utc = a_local.astimezone(tz_utc)
+        arrivals_utc.append(a_utc)
+
+    arrivals_utc.sort()
+    return arrivals_utc
 
 
 def sample_parking_durations(scenario: dict, number_of_sessions: int) -> np.ndarray:
@@ -774,57 +895,110 @@ def build_charging_sessions_for_day(
 def build_base_model(
     scenario: dict[str, Any],
     start_datetime: datetime | None = None,
-) -> tuple[list[datetime], list[dict[str, Any]], set[date], list[VehicleProfile]]:
+) -> tuple[list[datetime], list[dict[str, Any]], set[date], list["VehicleProfile"]]:
     """
-    Diese Funktion erzeugt das Grundmodell der Simulation.
+    Erzeugt das Grundmodell der Simulation (Session-Generierung + Flotte) – Option A (UTC-intern).
 
-    Sie übernimmt explizit die Aufgaben:
-      - Ermittlung Anzahl Ladevorgänge (Session-Count aus Distributionen),
-      - Ermittlung Start Ladevorgang (Arrival-Time-Verteilung),
-      - Ermittlung Standzeit (Parking-Duration),
-      - Ermittlung Start-SOC & benötigte Energie,
-      - Ermittlung Flotte (Vehicle Mix + Ladekurven).
+    Prinzip:
+      - time_index:       tz-aware UTC (lückenlos, keine DST-Probleme)
+      - Session-Logik:    wird in lokaler Zeit bewertet (Ankunftspeaks, Tagesgrenzen, Daytype)
+      - Session-Zeiten:   werden in UTC gespeichert (für Simulation/CSV-Lookups konsistent)
 
     Rückgabe:
-      - time_index
-      - all_sessions (ungepluggt, später per Arrival-Policy belegt)
-      - holiday_dates
-      - vehicle_profiles (für Transparenz/Debug)
+      - time_index (UTC)
+      - all_sessions (arrival/departure in UTC, noch ungepluggt)
+      - holiday_dates (lokale Daten als date())
+      - vehicle_profiles
     """
+
+    # ------------------------------------------------------------
+    # 1) Zeitachse erzeugen (UTC, tz-aware)
+    # ------------------------------------------------------------
     time_index = create_time_index(scenario, start_datetime)
 
-    simulation_start_datetime = time_index[0] if time_index else (
-        start_datetime if start_datetime is not None else
-        datetime.fromisoformat(scenario["start_datetime"]) if "start_datetime" in scenario else
-        datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    )
+    # Lokale Zeitzone (Default Berlin) + UTC
+    tz_local = ZoneInfo(scenario.get("timezone", "Europe/Berlin"))
+    tz_utc = ZoneInfo("UTC")
 
+    # Wenn kein Index da ist: früh raus (sollte praktisch nie passieren)
+    if not time_index:
+        # Holiday-Dates trotzdem sinnvoll leer zurückgeben
+        return [], [], set(), []
+
+    # ------------------------------------------------------------
+    # 2) Startzeitpunkt lokal bestimmen (für Feiertage + Tagesloop)
+    # ------------------------------------------------------------
+    # time_index[0] ist UTC -> in lokale Zeit umrechnen
+    simulation_start_local = time_index[0].astimezone(tz_local)
+
+    # Feiertage werden als lokale Datumsliste berechnet.
+    # Achtung: holidays-lib arbeitet typischerweise mit date() und ist "naiv" (ohne tz).
     holiday_dates = parse_holiday_dates_from_scenario(
         scenario=scenario,
-        simulation_start_datetime=simulation_start_datetime,
+        simulation_start_datetime=simulation_start_local.replace(tzinfo=None),
     )
 
-    vehicle_csv_path = resolve_path_relative_to_scenario(scenario, scenario["vehicles"]["vehicle_curve_csv"])
+    # ------------------------------------------------------------
+    # 3) Fahrzeugprofile laden
+    # ------------------------------------------------------------
+    vehicle_csv_path = resolve_path_relative_to_scenario(
+        scenario,
+        scenario["vehicles"]["vehicle_curve_csv"],
+    )
     vehicle_profiles = load_vehicle_profiles_from_csv(vehicle_csv_path)
     if not vehicle_profiles:
         raise ValueError("❌ Abbruch: Keine gültigen Fahrzeugprofile aus CSV geladen.")
 
+    # ------------------------------------------------------------
+    # 4) Sessions tagesweise in LOCAL erzeugen, dann nach UTC konvertieren
+    # ------------------------------------------------------------
     all_sessions: list[dict[str, Any]] = []
-    if time_index:
-        first_day_start = time_index[0].replace(hour=0, minute=0, second=0, microsecond=0)
-        horizon_days = int(scenario["simulation_horizon_days"])
-        for day_offset in range(horizon_days):
-            day_start = first_day_start + timedelta(days=day_offset)
-            all_sessions.extend(
-                build_charging_sessions_for_day(
-                    scenario=scenario,
-                    day_start_datetime=day_start,
-                    vehicle_profiles=vehicle_profiles,
-                    holiday_dates=holiday_dates,
-                )
-            )
 
+    # Tagesstart lokal auf 00:00 setzen (lokale Tagesgrenzen sind wichtig!)
+    first_day_start_local = simulation_start_local.replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+
+    horizon_days = int(scenario["simulation_horizon_days"])
+
+    for day_offset in range(horizon_days):
+        # Tagstart in lokaler Zeit
+        day_start_local = first_day_start_local + timedelta(days=day_offset)
+
+        # build_charging_sessions_for_day nutzt Arrival-/Parking-/SoC-Verteilungen
+        # und soll weiterhin in "menschlicher" lokaler Tageslogik arbeiten.
+        day_sessions = build_charging_sessions_for_day(
+            scenario=scenario,
+            day_start_datetime=day_start_local,   # LOCAL (idealerweise tz-aware)
+            vehicle_profiles=vehicle_profiles,
+            holiday_dates=holiday_dates,
+        )
+
+        # Zeiten im Session-Objekt konsistent nach UTC konvertieren
+        for s in day_sessions:
+            # arrival_time / departure_time können aus deinem Code "naiv" kommen,
+            # wenn build_charging_sessions_for_day naive dt erzeugt.
+            # -> dann als LOCAL interpretieren und nach UTC umrechnen.
+            a = s.get("arrival_time")
+            d = s.get("departure_time")
+
+            if isinstance(a, datetime):
+                if a.tzinfo is None:
+                    a = a.replace(tzinfo=tz_local)
+                s["arrival_time"] = a.astimezone(tz_utc)
+
+            if isinstance(d, datetime):
+                if d.tzinfo is None:
+                    d = d.replace(tzinfo=tz_local)
+                s["departure_time"] = d.astimezone(tz_utc)
+
+        all_sessions.extend(day_sessions)
+
+    # ------------------------------------------------------------
+    # 5) Sortieren (wichtig für FCFS Plug-In Policy)
+    # ------------------------------------------------------------
     all_sessions.sort(key=lambda s: s["arrival_time"])
+
     return time_index, all_sessions, holiday_dates, vehicle_profiles
 
 
@@ -834,23 +1008,37 @@ def build_base_model(
 
 CSV_DT_FORMATS = ("%d.%m.%Y %H:%M", "%d.%m.%y %H:%M")
 
-# NEU: zusätzliche Datumsformate, die typischerweise in HTW- oder ISO-CSVs vorkommen.
+# Zusätzliche Formate, die typischerweise in HTW- oder ISO-CSVs vorkommen
 BASELOAD_DT_FORMATS = (
     "%Y-%m-%d %H:%M:%S",
     "%Y-%m-%d %H:%M",
     *CSV_DT_FORMATS,
 )
 
+
 def _sniff_delimiter(sample: str) -> str:
     """
-    Diese Funktion versucht, den CSV-Delimiter aus einem Text-Sample zu erkennen.
-
-    Sie wird genutzt, um Gebäudeprofile robuster einlesen zu können,
-    weil HTW-Daten häufig mit ',' vorliegen, während andere Exporte ';' nutzen.
+    Versucht den CSV-Delimiter robust zu erkennen.
+    Viele Exporte nutzen ';', manche HTW/Excel-Daten ','.
     """
     if sample.count(";") >= sample.count(","):
         return ";"
     return ","
+
+
+def _parse_assume_tz(assume_tz: str | None, local_tz: ZoneInfo) -> ZoneInfo:
+    """
+    Unterstützt:
+      - "UTC"
+      - "LOCAL"
+      - IANA-TZ wie "Europe/Berlin"
+    """
+    a = (assume_tz or "UTC").strip()
+    if a.upper() == "UTC":
+        return ZoneInfo("UTC")
+    if a.upper() == "LOCAL":
+        return local_tz
+    return ZoneInfo(a)
 
 
 def read_timeseries_first_col_time_flexible(
@@ -858,34 +1046,122 @@ def read_timeseries_first_col_time_flexible(
     value_col_1_based: int,
     delimiter: str | None = None,
     dt_formats: tuple[str, ...] = BASELOAD_DT_FORMATS,
+    *,
+    assume_tz: str = "UTC",
+    local_tz: ZoneInfo | None = None,
+    map_to: str = "LOCAL",   # ✅ NEU: "LOCAL" oder "UTC" -> in welcher TZ exact_map keys liegen sollen
 ) -> tuple[dict[datetime, float], dict[tuple[int, int, int, int], float]]:
     """
-    Diese Funktion liest eine Zeitreihe aus einer CSV-Datei mit flexibler Formatunterstützung.
+    Liest CSV Zeitreihe und normalisiert Zeitstempel.
 
-    Erwartung:
-      - Spalte 1: Timestamp
-      - value_col_1_based: Wertespalte (1-basiert)
+    - assume_tz:
+        Wie naive CSV-Zeitstempel zu interpretieren sind ("UTC" oder "LOCAL").
+    - map_to:
+        In welcher Zeitzone die Keys von exact_map liegen sollen ("LOCAL" oder "UTC").
 
-    Rückgabe:
-      1) exact_map: {datetime -> value}
-         - exakte Zeitstempel aus der Datei (für direkte Matches)
-      2) mdhm_map: {(month, day, hour, minute) -> value}
-         - Jahres-unabhängige Abbildung (für Fälle, in denen die Datei z.B. 2018 enthält,
-           die Simulation aber 2025/2026 läuft).
-
-    Zahlen werden über parse_number_de_or_en() robust geparst.
+    Für deinen Usecase:
+      YAML/time_index = LOCAL (Europe/Berlin)
+      CSV = UTC
+      => assume_tz="UTC", map_to="LOCAL"
     """
     if not isinstance(value_col_1_based, int) or value_col_1_based < 2:
         raise ValueError("value_col_1_based muss int >= 2 sein.")
 
+    tz_utc = ZoneInfo("UTC")
+    if local_tz is None:
+        local_tz = ZoneInfo("Europe/Berlin")
+
+    assume = (assume_tz or "UTC").strip().upper()
+    if assume not in ("UTC", "LOCAL"):
+        raise ValueError("assume_tz muss 'UTC' oder 'LOCAL' sein.")
+
+    map_to_norm = (map_to or "LOCAL").strip().upper()
+    if map_to_norm not in ("UTC", "LOCAL"):
+        raise ValueError("map_to muss 'UTC' oder 'LOCAL' sein.")
+
     exact_map: dict[datetime, float] = {}
     mdhm_map: dict[tuple[int, int, int, int], float] = {}
+
+    def _parse_dt(raw: str) -> datetime | None:
+        raw = (raw or "").strip()
+        if not raw:
+            return None
+
+        for fmt in dt_formats:
+            try:
+                return datetime.strptime(raw, fmt)   # meist naiv
+            except ValueError:
+                pass
+
+        try:
+            return datetime.fromisoformat(raw)       # kann tz-aware sein
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------
+    # DST-Fall-Back Handling:
+    # Bei LOCAL-CSV können lokale Zeitstempel am DST-Ende "ambiguous" sein
+    # (z.B. 2025-10-26 02:15 kommt zweimal vor).
+    # Python nimmt ohne fold immer die erste Instanz (fold=0) -> die zweite fehlt dann in UTC.
+    # Lösung: wenn derselbe lokale Timestamp erneut auftaucht, setze fold=1.
+    # ------------------------------------------------------------
+    seen_local_naive_counts: dict[tuple[int, int, int, int, int], int] = {}
+
+
+    def _normalize(dt: datetime) -> tuple[datetime, datetime]:
+        """
+        Gibt (dt_utc, dt_mapped) zurück.
+        dt_mapped ist entweder UTC oder LOCAL tz-aware, je nach map_to.
+
+        WICHTIG:
+          - Bei assume_tz="LOCAL" müssen wir DST-Ambiguitäten (fold) korrekt behandeln,
+            sonst fehlen in UTC die Werte der "zweiten Stunde" beim Fall Back.
+        """
+        # ------------------------------------------------------------
+        # 1) dt -> tz-aware machen (falls naiv)
+        # ------------------------------------------------------------
+        if dt.tzinfo is None:
+            if assume == "UTC":
+                # Naiv -> UTC interpretieren
+                dt = dt.replace(tzinfo=tz_utc)
+
+            else:
+                # Naiv -> LOCAL interpretieren
+                # DST-Ambiguität prüfen (Fall Back: gleiche Uhrzeit existiert 2x)
+                key = (dt.year, dt.month, dt.day, dt.hour, dt.minute)
+
+                # Ambiguitätstest: fold=0 und fold=1 führen zu unterschiedlichem UTC-Offset
+                dt0 = dt.replace(tzinfo=local_tz, fold=0)
+                dt1 = dt.replace(tzinfo=local_tz, fold=1)
+                is_ambiguous = (dt0.utcoffset() != dt1.utcoffset())
+
+                if is_ambiguous:
+                    # erstes Auftreten -> fold=0, zweites Auftreten -> fold=1
+                    cnt = int(seen_local_naive_counts.get(key, 0))
+                    fold = 0 if cnt == 0 else 1
+                    seen_local_naive_counts[key] = cnt + 1
+                    dt = dt.replace(tzinfo=local_tz, fold=fold)
+                else:
+                    dt = dt.replace(tzinfo=local_tz)
+
+        # ------------------------------------------------------------
+        # 2) immer auch UTC-Fassung erzeugen
+        # ------------------------------------------------------------
+        dt_utc = dt.astimezone(tz_utc)
+
+        # ------------------------------------------------------------
+        # 3) "Key-TZ" für exact_map (UTC oder LOCAL)
+        # ------------------------------------------------------------
+        dt_mapped = dt_utc if map_to_norm == "UTC" else dt_utc.astimezone(local_tz)
+
+        return dt_utc, dt_mapped
+
 
     with open(csv_path, "r", encoding="utf-8-sig") as f:
         if delimiter is None:
             head = f.read(4096)
             f.seek(0)
-            delimiter = _sniff_delimiter(head)
+            delimiter = ";" if head.count(";") >= head.count(",") else ","
 
         reader = csv.reader(f, delimiter=delimiter)
 
@@ -896,37 +1172,172 @@ def read_timeseries_first_col_time_flexible(
             t_raw = (row[0] or "").strip()
             v_raw = (row[value_col_1_based - 1] or "").strip()
 
-            # Header/Leerzeilen robust ignorieren
             if not t_raw or t_raw.lower() in ("datetime", "timestamp", "time", "date"):
                 continue
             if not v_raw or v_raw == "-":
                 continue
 
-            ts = None
-            for fmt in dt_formats:
-                try:
-                    ts = datetime.strptime(t_raw, fmt)
-                    break
-                except ValueError:
-                    pass
-            if ts is None:
-                try:
-                    ts = datetime.fromisoformat(t_raw)
-                except Exception:
-                    continue
+            dt_parsed = _parse_dt(t_raw)
+            if dt_parsed is None:
+                continue
 
             try:
                 val = parse_number_de_or_en(v_raw)
             except ValueError:
                 continue
 
-            exact_map[ts] = float(val)
-            mdhm_map[(ts.month, ts.day, ts.hour, ts.minute)] = float(val)
+            dt_utc, dt_key = _normalize(dt_parsed)
+
+            # ✅ exact_map keys passend zu deinem time_index (LOCAL)
+            exact_map[dt_key] = float(val)
+
+            # ✅ mdhm_map in lokaler Tageslogik
+            dt_loc = dt_utc.astimezone(local_tz)
+            mdhm_map[(dt_loc.month, dt_loc.day, dt_loc.hour, dt_loc.minute)] = float(val)
 
     if not exact_map:
         raise ValueError(f"Keine gültigen Datenzeilen im CSV gefunden: {csv_path}")
 
     return exact_map, mdhm_map
+
+
+def read_strategy_series_from_csv_first_col_time(
+    csv_path: str,
+    value_col_1_based: int,
+    delimiter: str = ";",
+    dt_formats: tuple[str, ...] = CSV_DT_FORMATS,
+    *,
+    assume_tz: str = "UTC",
+    local_tz: ZoneInfo | None = None,
+) -> dict[datetime, float]:
+    """
+    Liest eine Strategie-Zeitreihe (Market/Generation) aus CSV:
+      - Spalte 1: Timestamp
+      - Spalte value_col_1_based: Wert
+
+    Wichtig (Option A):
+      - Rückgabe-Keys sind tz-aware UTC datetimes.
+      - Dadurch sind CSVs mit UTC-Zeitstempeln auch über DST hinweg lückenlos.
+      - Wenn CSV-Zeitstempel "lokal" sind, setze assume_tz="LOCAL" (oder nutze local_tz).
+
+    Hinweis:
+      - Das ist ein "exact map" ohne mdhm-fallback (Market i.d.R. kein Year-shape).
+      - Für Generation/BaseLoad nutzt du read_timeseries_first_col_time_flexible(...), das zusätzlich mdhm_map liefert.
+    """
+    if not isinstance(value_col_1_based, int) or value_col_1_based < 2:
+        raise ValueError("value_col_1_based muss int >= 2 sein.")
+
+    tz_utc = ZoneInfo("UTC")
+    if local_tz is None:
+        local_tz = ZoneInfo("Europe/Berlin")
+
+    assume = (assume_tz or "UTC").strip().upper()
+    if assume not in ("UTC", "LOCAL"):
+        # optional: auch echte TZ-Namen erlauben
+        try:
+            ZoneInfo(assume_tz)
+        except Exception:
+            raise ValueError("assume_tz muss 'UTC', 'LOCAL' oder ein gültiger TZ-Name (z.B. 'Europe/Berlin') sein.")
+        assume = "TZNAME"
+
+    def _parse_dt(raw: str) -> datetime | None:
+        raw = (raw or "").strip()
+        if not raw:
+            return None
+        for fmt in dt_formats:
+            try:
+                return datetime.strptime(raw, fmt)
+            except ValueError:
+                pass
+        try:
+            return datetime.fromisoformat(raw)
+        except Exception:
+            return None
+
+    def _to_utc(dt: datetime) -> datetime:
+        if dt.tzinfo is None:
+            if assume == "UTC":
+                dt = dt.replace(tzinfo=tz_utc)
+            elif assume == "LOCAL":
+                dt = dt.replace(tzinfo=local_tz)
+            else:
+                dt = dt.replace(tzinfo=ZoneInfo(assume_tz))
+        return dt.astimezone(tz_utc)
+
+    data: dict[datetime, float] = {}
+
+    with open(csv_path, "r", encoding="utf-8-sig") as f:
+        reader = csv.reader(f, delimiter=delimiter)
+        for row in reader:
+            if not row or len(row) < value_col_1_based:
+                continue
+
+            t_raw = (row[0] or "").strip()
+            v_raw = (row[value_col_1_based - 1] or "").strip()
+
+            if not t_raw or t_raw.lower() in ("datetime", "timestamp", "time", "date"):
+                continue
+            if not v_raw or v_raw == "-":
+                continue
+
+            ts = _parse_dt(t_raw)
+            if ts is None:
+                continue
+
+            try:
+                val = parse_number_de_or_en(v_raw)
+            except ValueError:
+                continue
+
+            data[_to_utc(ts)] = float(val)
+
+    if not data:
+        raise ValueError(f"Keine gültigen Datenzeilen im CSV gefunden: {csv_path}")
+
+    return data
+
+
+def read_generation_series_smard_flexible(
+    csv_path: str,
+    value_col_1_based: int,
+    dt_formats: tuple[str, ...] = CSV_DT_FORMATS,
+    *,
+    assume_tz: str | None = "UTC",
+    local_tz: ZoneInfo | None = None,
+) -> dict[datetime, float]:
+    """
+    Convenience-Wrapper (z.B. SMARD/ähnliche CSVs).
+    Erwartet: Spalte 1 Timestamp, value_col_1_based Wert.
+    """
+    exact_map, _ = read_timeseries_first_col_time_flexible(
+        csv_path=csv_path,
+        value_col_1_based=value_col_1_based,
+        delimiter=None,
+        dt_formats=dt_formats,
+        assume_tz=assume_tz,
+        local_tz=local_tz,
+    )
+    return exact_map
+
+
+def floor_to_resolution(dt: datetime, resolution_min: int) -> datetime:
+    """
+    Rundet auf das Raster ab. Bewahrt tzinfo (wichtig!).
+    """
+    discard = dt.minute % resolution_min
+    return dt.replace(minute=dt.minute - discard, second=0, microsecond=0)
+
+
+def lookup_signal(
+    strategy_map: dict[datetime, float],
+    ts: datetime,
+    resolution_min: int,
+) -> float | None:
+    """
+    Einfacher Lookup ohne Jahres-Fallback.
+    Wird für Market-Signale oder Legacy-Code genutzt.
+    """
+    return strategy_map.get(floor_to_resolution(ts, resolution_min), None)
 
 
 def lookup_signal_with_mdhm_fallback(
@@ -936,98 +1347,25 @@ def lookup_signal_with_mdhm_fallback(
     resolution_min: int,
 ) -> float | None:
     """
-    Diese Funktion führt einen zweistufigen Lookup durch:
-
-      1) exakter Lookup auf das Raster (datetime inklusive Jahr)
-      2) Fallback-Lookup auf Basis (Monat, Tag, Stunde, Minute), d.h. jahresunabhängig
-
-    Dadurch kann ein Jahresprofil aus einem beliebigen Jahr (z.B. 2018)
-    als "Shape" für eine Simulation in 2025/2026 genutzt werden.
-
-    Sonderfall:
-      - 29.02. wird auf 28.02. gemappt, wenn kein eigener 29.02.-Wert existiert.
+    1) Exakter Lookup (inkl. Jahr)
+    2) Fallback (Monat, Tag, Stunde, Minute) -> jahresunabhängig
+    Sonderfall: 29.02. -> 28.02.
     """
     t0 = floor_to_resolution(ts, resolution_min)
 
-    v = exact_map.get(t0, None)
+    v = exact_map.get(t0)
     if v is not None:
         return v
 
     key = (t0.month, t0.day, t0.hour, t0.minute)
-    v2 = mdhm_map.get(key, None)
+    v2 = mdhm_map.get(key)
     if v2 is not None:
         return v2
 
     if t0.month == 2 and t0.day == 29:
-        return mdhm_map.get((2, 28, t0.hour, t0.minute), None)
+        return mdhm_map.get((2, 28, t0.hour, t0.minute))
 
     return None
-
-
-def read_strategy_series_from_csv_first_col_time(
-    csv_path: str,
-    value_col_1_based: int,
-    delimiter: str = ";",
-) -> dict[datetime, float]:
-    """
-    Diese Funktion liest eine Zeitreihe aus einer CSV-Datei:
-      - Spalte 1: Timestamp
-      - value_col_1_based: Wertespalte (1-basiert)
-    """
-    if not isinstance(value_col_1_based, int) or value_col_1_based < 2:
-        raise ValueError("value_col_1_based muss int >= 2 sein.")
-
-    data: dict[datetime, float] = {}
-
-    with open(csv_path, "r", encoding="utf-8-sig") as f:
-        reader = csv.reader(f, delimiter=delimiter)
-
-        for row in reader:
-            if not row or len(row) < value_col_1_based:
-                continue
-
-            t_raw = (row[0] or "").strip()
-            v_raw = (row[value_col_1_based - 1] or "").strip()
-
-            if not t_raw or not v_raw or v_raw == "-":
-                continue
-
-            ts = None
-            for fmt in CSV_DT_FORMATS:
-                try:
-                    ts = datetime.strptime(t_raw, fmt)
-                    break
-                except ValueError:
-                    pass
-            if ts is None:
-                continue
-
-            try:
-                val = parse_number_de_or_en(v_raw)
-            except ValueError:
-                continue
-
-            data[ts] = float(val)
-
-    if not data:
-        raise ValueError(f"Keine gültigen Datenzeilen im CSV gefunden: {csv_path}")
-
-    return data
-
-
-def floor_to_resolution(dt: datetime, resolution_min: int) -> datetime:
-    """
-    Diese Funktion rundet einen Zeitstempel auf das Raster der Auflösung ab.
-    """
-    discard = dt.minute % resolution_min
-    return dt.replace(minute=dt.minute - discard, second=0, microsecond=0)
-
-
-def lookup_signal(strategy_map: dict[datetime, float], ts: datetime, resolution_min: int) -> float | None:
-    """
-    Diese Funktion sucht einen Signalwert, indem ts vorher auf das Raster abgerundet wird.
-    """
-    return strategy_map.get(floor_to_resolution(ts, resolution_min), None)
 
 
 def assert_strategy_csv_covers_simulation(
@@ -1036,19 +1374,49 @@ def assert_strategy_csv_covers_simulation(
     strategy_resolution_min: int,
     charging_strategy: str,
     strategy_csv_path: str,
+    *,
+    strategy_is_utc: bool = True,
 ) -> None:
     """
-    Diese Funktion prüft, ob ein Strategie-CSV den kompletten Simulationszeitraum abdeckt.
+    Prüft, ob ein Strategie-CSV den kompletten Simulationszeitraum abdeckt.
+
+    WICHTIG (Option A):
+      - time_index ist LOCAL tz-aware (Europe/Berlin)
+      - strategy_map keys sind UTC tz-aware
+      => Coverage muss daher in UTC geprüft werden, sonst "fehlt" z.B. die Stunde 00:00 LOCAL,
+         die in UTC noch 23:00 Vortag ist.
     """
     if not time_index:
         raise ValueError("Simulationszeitachse ist leer – Strategie-CSV kann nicht geprüft werden.")
+    if not strategy_map:
+        raise ValueError(f"Strategie-CSV leer/ungültig: {strategy_csv_path}")
 
-    expected_ts = [floor_to_resolution(t, strategy_resolution_min) for t in time_index]
-    expected_set = set(expected_ts)
+    tz_utc = ZoneInfo("UTC")
 
-    csv_start = min(strategy_map.keys())
-    csv_end = max(strategy_map.keys())
+    def _floor(dt: datetime) -> datetime:
+        dt = floor_to_resolution(dt, strategy_resolution_min)
+        # seconds/micros sicher entfernen
+        return dt.replace(second=0, microsecond=0)
 
+    # --- erwartete Zeitstempel: aus time_index -> UTC (wenn strategy_map UTC ist) ---
+    expected = []
+    for t in time_index:
+        if strategy_is_utc:
+            if t.tzinfo is None:
+                raise ValueError("time_index enthält naive datetimes – erwartet tz-aware LOCAL.")
+            t_cmp = t.astimezone(tz_utc)
+        else:
+            t_cmp = t
+        expected.append(_floor(t_cmp))
+
+    expected_set = set(expected)
+
+    # --- CSV keys ebenfalls auf Raster normieren ---
+    csv_keys = set(_floor(k.astimezone(tz_utc) if (strategy_is_utc and k.tzinfo is not None) else _floor(k))
+                   for k in strategy_map.keys())
+
+    csv_start = min(csv_keys)
+    csv_end = max(csv_keys)
     sim_start = min(expected_set)
     sim_end = max(expected_set)
 
@@ -1061,7 +1429,7 @@ def assert_strategy_csv_covers_simulation(
             f"Simulation:   {sim_start} bis {sim_end}\n"
         )
 
-    missing = sorted([t for t in expected_set if t not in strategy_map])
+    missing = sorted([t for t in expected_set if t not in csv_keys])
     if missing:
         preview = "\n".join([f"- {t}" for t in missing[:10]])
         raise ValueError(
@@ -1070,7 +1438,7 @@ def assert_strategy_csv_covers_simulation(
             f"CSV: {strategy_csv_path}\n"
             f"Fehlende Timestamps: {len(missing)} (erste 10):\n{preview}\n"
         )
-
+    
 
 def convert_strategy_value_to_internal(
     charging_strategy: str,
@@ -1156,15 +1524,27 @@ def build_base_load_series(
         if annual is None:
             raise ValueError("'site.base_load_annual' fehlt (für Skalierung erforderlich).")
 
+        # Pfad korrekt relativ zur YAML auflösen
         csv_path = resolve_path_relative_to_scenario(scenario, str(base_load_csv))
 
-        # Flexibles Einlesen (Delimiter auto, ISO-Timestamps, deutsches Zahlenformat)
+        # ✅ Timezone für BaseLoad aus YAML (Default: UTC)
+        # Empfehlung: eigener Key, NICHT strategy_timezone
+        tz_base = str(site_cfg.get("base_load_timezone", "UTC") or "UTC").strip()
+
+        # Lokal-TZ aus Szenario (z.B. Europe/Berlin), für tz_base="LOCAL"
+        tz_local = get_local_tz(scenario)
+
+        # CSV lesen (tz-aware, wenn du read_timeseries... entsprechend erweitert hast)
         exact_map, mdhm_map = read_timeseries_first_col_time_flexible(
             csv_path=csv_path,
             value_col_1_based=int(col_1_based),
             delimiter=None,
             dt_formats=BASELOAD_DT_FORMATS,
+            assume_tz="UTC",
+            local_tz=get_local_tz(scenario),
+            map_to="LOCAL",
         )
+
 
         step_hours = float(base_load_resolution_min) / 60.0
 
@@ -1176,14 +1556,13 @@ def build_base_load_series(
                 ts=ts,
                 resolution_min=base_load_resolution_min,
             )
-            if v is None:
-                continue
-            raw[i] = float(v)
+            if v is not None:
+                raw[i] = float(v)
 
         if np.all(np.isnan(raw)):
             raise ValueError(
                 "Grundlast-CSV konnte nicht auf Simulationszeitachse gemappt werden "
-                f"(CSV: {csv_path}). Prüfe Zeitstempel/Delimiter."
+                f"(CSV: {csv_path}). Prüfe Zeitstempel/Delimiter/Timezone."
             )
 
         # --- Einheit kWh: HTW-Profile als kWh/Step, typ. 1000 kWh/a normiert ---
@@ -1781,7 +2160,7 @@ def run_step_immediate(
     ts: datetime,
     i: int,
     present_sessions: list[dict[str, Any]],
-    ev_budget_kw_now: float,   # ✅ war: grid_limit_p_avb_kw
+    ev_budget_kw_now: float,
     rated_power_kw: float,
     time_step_hours: float,
     charger_efficiency: float,
@@ -1839,13 +2218,11 @@ def run_step_market(
     market_map: dict[datetime, float],
     market_unit: str,
     market_reserved_kw: np.ndarray,
-    ev_budget_kw_now: float,   # ✅ war: grid_limit_p_avb_kw
+    ev_budget_kw_now: float, 
     rated_power_kw: float,
     time_step_hours: float,
     charger_efficiency: float,
     emergency_slack_minutes: float,
-    strategy_resolution_min: int,
-    strategy_step_hours: float,
 ) -> tuple[float, bool, str, bool]:
     """
     Market mit Slot-Reservierung.
@@ -1986,7 +2363,7 @@ def plan_and_reserve_market_for_session_from_now(
     market_unit: str,
     step_hours_strategy: float,
     market_reserved_kw: np.ndarray,
-    ev_budget_series_kw: np.ndarray,   # ✅ NEU: statt grid_limit_p_avb_kw
+    ev_budget_series_kw: np.ndarray,
     rated_power_kw: float,
     time_step_hours: float,
     charger_efficiency: float,
@@ -2078,7 +2455,7 @@ def replan_market_on_event(
     market_unit: str,
     step_hours_strategy: float,
     market_reserved_kw: np.ndarray,
-    ev_budget_series_kw: np.ndarray,   # ✅ NEU: statt grid_limit_p_avb_kw
+    ev_budget_series_kw: np.ndarray, 
     rated_power_kw: float,
     time_step_hours: float,
     charger_efficiency: float,
@@ -2207,7 +2584,7 @@ def plan_and_reserve_market_fallback_energy_from_now(
     market_unit: str,
     step_hours_strategy: float,
     market_reserved_kw: np.ndarray,
-    ev_budget_series_kw: np.ndarray,   # ✅ NEU: statt grid_limit_p_avb_kw
+    ev_budget_series_kw: np.ndarray,
     rated_power_kw: float,
     time_step_hours: float,
     charger_efficiency: float,
@@ -2296,7 +2673,7 @@ def replan_market_fallback_for_generation_on_event(
     market_unit: str,
     step_hours_strategy: float,
     market_reserved_kw: np.ndarray,
-    ev_budget_series_kw: np.ndarray,   # ✅ NEU: statt grid_limit_p_avb_kw
+    ev_budget_series_kw: np.ndarray,
     rated_power_kw: float,
     time_step_hours: float,
     charger_efficiency: float,
@@ -2364,10 +2741,8 @@ def replan_market_fallback_for_generation_on_event(
 def run_step_generation_planned_pv_with_critical_fallback(
     ts: datetime,
     i: int,
-    time_index: list[datetime],
     present_sessions: list[dict[str, Any]],
     pv_surplus_kw_now: float,
-    pv_reserved_kw: np.ndarray,
     ev_budget_kw_now: float,
     rated_power_kw: float,
     time_step_hours: float,
@@ -2376,8 +2751,6 @@ def run_step_generation_planned_pv_with_critical_fallback(
     market_enabled: bool,
     market_map: dict[datetime, float] | None,
     market_unit: str | None,
-    strategy_resolution_min: int,
-    strategy_step_hours: float,
     hard_immediate_slack_minutes: float = 0.0,
 ) -> tuple[float, str, bool, bool, bool]:
     """
@@ -2525,10 +2898,6 @@ def run_step_generation_planned_pv_with_critical_fallback(
                 and slack <= float(hard_immediate_slack_minutes)
             )
 
-            # keine Planung bekommen (weder PV noch Market) -> immediate (hilft “Lücken”)
-            has_pv_plan = float((s.get("pv_plan_kw_by_idx", {}) or {}).get(i, 0.0)) > 1e-9
-            has_market_plan = float((s.get("market_plan_kw_by_idx", {}) or {}).get(i, 0.0)) > 1e-9
-
             if is_critical or market_not_feasible_anymore:
                 fallback_candidates.append(s)
 
@@ -2624,24 +2993,40 @@ def simulate_load_profile(
     STRATEGY_RESOLUTION_MIN = 15
     strategy_step_hours = STRATEGY_RESOLUTION_MIN / 60.0
 
-    generation_map: dict[datetime, float] | None = None
     generation_unit: str | None = None
+    generation_exact_map: dict[datetime, float] | None = None
+    generation_mdhm_map: dict[tuple[int, int, int, int], float] | None = None
 
     market_map: dict[datetime, float] | None = None
     market_unit: str | None = None
 
+    # ------------------------------------------------------------
+    # MARKET
+    # ------------------------------------------------------------
     if charging_strategy == "market":
         market_unit = str(site_cfg.get("market_strategy_unit", "") or "").strip()
         if market_unit not in ("€/MWh", "€/kWh"):
             raise ValueError("'site.market_strategy_unit' muss '€/MWh' oder '€/kWh' sein.")
 
-        market_csv = site_cfg.get("market_strategy_csv", None)
-        market_col = site_cfg.get("market_strategy_value_col", None)
+        market_csv = site_cfg.get("market_strategy_csv")
+        market_col = site_cfg.get("market_strategy_value_col")
         if not market_csv or not isinstance(market_col, int) or market_col < 2:
-            raise ValueError("Für market müssen 'market_strategy_csv' und 'market_strategy_value_col'(>=2) gesetzt sein.")
+            raise ValueError(
+                "Für market müssen 'market_strategy_csv' und "
+                "'market_strategy_value_col' (>=2) gesetzt sein."
+            )
 
         market_csv_path = resolve_path_relative_to_scenario(scenario, str(market_csv))
-        market_map = read_strategy_series_from_csv_first_col_time(market_csv_path, int(market_col), ";")
+
+        market_map = read_strategy_series_from_csv_first_col_time(
+            csv_path=market_csv_path,
+            value_col_1_based=int(market_col),
+            delimiter=";",
+            assume_tz="LOCAL",               # ✅ CSV-Zeiten als Europe/Berlin interpretieren
+            local_tz=get_local_tz(scenario), # ✅ und dann nach UTC konvertieren (Funktion macht das)
+        )
+
+
         assert_strategy_csv_covers_simulation(
             strategy_map=market_map,
             time_index=time_index,
@@ -2650,34 +3035,64 @@ def simulate_load_profile(
             strategy_csv_path=market_csv_path,
         )
 
+    # ------------------------------------------------------------
+    # GENERATION (PV)
+    # ------------------------------------------------------------
     elif charging_strategy == "generation":
         generation_unit = str(site_cfg.get("generation_strategy_unit", "") or "").strip()
         if generation_unit not in ("kW", "kWh", "MWh"):
             raise ValueError("'site.generation_strategy_unit' muss 'kW', 'kWh' oder 'MWh' sein.")
 
-        gen_csv = site_cfg.get("generation_strategy_csv", None)
-        gen_col = site_cfg.get("generation_strategy_value_col", None)
+        gen_csv = site_cfg.get("generation_strategy_csv")
+        gen_col = site_cfg.get("generation_strategy_value_col")
         if not gen_csv or not isinstance(gen_col, int) or gen_col < 2:
-            raise ValueError("Für generation müssen 'generation_strategy_csv' und 'generation_strategy_value_col'(>=2) gesetzt sein.")
+            raise ValueError(
+                "Für generation müssen 'generation_strategy_csv' und "
+                "'generation_strategy_value_col' (>=2) gesetzt sein."
+            )
 
         gen_csv_path = resolve_path_relative_to_scenario(scenario, str(gen_csv))
-        generation_map = read_strategy_series_from_csv_first_col_time(gen_csv_path, int(gen_col), ";")
+
+        # CSV wird als UTC interpretiert (SMARD / PV-Profile)
+        tz_strategy = str(site_cfg.get("strategy_timezone", "UTC") or "UTC").strip()
+
+        generation_exact_map, generation_mdhm_map = read_timeseries_first_col_time_flexible(
+            csv_path=gen_csv_path,
+            value_col_1_based=int(gen_col),
+            delimiter=None,
+            dt_formats=CSV_DT_FORMATS,
+            assume_tz="LOCAL",              # ✅ SMARD ist lokal (CET/CEST)
+            local_tz=get_local_tz(scenario),
+            map_to="UTC",                   # ✅ intern UTC
+        )
+
         assert_strategy_csv_covers_simulation(
-            strategy_map=generation_map,
+            strategy_map=generation_exact_map,
             time_index=time_index,
             strategy_resolution_min=STRATEGY_RESOLUTION_MIN,
             charging_strategy="generation",
             strategy_csv_path=gen_csv_path,
+            strategy_is_utc=True,           # ✅ bleibt so
         )
 
-        # Market-Fallback für Generation ist erlaubt, wenn Market-Signal vorhanden ist.
-        market_csv = site_cfg.get("market_strategy_csv", None)
-        market_col = site_cfg.get("market_strategy_value_col", None)
+        # --------------------------------------------------------
+        # Market-Fallback für Generation (optional)
+        # --------------------------------------------------------
+        market_csv = site_cfg.get("market_strategy_csv")
+        market_col = site_cfg.get("market_strategy_value_col")
         market_unit = str(site_cfg.get("market_strategy_unit", "") or "").strip()
 
         if market_csv and isinstance(market_col, int) and market_col >= 2 and market_unit in ("€/MWh", "€/kWh"):
             market_csv_path = resolve_path_relative_to_scenario(scenario, str(market_csv))
-            market_map = read_strategy_series_from_csv_first_col_time(market_csv_path, int(market_col), ";")
+
+            market_map = read_strategy_series_from_csv_first_col_time(
+                csv_path=market_csv_path,
+                value_col_1_based=int(market_col),
+                delimiter=";",
+                assume_tz="LOCAL",
+                local_tz=get_local_tz(scenario),
+            )
+
             assert_strategy_csv_covers_simulation(
                 strategy_map=market_map,
                 time_index=time_index,
@@ -2689,8 +3104,12 @@ def simulate_load_profile(
             market_map = None
             market_unit = None
 
+    # ------------------------------------------------------------
+    # IMMEDIATE
+    # ------------------------------------------------------------
     elif charging_strategy == "immediate":
         pass
+
     else:
         raise ValueError(f"Unbekannte charging_strategy='{charging_strategy}'")
 
@@ -2740,42 +3159,53 @@ def simulate_load_profile(
     # ------------------------------------------------------------
     # PV-Serien nur für generation (inkl. PV-Überschuss)
     # ------------------------------------------------------------
-    if charging_strategy == "generation" and generation_map is not None and generation_unit is not None:
-        pv_available_kw = np.zeros(n_steps, dtype=float)      # Überschuss = max(0, PV - Base)
-        pv_reserved_kw = np.zeros(n_steps, dtype=float)
+    if charging_strategy == "generation" and generation_unit is not None:
+        pv_available_kw = np.zeros(n_steps, dtype=float)
+        pv_reserved_kw  = np.zeros(n_steps, dtype=float)
+
+        # scale EINMAL berechnen (konstant)
+        pv_size_kwp = float(site_cfg.get("pv_system_size_kwp", 0.0) or 0.0)
+        ref_kwp     = float(site_cfg.get("pv_profile_reference_kwp", 0.0) or 0.0)
+        pv_scale    = (pv_size_kwp / ref_kwp) if (pv_size_kwp > 0.0 and ref_kwp > 0.0) else 1.0
 
         for i0, ts0 in enumerate(time_index):
 
-            # 1) PV-Erzeugung (kW) aus CSV (ohne Grundlastabzug)
-            raw = lookup_signal(generation_map, ts0, STRATEGY_RESOLUTION_MIN)
+            raw = lookup_signal_with_mdhm_fallback(
+                exact_map=generation_exact_map,
+                mdhm_map=generation_mdhm_map,
+                ts=ts0,
+                resolution_min=STRATEGY_RESOLUTION_MIN,
+            )
+
             pv_kw = 0.0
             if raw is not None:
                 pv_kw = max(
                     0.0,
-                    float(
-                        convert_strategy_value_to_internal(
-                            charging_strategy="generation",
-                            raw_value=float(raw),
-                            strategy_unit=str(generation_unit),
-                            step_hours=strategy_step_hours,  # ✅ korrekt: strategy_step_hours
-                        )
-                    ),
+                    float(convert_strategy_value_to_internal(
+                        charging_strategy="generation",
+                        raw_value=float(raw),
+                        strategy_unit=str(generation_unit),
+                        step_hours=strategy_step_hours,
+                    )),
                 )
+
+            # ✅ Skalierung anwenden
+            pv_kw *= pv_scale
             pv_generation_kw[i0] = float(pv_kw)
 
             # 2) Grundlast (kW) an diesem Schritt
-            base_kw = 0.0
-            if base_load_series_kw is not None:
-                v = float(base_load_series_kw[i0])
-                base_kw = 0.0 if np.isnan(v) else max(0.0, v)
+            base_kw = float(base_load_series_kw[i0]) if base_load_series_kw is not None else 0.0
+            if np.isnan(base_kw):
+                base_kw = 0.0
+            base_kw = max(0.0, base_kw)
             base_kw_series[i0] = float(base_kw)
 
-            # 3) PV-Überschuss (nur Info / PV-Budget)
+            # 3) PV-Überschuss
             pv_available_kw[i0] = float(max(0.0, pv_kw - base_kw))
 
-            # 4) EV-Budget (physikalisch korrekt, inkl. Netz)
-            #    EV <= PV + GridLimit - Base
+            # 4) EV-Budget
             ev_budget_series_kw[i0] = float(max(0.0, pv_kw + grid_limit_p_avb_kw - base_kw))
+
 
     # ------------------------------------------------------------
     # Wenn NICHT generation: EV-Budget-Serie aus PV=0 ableiten (PV-Import existiert nicht)
@@ -2964,7 +3394,6 @@ def simulate_load_profile(
                 total_power_kw = 0.0
 
                 if present_sessions and ev_budget_kw_now > 1e-9:
-                    # ✅ run_step_immediate erwartet ev_budget_kw_now (nicht grid_limit_p_avb_kw)
                     total_power_kw = run_step_immediate(
                         ts=ts,
                         i=i,
@@ -2978,7 +3407,6 @@ def simulate_load_profile(
 
             else:
                 if present_sessions and ev_budget_kw_now > 1e-9:
-                    # ✅ run_step_market erwartet ev_budget_kw_now (nicht grid_limit_p_avb_kw)
                     total_power_kw, fell_back_market_to_immediate, mode_label_for_debug, did_market_event = run_step_market(
                         ts=ts,
                         i=i,
@@ -3012,7 +3440,7 @@ def simulate_load_profile(
                         market_unit=str(market_unit),
                         step_hours_strategy=strategy_step_hours,
                         market_reserved_kw=market_reserved_kw,
-                        ev_budget_series_kw=ev_budget_series_kw,   # ✅ korrekt
+                        ev_budget_series_kw=ev_budget_series_kw, 
                         rated_power_kw=rated_power_kw,
                         time_step_hours=time_step_hours,
                         charger_efficiency=charger_efficiency,
@@ -3022,7 +3450,8 @@ def simulate_load_profile(
 
         elif charging_strategy == "generation":
             missing_signal = (
-                generation_map is None
+                generation_exact_map is None
+                or generation_mdhm_map is None
                 or generation_unit is None
                 or pv_available_kw is None
                 or pv_reserved_kw is None
@@ -3036,7 +3465,7 @@ def simulate_load_profile(
                         ts=ts,
                         i=i,
                         present_sessions=present_sessions,
-                        ev_budget_kw_now=ev_budget_kw_now,   # ✅ korrekt
+                        ev_budget_kw_now=ev_budget_kw_now, 
                         rated_power_kw=rated_power_kw,
                         time_step_hours=time_step_hours,
                         charger_efficiency=charger_efficiency,
@@ -3048,16 +3477,13 @@ def simulate_load_profile(
                 pv_surplus_kw_now = float(pv_available_kw[i])  # = max(0, PV - Base)
 
                 if present_sessions:
-                    # ✅ run_step_generation_planned... erwartet ev_budget_kw_now (nicht grid_limit_p_avb_kw)
                     total_power_kw, mode_label_for_debug, _fell_back_immediate, did_use_grid, did_finish_event = (
                         run_step_generation_planned_pv_with_critical_fallback(
                             ts=ts,
                             i=i,
-                            time_index=time_index,
                             present_sessions=present_sessions,
                             pv_surplus_kw_now=pv_surplus_kw_now,
-                            pv_reserved_kw=pv_reserved_kw,
-                            ev_budget_kw_now=ev_budget_kw_now,  # ✅ korrekt
+                            ev_budget_kw_now=ev_budget_kw_now,
                             rated_power_kw=rated_power_kw,
                             time_step_hours=time_step_hours,
                             charger_efficiency=charger_efficiency,
@@ -3065,11 +3491,10 @@ def simulate_load_profile(
                             market_enabled=(market_map is not None and market_unit is not None),
                             market_map=market_map,
                             market_unit=market_unit,
-                            strategy_resolution_min=STRATEGY_RESOLUTION_MIN,
-                            strategy_step_hours=strategy_step_hours,
                             hard_immediate_slack_minutes=0.0,
                         )
                     )
+
                 else:
                     mode_label_for_debug = "PV_ONLY"
                     total_power_kw = 0.0
@@ -3106,7 +3531,7 @@ def simulate_load_profile(
                             market_unit=str(market_unit),
                             step_hours_strategy=strategy_step_hours,
                             market_reserved_kw=market_reserved_kw,
-                            ev_budget_series_kw=ev_budget_series_kw,   # ✅ korrekt
+                            ev_budget_series_kw=ev_budget_series_kw,
                             rated_power_kw=rated_power_kw,
                             time_step_hours=time_step_hours,
                             charger_efficiency=charger_efficiency,
@@ -3270,7 +3695,7 @@ def simulate_load_profile(
     elif charging_strategy == "market":
         strategy_status = "ACTIVE" if market_map else "INACTIVE"
     elif charging_strategy == "generation":
-        strategy_status = "ACTIVE" if generation_map else "INACTIVE"
+        strategy_status = "ACTIVE" if (generation_exact_map is not None) else "INACTIVE"
     else:
         strategy_status = "INACTIVE"
 
