@@ -97,14 +97,12 @@ arrival_time_distribution:
         distribution: normal
         mu: [7.5, 9.0]                    # Peak in Stunden seit Mitternacht (z.B. 7.5 = 7:30 Uhr)
         sigma: [0.5, 1.0]                 # Streuung in Stunden
-        shift_minutes: 0                  # Stunden → Minuten (mu * 60 + shift_minutes)
         weight: 0.7                       # Gewichtung innerhalb working_day
 
       - name: peak_2                      # typische Ankunftszeit von Teilzeitkräften, später kommenden Mitarbeitern oder externen Besuchern
         distribution: normal
         mu: [11.5, 13.0]
         sigma: [0.5, 1.0]
-        shift_minutes: 0
         weight: 0.3
 
     saturday:
@@ -112,7 +110,6 @@ arrival_time_distribution:
         distribution: normal
         mu: [10.0, 12.0]
         sigma: [1.0, 2.0]
-        shift_minutes: 0
         weight: 1.0
 
     sunday_holiday:
@@ -120,7 +117,6 @@ arrival_time_distribution:
         distribution: normal
         mu: [11.0, 14.0]
         sigma: [1.0, 2.5]
-        shift_minutes: 0
         weight: 1.0
 
 # Parkdauer in Minuten ab Ankunft; Verteilung ist eine Mischung aus Kurz- und Langzeitparkern
