@@ -121,13 +121,16 @@ def _convert_price_series_to_eur_per_kwh(values: np.ndarray, unit: str) -> np.nd
 
 def _read_table_flex(csv_path: str, prefer_decimal_comma: bool = True) -> pd.DataFrame:
     """
-    Liest CSV-Dateien robust ein (Tab/Semikolon/Komma; optional Dezimalkomma) und gibt einen DataFrame zurück.
+    Liest CSV-Dateien robust ein (Tab/Semikolon/Komma; optional Dezimalkomma)
+    und unterstützt Tausendertrennzeichen (z.B. SMARD: "3.545,50").
     """
     decimal_character = "," if prefer_decimal_comma else "."
+    thousands_character = "." if prefer_decimal_comma else ","
+
     parsing_attempts = [
-        dict(sep="\t", decimal=decimal_character),
-        dict(sep=";", decimal=decimal_character),
-        dict(sep=",", decimal=decimal_character),
+        dict(sep="\t", decimal=decimal_character, thousands=thousands_character),
+        dict(sep=";",  decimal=decimal_character, thousands=thousands_character),
+        dict(sep=",",  decimal=decimal_character, thousands=thousands_character),
     ]
 
     last_exception: Optional[Exception] = None
@@ -140,6 +143,7 @@ def _read_table_flex(csv_path: str, prefer_decimal_comma: bool = True) -> pd.Dat
             last_exception = exc
 
     raise ValueError(f"CSV konnte nicht robust gelesen werden: {csv_path} ({last_exception})")
+
 
 
 def _reindex_to_simulation_timestamps(
