@@ -178,19 +178,28 @@ def read_local_load_profile_from_csv(
     timestamps: pd.DatetimeIndex,
 ) -> pd.Series:
     """
-    Liest ein Gebäude-/Grundlastprofil aus CSV ein, skaliert es auf einen Jahreswert und liefert kWh/step zurück.
+    Liest ein Gebäude-/Grundlastprofil aus CSV ein, skaliert es auf einen Jahreswert
+    und liefert kWh/step zurück.
+    value_column_one_based bezieht sich auf die Original-CSV-Spalten (inkl. Zeitspalte).
     """
     dataframe = _read_table_flex(csv_path, prefer_decimal_comma=True)
 
-    if "DateTime" in dataframe.columns:
-        datetime_column_name = "DateTime"
-        dataframe = _ensure_datetime_index(dataframe, datetime_column_name)
-    else:
-        first_column_name = str(dataframe.columns[0])
-        dataframe = _ensure_datetime_index(dataframe, first_column_name)
+    datetime_column_name = "DateTime" if "DateTime" in dataframe.columns else str(dataframe.columns[0])
 
+    # 1) Wertspalte anhand ORIGINAL-CSV bestimmen (vor set_index!)
+    original_columns = list(dataframe.columns)
     value_column_zero_based = int(value_column_one_based) - 1
-    value_column_name = dataframe.columns[value_column_zero_based]
+    if value_column_zero_based < 0 or value_column_zero_based >= len(original_columns):
+        raise ValueError(
+            f"base_load_value_col={value_column_one_based} ist außerhalb der CSV-Spaltenanzahl "
+            f"({len(original_columns)})."
+        )
+    value_column_name = original_columns[value_column_zero_based]
+
+    # 2) Jetzt DatetimeIndex setzen
+    dataframe = _ensure_datetime_index(dataframe, datetime_column_name)
+
+    # 3) Werte ziehen
     raw_values = pd.to_numeric(dataframe[value_column_name], errors="coerce").fillna(0.0).to_numpy(dtype=float)
 
     cleaned_unit = (value_unit or "").strip()
@@ -220,6 +229,7 @@ def read_local_load_profile_from_csv(
     return series
 
 
+
 def read_market_profile_from_csv(
     csv_path: str,
     value_column_one_based: int,
@@ -228,19 +238,26 @@ def read_market_profile_from_csv(
 ) -> pd.Series:
     """
     Liest ein Marktpreisprofil aus CSV ein, normalisiert auf €/kWh und reindiziert es auf Simulations-Zeitstempel.
+    value_column_one_based bezieht sich auf die Original-CSV-Spalten (inkl. Zeitspalte).
     """
     dataframe = _read_table_flex(csv_path, prefer_decimal_comma=True)
 
-    if "Datum von" in dataframe.columns:
-        datetime_column_name = "Datum von"
-    else:
-        datetime_column_name = str(dataframe.columns[0])
+    datetime_column_name = "Datum von" if "Datum von" in dataframe.columns else str(dataframe.columns[0])
 
+    # 1) Spaltenname anhand ORIGINALER CSV-Spalten bestimmen (vor set_index!)
+    original_columns = list(dataframe.columns)
+    value_column_zero_based = int(value_column_one_based) - 1
+    if value_column_zero_based < 0 or value_column_zero_based >= len(original_columns):
+        raise ValueError(
+            f"market_strategy_value_col={value_column_one_based} ist außerhalb der CSV-Spaltenanzahl "
+            f"({len(original_columns)})."
+        )
+    value_column_name = original_columns[value_column_zero_based]
+
+    # 2) Jetzt DatetimeIndex setzen
     dataframe = _ensure_datetime_index(dataframe, datetime_column_name)
 
-    value_column_zero_based = int(value_column_one_based) - 1
-    value_column_name = dataframe.columns[value_column_zero_based]
-
+    # 3) Werte lesen + Einheit konvertieren
     raw_values = pd.to_numeric(dataframe[value_column_name], errors="coerce").fillna(0.0).to_numpy(dtype=float)
     prices_eur_per_kwh = _convert_price_series_to_eur_per_kwh(raw_values, value_unit)
 
@@ -345,20 +362,28 @@ def read_generation_profile_from_csv(
 ) -> pd.Series:
     """
     Liest ein pv-Erzeugungsprofil aus CSV ein, konvertiert es nach kWh/step und skaliert es auf pv_system_size_kwp.
+    value_column_one_based bezieht sich auf die Original-CSV-Spalten (inkl. Zeitspalte).
     """
     dataframe = _read_table_flex(csv_path, prefer_decimal_comma=True)
 
     datetime_column_name = _infer_datetime_column_name_for_signal(dataframe)
-    dataframe = _ensure_datetime_index(dataframe, datetime_column_name)
 
+    # 1) Spaltenname anhand ORIGINALER CSV-Spalten bestimmen (vor set_index!)
+    original_columns = list(dataframe.columns)
     value_column_zero_based = int(value_column_one_based) - 1
-    if value_column_zero_based < 0 or value_column_zero_based >= len(dataframe.columns):
+
+    if value_column_zero_based < 0 or value_column_zero_based >= len(original_columns):
         raise ValueError(
             f"generation_strategy_value_col={value_column_one_based} ist außerhalb der CSV-Spaltenanzahl "
-            f"({len(dataframe.columns)})."
+            f"({len(original_columns)})."
         )
 
-    value_column_name = dataframe.columns[value_column_zero_based]
+    value_column_name = original_columns[value_column_zero_based]
+
+    # 2) Jetzt DatetimeIndex setzen
+    dataframe = _ensure_datetime_index(dataframe, datetime_column_name)
+
+    # 3) Werte aus der gewählten Spalte ziehen (Spalte existiert weiterhin)
     raw_values = pd.to_numeric(dataframe[value_column_name], errors="coerce").fillna(0.0).to_numpy(dtype=float)
 
     generation_kwh_per_step_reference = _convert_energy_series_to_kwh_per_step(

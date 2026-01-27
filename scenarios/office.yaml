@@ -27,7 +27,7 @@ site:
   
   # CSV-Datei: PV-Erzeugung (generation)
   generation_strategy_csv: "../data/strategies/generation/latest.csv"     # Pfad bei vorhandenen Daten zur Stromgeneration: "../data/strategies//generation/latest.csv"
-  generation_strategy_value_col: 7                                        # Spalte, die entsprechende Werte ("MWh", "kWh", o.ä.) enthalten, woran sich die Lademanagementstrategie richtet (1-basierter Code: 1 = erste Spalte)
+  generation_strategy_value_col: 6                                        # Spalte, die entsprechende Werte ("MWh", "kWh", o.ä.) enthalten, woran sich die Lademanagementstrategie richtet (1-basierter Code: 1 = erste Spalte)
   generation_strategy_unit: "MWh"                                         # Einheit, die für den Wert im Lademanagement verwendet wird ("MWh", "kWh", "kW", "€/MWh")
   pv_profile_reference_kwp: 108500000                                     # gesamte installierte Leistung in DE Stand 31.12.2025 = 99,3 GWp, Stand 31.12.2025 = 117 GWp"
   pv_system_size_kwp: 500                                                 # Größe der untersuchten Anlage in kWp
