@@ -1,7 +1,7 @@
 site_type: office                     # Standort des Ladepunkts
 
 time_resolution_min: 15               # Zeitschritt, in der die Simulation berechnet wird
-simulation_horizon_days: 1           # gewünschter Analysehorizont in Tagen
+simulation_horizon_days: 10           # gewünschter Analysehorizont in Tagen
 
 start_datetime: "2025-06-04 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen soll
 holidays:
@@ -12,9 +12,9 @@ holidays:
 
 site:
   number_chargers: 5                                          # Anzahl der Ladepunkte am Standort
-  rated_power_kw: 22                                          # Verfügbare Leistung pro Ladepunkt
-  grid_limit_p_avb_kw: 50                                    # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
-  expected_sessions_per_charger_per_day: [1.0, 3.0]           # erwartete Ladevorgänge pro LP und Tag
+  rated_power_kw: 12                                          # Verfügbare Leistung pro Ladepunkt
+  grid_limit_p_avb_kw: 200                                    # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  expected_sessions_per_charger_per_day: [3.0, 5.0]           # erwartete Ladevorgänge pro LP und Tag
   charger_efficiency: 0.95                                    # Verhäl0tnis Fahrzeugaufnahme zu abgegebener LP-Leistung
   allow_cross_day_charging: false                             # Ermöglicht keine Ladungen über Mitternacht hinaus
   
@@ -27,10 +27,10 @@ site:
   
   # CSV-Datei: PV-Erzeugung (generation)
   generation_strategy_csv: "../data/strategies/generation/latest.csv"     # Pfad bei vorhandenen Daten zur Stromgeneration: "../data/strategies//generation/latest.csv"
-  generation_strategy_value_col: 6                                        # Spalte, die entsprechende Werte ("MWh", "kWh", o.ä.) enthalten, woran sich die Lademanagementstrategie richtet (1-basierter Code: 1 = erste Spalte)
+  generation_strategy_value_col: 7                                        # Spalte, die entsprechende Werte ("MWh", "kWh", o.ä.) enthalten, woran sich die Lademanagementstrategie richtet (1-basierter Code: 1 = erste Spalte)
   generation_strategy_unit: "MWh"                                         # Einheit, die für den Wert im Lademanagement verwendet wird ("MWh", "kWh", "kW", "€/MWh")
   pv_profile_reference_kwp: 108500000                                     # gesamte installierte Leistung in DE Stand 31.12.2025 = 99,3 GWp, Stand 31.12.2025 = 117 GWp"
-  pv_system_size_kwp: 500                                                 # Größe der untersuchten Anlage in kWp
+  pv_system_size_kwp: 150                                                 # Größe der untersuchten Anlage in kWp
 
 
   # CSV-Datei: Marktpreise (market)

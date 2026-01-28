@@ -7,8 +7,7 @@ import matplotlib.pyplot as plt
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Dict, Optional, List, Tuple
-
+from typing import Dict, Optional, List, Tuple, Any, Callable
 
 # =============================================================================
 # Modulüberblick
@@ -58,7 +57,6 @@ def read_scenario_from_yaml(scenario_path: str) -> dict:
         "number_chargers",
         "rated_power_kw",
         "grid_limit_p_avb_kw",
-        "charger_efficiency",
     ]
     for key in required_site_keys:
         if key not in scenario["site"]:
@@ -76,13 +74,55 @@ def _step_hours(time_resolution_min: int) -> float:
 
 def _ensure_datetime_index(dataframe: pd.DataFrame, datetime_column_name: str) -> pd.DataFrame:
     """
-    Stellt sicher, dass ein DataFrame einen sortierten DatetimeIndex besitzt (aus einer benannten Spalte).
+    Ensure a DataFrame has a clean, sorted DatetimeIndex created from a given datetime column.
+
+    Supported datetime formats (explicit, no guessing):
+      1) ISO with seconds:        "2018-01-01 02:30:00"
+      2) ISO without seconds:     "2025-06-04 00:00"
+      3) ISO with 'T':            "2025-06-04T00:00:00"
+      4) German long format:      "14.06.2025 14:00"
+      5) German short year:       "01.01.25 00:00"
     """
     dataframe = dataframe.copy()
-    dataframe[datetime_column_name] = pd.to_datetime(dataframe[datetime_column_name], errors="coerce")
+
+    if datetime_column_name not in dataframe.columns:
+        raise ValueError(f"Datetime column '{datetime_column_name}' not found in dataframe columns.")
+
+    datetime_text = dataframe[datetime_column_name].astype(str).str.strip()
+
+    parsed = pd.to_datetime(datetime_text, errors="coerce", format="%Y-%m-%d %H:%M:%S")
+
+    mask = parsed.isna()
+    if mask.any():
+        parsed.loc[mask] = pd.to_datetime(datetime_text[mask], errors="coerce", format="%Y-%m-%d %H:%M")
+
+    mask = parsed.isna()
+    if mask.any():
+        parsed.loc[mask] = pd.to_datetime(datetime_text[mask], errors="coerce", format="%Y-%m-%dT%H:%M:%S")
+
+    mask = parsed.isna()
+    if mask.any():
+        parsed.loc[mask] = pd.to_datetime(datetime_text[mask], errors="coerce", format="%d.%m.%Y %H:%M")
+
+    mask = parsed.isna()
+    if mask.any():
+        parsed.loc[mask] = pd.to_datetime(datetime_text[mask], errors="coerce", format="%d.%m.%y %H:%M")
+
+    dataframe[datetime_column_name] = parsed
     dataframe = dataframe.dropna(subset=[datetime_column_name])
-    dataframe = dataframe.sort_values(datetime_column_name)
-    dataframe = dataframe.set_index(datetime_column_name)
+
+    if len(dataframe) == 0:
+        sample_values = datetime_text.head(5).to_list()
+        raise ValueError(
+            f"All timestamps could not be parsed from column '{datetime_column_name}'. "
+            f"Sample values: {sample_values}"
+        )
+
+    dataframe = dataframe.sort_values(datetime_column_name).set_index(datetime_column_name)
+
+    if not dataframe.index.is_unique:
+        dataframe = dataframe.groupby(level=0).mean(numeric_only=True)
+
     return dataframe
 
 
@@ -145,16 +185,26 @@ def _read_table_flex(csv_path: str, prefer_decimal_comma: bool = True) -> pd.Dat
     raise ValueError(f"CSV konnte nicht robust gelesen werden: {csv_path} ({last_exception})")
 
 
-
 def _reindex_to_simulation_timestamps(
     series: pd.Series,
     timestamps: pd.DatetimeIndex,
     method: str = "nearest",
 ) -> pd.Series:
     """
-    Reindiziert eine Zeitreihe auf die Simulations-Zeitstempel (z.B. mit 'nearest'), um Slot-Genauigkeit zu erreichen.
+    Reindiziert eine Zeitreihe auf die Simulations-Zeitstempel.
+    Robust gegen doppelte Zeitstempel (z.B. SMARD CSV): wir aggregieren Duplikate.
     """
     series = series.sort_index()
+
+    # 1) Duplikate im Index fixen (sonst knallt reindex)
+    if not series.index.is_unique:
+        # Option A: Mittelwert (bei PV/Preisen ok, wenn Duplikate identisch oder sehr nah)
+        series = series.groupby(level=0).mean()
+
+        # Alternativ Option B: letztes gewinnt
+        # series = series[~series.index.duplicated(keep="last")]
+
+    # 2) Reindex
     return series.reindex(timestamps, method=method)
 
 
@@ -674,11 +724,6 @@ def sample_sessions_for_simulation_day(
 # 3) Strategie: Reservierungsbasierte Session-Planung (immediate / market / generation)
 # =============================================================================
 
-from typing import Dict, Optional, Tuple, Callable
-
-import numpy as np
-
-
 def _charger_limit_site_kwh_per_step(scenario: dict) -> float:
     """
     Maximale abgebbare Energie pro Zeitschritt am Standort (Charger-Leistungsgrenze pro Ladepunkt).
@@ -704,14 +749,13 @@ def _vehicle_site_limit_kwh_per_step_from_curve(
     unter Berücksichtigung des Charger-Wirkungsgrads.
     """
     time_resolution_min = int(scenario["time_resolution_min"])
-    charger_efficiency = max(float(scenario["site"]["charger_efficiency"]), 1e-9)
 
     state_of_charge_fraction = float(np.clip(state_of_charge_fraction, 0.0, 1.0))
 
     power_kw_at_battery = float(np.interp(state_of_charge_fraction, curve.state_of_charge_fraction, curve.power_kw))
     power_kw_at_battery = max(power_kw_at_battery, 0.0)
 
-    power_kw_site = power_kw_at_battery / charger_efficiency
+    power_kw_site = power_kw_at_battery
     return max(power_kw_site, 0.0) * _step_hours(time_resolution_min)
 
 
@@ -728,14 +772,6 @@ def _required_battery_energy_kwh(
     if state_of_charge_target <= state_of_charge_start:
         return 0.0
     return float(curve.battery_capacity_kwh) * (state_of_charge_target - state_of_charge_start)
-
-
-def _battery_energy_to_site_energy_kwh(battery_energy_kwh: float, scenario: dict) -> float:
-    """
-    Batterie-Energie -> Standort-Energie (kWh), über Wirkungsgrad.
-    """
-    charger_efficiency = max(float(scenario["site"]["charger_efficiency"]), 1e-9)
-    return float(battery_energy_kwh) / charger_efficiency
 
 
 def _available_site_energy_kwh_for_new_reservation(
@@ -854,7 +890,6 @@ def _compute_state_of_charge_for_step_from_allocations(
     - bei market (Slots werden sortiert geplant) trotzdem physikalisch richtig
     - beim generation-Fallback: Grid-Plan berücksichtigt bereits PV-Plan
     """
-    charger_efficiency = max(float(scenario["site"]["charger_efficiency"]), 1e-9)
     battery_capacity_kwh = max(float(curve.battery_capacity_kwh), 1e-9)
 
     delivered_site_kwh_before = 0.0
@@ -862,7 +897,7 @@ def _compute_state_of_charge_for_step_from_allocations(
         if int(step_key) < int(absolute_step_index):
             delivered_site_kwh_before += float(site_kwh)
 
-    delivered_battery_kwh_before = delivered_site_kwh_before * charger_efficiency
+    delivered_battery_kwh_before = delivered_site_kwh_before
     state_of_charge = float(state_of_charge_at_arrival) + delivered_battery_kwh_before / battery_capacity_kwh
     return float(np.clip(state_of_charge, 0.0, 1.0))
 
@@ -894,7 +929,11 @@ def _reserve_session_energy_generic(
     plan_site_kwh_per_step = np.zeros(number_steps, dtype=float)
 
     if remaining_site_energy_kwh <= 0.0 or number_steps <= 0:
-        return plan_site_kwh_per_step, float(remaining_site_energy_kwh), (initial_allocations_site_kwh_by_absolute_step or {})
+        return (
+            plan_site_kwh_per_step,
+            float(remaining_site_energy_kwh),
+            (initial_allocations_site_kwh_by_absolute_step or {}),
+        )
 
     charger_limit_kwh_per_step = _charger_limit_site_kwh_per_step(scenario)
 
@@ -924,10 +963,13 @@ def _reserve_session_energy_generic(
 
         supply_headroom_kwh_per_step = float(supply_headroom_function(int(absolute_step_index)))
 
+        already_allocated_site_kwh = float(allocations.get(int(absolute_step_index), 0.0))
+        charger_headroom_kwh_per_step = max(charger_limit_kwh_per_step - already_allocated_site_kwh, 0.0)
+
         allocated_site_kwh = float(
             np.minimum(
                 np.minimum(
-                    np.minimum(supply_headroom_kwh_per_step, charger_limit_kwh_per_step),
+                    np.minimum(supply_headroom_kwh_per_step, charger_headroom_kwh_per_step),
                     vehicle_limit_kwh_per_step,
                 ),
                 remaining_site_energy_kwh,
@@ -950,7 +992,6 @@ def _reserve_session_energy_generic(
         remaining_site_energy_kwh -= allocated_site_kwh
 
     return plan_site_kwh_per_step, float(remaining_site_energy_kwh), allocations
-
 
 # -----------------------------------------------------------------------------
 # Strategy Planner: immediate / market
@@ -1325,7 +1366,7 @@ def plan_ev_charging_session(
 
     state_of_charge_target = float(scenario["vehicles"]["soc_target"])
     required_battery_kwh = _required_battery_energy_kwh(curve, session.state_of_charge_at_arrival, state_of_charge_target)
-    required_site_kwh = _battery_energy_to_site_energy_kwh(required_battery_kwh, scenario)
+    required_site_kwh = required_battery_kwh
     remaining_site_kwh = float(required_site_kwh)
 
     plan_immediate: Optional[np.ndarray] = None
@@ -1440,7 +1481,6 @@ class ChargerTraceRow:
     mode: str
     state_of_charge_fraction: float
 
-
 def _find_free_charger_for_interval(
     charger_occupied_until_step: List[int],
     arrival_step: int,
@@ -1455,6 +1495,37 @@ def _find_free_charger_for_interval(
     return None
 
 
+def normalize_datetime_to_simulation_grid(
+    datetime_value,
+    timestamps: pd.DatetimeIndex,
+    time_resolution_min: int,
+) -> pd.Timestamp:
+    """
+    Normalisiert einen Zeitstempel auf das Simulations-Zeitraster.
+
+    - passt Zeitzone an die Simulations-Timestamps an
+    - entfernt Sekunden/Mikrosekunden
+    - rundet nach unten auf das Zeitraster (floor auf time_resolution_min)
+    """
+    timestamps_timezone = getattr(timestamps, "tz", None)
+    timestamp_value = pd.Timestamp(datetime_value)
+
+    # Zeitzonen-Handling: an Simulations-Timestamps anpassen
+    if timestamps_timezone is not None:
+        if timestamp_value.tzinfo is None:
+            timestamp_value = timestamp_value.tz_localize(timestamps_timezone)
+        else:
+            timestamp_value = timestamp_value.tz_convert(timestamps_timezone)
+    else:
+        # Simulations-Timestamps sind tz-naiv → Session-Zeiten ebenfalls tz-naiv halten
+        if timestamp_value.tzinfo is not None:
+            timestamp_value = timestamp_value.tz_convert(None).tz_localize(None)
+
+    # Sekunden und Mikrosekunden entfernen und auf Raster runden
+    timestamp_value = timestamp_value.replace(second=0, microsecond=0)
+    timestamp_value = timestamp_value.flo
+
+
 def simulate_charging_sessions_fcfs(
     sessions: List[SampledSession],
     vehicle_curves_by_name: Dict[str, VehicleChargingCurve],
@@ -1467,13 +1538,18 @@ def simulate_charging_sessions_fcfs(
     record_charger_traces: bool = False,
 ) -> Tuple[np.ndarray, List[dict], List[dict], Optional[List[dict]]]:
     """
-    Simuliert den Standort-Lastgang, indem Sessions FCFS verarbeitet, Ladepunkte belegt und Reservierungen aufbaut.
+    Simuliert den Standort-Lastgang, indem Sessions nach First-Come-First-Served (FCFS) verarbeitet werden.
+
+    Kernpunkte:
+    - Session-Zeiten (arrival_time/departure_time) werden robust auf das Simulationsraster gemappt.
+    - Daraus werden arrival_step/departure_step berechnet und auf der Session gesetzt (wichtig für alle Planner).
+    - Ladepunkte werden deterministisch belegt (kleinste Charger-ID zuerst).
+    - Die Energie wird als Reservierungen pro Zeitschritt geführt und am Ende in kW umgerechnet.
     """
     number_steps_total = int(len(timestamps))
     number_chargers = int(scenario["site"]["number_chargers"])
     time_resolution_min = int(scenario["time_resolution_min"])
     step_hours = _step_hours(time_resolution_min)
-    charger_efficiency = max(float(scenario["site"]["charger_efficiency"]), 1e-9)
 
     reserved_total_ev_energy_kwh_per_step = np.zeros(number_steps_total, dtype=float)
     reserved_pv_ev_energy_kwh_per_step = np.zeros(number_steps_total, dtype=float)
@@ -1484,9 +1560,107 @@ def simulate_charging_sessions_fcfs(
     debug_rows: List[dict] = []
     sessions_out: List[dict] = []
 
-    sessions_sorted = sorted(sessions, key=lambda s: s.arrival_time)
+    timestamps_timezone = getattr(timestamps, "tz", None)
+
+    def _normalize_datetime_to_timestamps_timezone(datetime_value) -> pd.Timestamp:
+        """
+        Normalisiert eine Zeitangabe auf:
+        - gleiche Timezone wie timestamps (falls vorhanden)
+        - Minutenraster (floor auf time_resolution_min)
+        - keine Sekunden/Mikrosekunden
+        """
+        timestamp_value = pd.Timestamp(datetime_value)
+
+        if timestamps_timezone is not None:
+            if timestamp_value.tzinfo is None:
+                timestamp_value = timestamp_value.tz_localize(timestamps_timezone)
+            else:
+                timestamp_value = timestamp_value.tz_convert(timestamps_timezone)
+        else:
+            if timestamp_value.tzinfo is not None:
+                timestamp_value = timestamp_value.tz_convert(None).tz_localize(None)
+
+        timestamp_value = timestamp_value.replace(second=0, microsecond=0)
+        timestamp_value = timestamp_value.floor(f"{time_resolution_min}min")
+        return timestamp_value
+
+    def _map_datetime_to_simulation_step(datetime_value) -> int:
+        """
+        Mappt eine Zeit auf einen gültigen Simulationsschritt-Index [0, number_steps_total-1].
+
+        Vorgehen:
+        - Zeit normalisieren (Timezone + Raster)
+        - exakten Treffer in timestamps suchen
+        - falls nicht enthalten: nearest index bestimmen (robust)
+        - auf Grenzen clampen
+        """
+        normalized_timestamp = _normalize_datetime_to_timestamps_timezone(datetime_value)
+
+        try:
+            position = timestamps.get_loc(normalized_timestamp)
+            if isinstance(position, slice):
+                # falls duplicates: nimm den ersten Index der Slice
+                step_index = int(position.start)
+            elif isinstance(position, (np.ndarray, list)):
+                # selten: mehrere Treffer
+                step_index = int(position[0])
+            else:
+                step_index = int(position)
+        except KeyError:
+            # robust: nearest
+            nearest_positions = timestamps.get_indexer([normalized_timestamp], method="nearest")
+            step_index = int(nearest_positions[0])
+
+        if step_index < 0:
+            step_index = 0
+        if step_index >= number_steps_total:
+            step_index = number_steps_total - 1
+
+        return int(step_index)
+
+    sessions_sorted = sorted(
+        sessions,
+        key=lambda session: pd.Timestamp(session.arrival_time) if getattr(session, "arrival_time", None) is not None else pd.Timestamp.min,
+    )
 
     for session in sessions_sorted:
+        if getattr(session, "arrival_time", None) is None or getattr(session, "departure_time", None) is None:
+            sessions_out.append(
+                {
+                    "session_id": session.session_id,
+                    "vehicle_name": session.vehicle_name,
+                    "vehicle_class": session.vehicle_class,
+                    "_plug_in_time": None,
+                    "_plug_out_time": None,
+                    "arrival_time": getattr(session, "arrival_time", None),
+                    "departure_time": getattr(session, "departure_time", None),
+                    "arrival_step": None,
+                    "departure_step": None,
+                    "charger_id": None,
+                    "status": "invalid_time",
+                    "charged_site_kwh": 0.0,
+                    "charged_pv_site_kwh": 0.0,
+                    "charged_market_site_kwh": 0.0,
+                    "charged_immediate_site_kwh": 0.0,
+                    "remaining_site_kwh": None,
+                    "state_of_charge_at_arrival": float(session.state_of_charge_at_arrival),
+                    "state_of_charge_end": float(session.state_of_charge_at_arrival),
+                }
+            )
+            continue
+
+        arrival_step = _map_datetime_to_simulation_step(session.arrival_time)
+        departure_step = _map_datetime_to_simulation_step(session.departure_time)
+
+        # Sicherstellen: departure_step muss nach arrival_step liegen
+        if int(departure_step) <= int(arrival_step):
+            departure_step = min(int(arrival_step) + 1, number_steps_total - 1)
+
+        # 🔑 Wichtig: arrival_step / departure_step auf der Session setzen,
+        # damit plan_ev_charging_session und plan_charging_* konsistent arbeiten.
+        session.arrival_step = int(arrival_step)
+        session.departure_step = int(departure_step)
+
         chosen_charger_id = _find_free_charger_for_interval(
             charger_occupied_until_step=charger_occupied_until_step,
             arrival_step=int(session.arrival_step),
@@ -1536,7 +1710,8 @@ def simulate_charging_sessions_fcfs(
         )
 
         charged_site_kwh = float(plan_result["charged_site_kwh"])
-        charged_battery_kwh = charged_site_kwh * charger_efficiency  # Standort->Batterie
+        charged_battery_kwh = charged_site_kwh
+
         state_of_charge_end = float(
             np.clip(
                 float(session.state_of_charge_at_arrival)
@@ -1581,7 +1756,7 @@ def simulate_charging_sessions_fcfs(
 
             charging_strategy = str(scenario["site"].get("charging_strategy", "immediate")).strip().lower()
 
-            battery_added_cumulative_kwh = np.cumsum(plan_site_kwh_per_step) * charger_efficiency
+            battery_added_cumulative_kwh = np.cumsum(plan_site_kwh_per_step)
             state_of_charge_trace = float(session.state_of_charge_at_arrival) + battery_added_cumulative_kwh / max(
                 float(curve.battery_capacity_kwh),
                 1e-9,
@@ -1594,10 +1769,29 @@ def simulate_charging_sessions_fcfs(
                     continue
 
                 absolute_step_index = int(session.arrival_step) + int(relative_step_index)
+                if absolute_step_index < 0 or absolute_step_index >= number_steps_total:
+                    continue
+
                 timestamp = pd.to_datetime(timestamps[absolute_step_index]).to_pydatetime()
 
                 power_kw_site = site_kwh / max(step_hours, 1e-9)
                 pv_power_kw_site = float(plan_pv_kwh_per_step[relative_step_index]) / max(step_hours, 1e-9)
+
+                rated_power_kw = float(scenario["site"]["rated_power_kw"])
+                max_site_kwh_this_step = rated_power_kw * step_hours
+
+                site_kwh = float(plan_site_kwh_per_step[relative_step_index])
+                if site_kwh <= 1e-12:
+                    continue
+
+                # Cap energy per step so physics + traces are consistent
+                site_kwh_capped = min(max(site_kwh, 0.0), max_site_kwh_this_step)
+
+                pv_kwh = float(plan_pv_kwh_per_step[relative_step_index])
+                pv_kwh_capped = min(max(pv_kwh, 0.0), site_kwh_capped)
+
+                power_kw_site_capped = site_kwh_capped / max(step_hours, 1e-9)
+                pv_power_kw_site_capped = pv_kwh_capped / max(step_hours, 1e-9)
 
                 charger_traces.append(
                     {
@@ -1605,12 +1799,13 @@ def simulate_charging_sessions_fcfs(
                         "charger_id": int(chosen_charger_id),
                         "session_id": session.session_id,
                         "vehicle_name": session.vehicle_name,
-                        "power_kw": float(power_kw_site),
-                        "pv_power_kw": float(pv_power_kw_site),
+                        "power_kw": power_kw_site_capped,
+                        "pv_power_kw": pv_power_kw_site_capped,
                         "mode": charging_strategy,
                         "state_of_charge": float(state_of_charge_trace[relative_step_index]),
                     }
                 )
+
 
     if record_debug:
         grid_limit_kwh_per_step = _grid_limit_site_kwh_per_step(scenario)
@@ -1812,130 +2007,196 @@ def build_plugged_sessions_preview_table(sessions_out: List[dict], n: int = 20) 
 
 
 # =============================================================================
-# Plot-Wrapper (Notebook-kompatibel)
+# Notebook-kompatible Builder
 # =============================================================================
-
-def plot_power_per_charger(
-    charger_traces_dataframe: pd.DataFrame,
-    charger_id: int,
-    start=None,
-    end=None,
-):
-    """
-    Plottet die Leistung eines einzelnen Ladepunkts über die Zeit (aus charger_traces_dataframe).
-    """
-    dataframe = charger_traces_dataframe.copy()
-    dataframe["timestamp"] = pd.to_datetime(dataframe["timestamp"])
-    dataframe = dataframe[dataframe["charger_id"] == int(charger_id)]
-    if start is not None:
-        dataframe = dataframe[dataframe["timestamp"] >= pd.to_datetime(start)]
-    if end is not None:
-        dataframe = dataframe[dataframe["timestamp"] <= pd.to_datetime(end)]
-
-    plt.figure(figsize=(12, 4))
-    plt.plot(dataframe["timestamp"], dataframe["power_kw"], linewidth=2)
-    plt.xlabel("Zeit")
-    plt.ylabel("Leistung [kW]")
-    plt.title(f"Leistung Ladepunkt {charger_id}")
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.gcf().autofmt_xdate()
-    plt.show()
-
-
-def plot_ev_power_by_source_stack(
-    charger_traces_dataframe: pd.DataFrame,
-    timeseries_dataframe: pd.DataFrame,
-    title: str,
-):
-    """
-    Plottet einen Stack-Plot für ev-Leistung nach Quellen (pv vs Netz) anhand von timeseries_dataframe.
-    Nutzt die Spalten pv_to_ev_kw und grid_to_ev_kw (aus debug_rows).
-    """
-    if "pv_to_ev_kw" not in timeseries_dataframe.columns or "grid_to_ev_kw" not in timeseries_dataframe.columns:
-        print("timeseries_dataframe hat keine pv_to_ev_kw/grid_to_ev_kw (Debug fehlt).")
-        return None
-
-    plt.figure(figsize=(12, 4))
-    plt.stackplot(
-        timeseries_dataframe["timestamp"],
-        timeseries_dataframe["pv_to_ev_kw"].fillna(0.0),
-        timeseries_dataframe["grid_to_ev_kw"].fillna(0.0),
-        labels=["EV aus PV", "EV aus Netz"],
-        alpha=0.9,
-    )
-    plt.xlabel("Zeit")
-    plt.ylabel("Leistung [kW]")
-    plt.title(title)
-    plt.legend(loc="upper right")
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.gcf().autofmt_xdate()
-    plt.show()
-    return True
 
 
 def _get_column_name(dataframe: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    """
+    Gibt den ersten Spaltennamen aus `candidates` zurück, der im DataFrame existiert.
+    """
     for candidate in candidates:
         if candidate in dataframe.columns:
             return candidate
     return None
 
 
-def plot_soc_by_chargers(
+def _require_non_empty_dataframe(dataframe: Optional[pd.DataFrame], dataframe_name: str) -> pd.DataFrame:
+    """
+    Stellt sicher, dass ein DataFrame existiert und nicht leer ist.
+    """
+    if dataframe is None or len(dataframe) == 0:
+        raise ValueError(f"{dataframe_name} ist leer.")
+    return dataframe
+
+
+def _filter_time_window(
+    dataframe: pd.DataFrame,
+    timestamp_column_name: str,
+    start: Optional[datetime],
+    end: Optional[datetime],
+) -> pd.DataFrame:
+    """
+    Filtert ein DataFrame auf ein Zeitfenster [start, end] basierend auf einer Timestamp-Spalte.
+    """
+    dataframe = dataframe.copy()
+    dataframe[timestamp_column_name] = pd.to_datetime(dataframe[timestamp_column_name])
+
+    if start is not None:
+        dataframe = dataframe[dataframe[timestamp_column_name] >= pd.to_datetime(start)]
+    if end is not None:
+        dataframe = dataframe[dataframe[timestamp_column_name] <= pd.to_datetime(end)]
+
+    if len(dataframe) == 0:
+        raise ValueError("Keine Daten im gewählten Zeitfenster.")
+    return dataframe
+
+
+def build_power_per_charger_timeseries(
+    charger_traces_dataframe: pd.DataFrame,
+    charger_id: int,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+) -> pd.DataFrame:
+    """
+    Liefert Zeitreihe der Ladeleistung eines einzelnen Ladepunkts.
+
+    Rückgabe-Spalten:
+      - timestamp
+      - power_kw
+    """
+    charger_traces_dataframe = _require_non_empty_dataframe(charger_traces_dataframe, "charger_traces_dataframe")
+
+    dataframe = charger_traces_dataframe.copy()
+    dataframe = _filter_time_window(dataframe, "timestamp", start=start, end=end)
+
+    dataframe = dataframe[dataframe["charger_id"] == int(charger_id)]
+    if len(dataframe) == 0:
+        raise ValueError(f"Keine Daten für charger_id={int(charger_id)} im gewählten Zeitfenster.")
+
+    power_column_name = _get_column_name(dataframe, ["power_kw_site", "site_power_kw", "power_kw"])
+    if power_column_name is None:
+        raise ValueError("Keine Leistungsspalte gefunden (power_kw / power_kw_site / site_power_kw).")
+
+    out = dataframe[["timestamp", power_column_name]].copy()
+    out = out.rename(columns={power_column_name: "power_kw"})
+    out["power_kw"] = out["power_kw"].astype(float).fillna(0.0)
+
+    return out
+
+
+def build_ev_power_by_source_timeseries(timeseries_dataframe: pd.DataFrame) -> pd.DataFrame:
+    """
+    Liefert EV-Leistung nach Quelle (PV vs Grid).
+
+    Erwartete Spalten im timeseries_dataframe:
+      - pv_to_ev_kw
+      - grid_to_ev_kw
+
+    Rückgabe:
+      - timestamp
+      - ev_from_pv_kw
+      - ev_from_grid_kw
+    """
+    timeseries_dataframe = _require_non_empty_dataframe(timeseries_dataframe, "timeseries_dataframe")
+
+    if "pv_to_ev_kw" not in timeseries_dataframe.columns:
+        raise ValueError("timeseries_dataframe: Spalte 'pv_to_ev_kw' fehlt (Debug nicht aktiv?).")
+    if "grid_to_ev_kw" not in timeseries_dataframe.columns:
+        raise ValueError("timeseries_dataframe: Spalte 'grid_to_ev_kw' fehlt (Debug nicht aktiv?).")
+
+    dataframe = timeseries_dataframe.copy()
+    dataframe["timestamp"] = pd.to_datetime(dataframe["timestamp"])
+
+    out = pd.DataFrame(
+        {
+            "timestamp": dataframe["timestamp"],
+            "ev_from_pv_kw": dataframe["pv_to_ev_kw"].astype(float).fillna(0.0),
+            "ev_from_grid_kw": dataframe["grid_to_ev_kw"].astype(float).fillna(0.0),
+        }
+    )
+    return out
+
+
+def build_soc_timeseries_by_charger(
     charger_traces_dataframe: pd.DataFrame,
     charger_ids: List[int],
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
-    use_raw: bool = True,
-):
+) -> Dict[int, pd.DataFrame]:
     """
-    Plottet SoC-Verlauf je Ladepunkt im gegebenen Zeitfenster.
-    Erwartet charger_traces_dataframe mit Spalten (mindestens):
-      - timestamp
-      - charger_id
-      - state_of_charge  ODER state_of_charge_fraction
+    Build per-charger state-of-charge (SoC) time series for notebook plotting.
+
+    The returned DataFrames include the following columns:
+      - timestamp: datetime-like
+      - soc: state of charge as float in [0, 1] (or whatever your trace uses)
+      - session_id: identifier of the charging session (if available in traces)
+      - vehicle_name: vehicle name (if available in traces)
+
+    Including session_id enables notebook plots to break the SoC line whenever a
+    charging session ends (unplug) and a new one begins.
+
+    Parameters
+    ----------
+    charger_traces_dataframe:
+        DataFrame containing charger trace points. Expected columns include:
+        'timestamp', 'charger_id', and one SoC column such as
+        'state_of_charge' / 'state_of_charge_fraction' / 'soc' / 'state_of_charge_trace'.
+        If present, 'session_id' and 'vehicle_name' are propagated to the output.
+    charger_ids:
+        List of charger IDs to include.
+    start, end:
+        Optional inclusive time window. If provided, trace points are filtered to [start, end].
+
+    Returns
+    -------
+    Dict[int, pd.DataFrame]
+        Mapping charger_id -> DataFrame with columns:
+        ['timestamp', 'soc', 'session_id'(optional), 'vehicle_name'(optional)].
     """
-    if charger_traces_dataframe is None or len(charger_traces_dataframe) == 0:
-        print("charger_traces_dataframe ist leer – keine SoC-Plots möglich.")
-        return
+    charger_traces_dataframe = _require_non_empty_dataframe(
+        charger_traces_dataframe, "charger_traces_dataframe"
+    )
 
     dataframe = charger_traces_dataframe.copy()
-    dataframe["timestamp"] = pd.to_datetime(dataframe["timestamp"])
+    dataframe = _filter_time_window(dataframe, "timestamp", start=start, end=end)
 
-    state_of_charge_column = _get_column_name(
+    state_of_charge_column_name = _get_column_name(
         dataframe,
         ["state_of_charge", "state_of_charge_fraction", "soc", "state_of_charge_trace"],
     )
-    if state_of_charge_column is None:
-        print("Kein SoC-Feld gefunden (state_of_charge/state_of_charge_fraction).")
-        return
+    if state_of_charge_column_name is None:
+        raise ValueError(
+            "No SoC column found (state_of_charge/state_of_charge_fraction/soc/state_of_charge_trace)."
+        )
 
-    if start is not None:
-        dataframe = dataframe[dataframe["timestamp"] >= pd.to_datetime(start)]
-    if end is not None:
-        dataframe = dataframe[dataframe["timestamp"] <= pd.to_datetime(end)]
+    has_session_id = "session_id" in dataframe.columns
+    has_vehicle_name = "vehicle_name" in dataframe.columns
 
-    plt.figure(figsize=(12, 5))
+    output_by_charger_id: Dict[int, pd.DataFrame] = {}
+
     for charger_id in charger_ids:
         charger_dataframe = dataframe[dataframe["charger_id"] == int(charger_id)]
         if len(charger_dataframe) == 0:
             continue
-        plt.plot(
-            charger_dataframe["timestamp"],
-            charger_dataframe[state_of_charge_column].astype(float),
-            linewidth=1.5,
-            label=f"LP {int(charger_id)}",
-        )
 
-    plt.xlabel("Zeit")
-    plt.ylabel("SoC [-]")
-    plt.title("SoC je Ladepunkt")
-    plt.grid(True, alpha=0.3)
-    plt.legend(loc="upper left", ncols=2)
-    plt.tight_layout()
-    plt.gcf().autofmt_xdate()
-    plt.show()
+        columns_to_take = ["timestamp", state_of_charge_column_name]
+        if has_session_id:
+            columns_to_take.append("session_id")
+        if has_vehicle_name:
+            columns_to_take.append("vehicle_name")
+
+        out = charger_dataframe[columns_to_take].copy()
+        out = out.rename(columns={state_of_charge_column_name: "soc"})
+        out["soc"] = out["soc"].astype(float).fillna(0.0)
+
+        # Keep ordering stable for plotting/grouping
+        out["timestamp"] = pd.to_datetime(out["timestamp"], errors="coerce")
+        out = out.dropna(subset=["timestamp"]).sort_values("timestamp")
+
+        output_by_charger_id[int(charger_id)] = out
+
+    return output_by_charger_id
 
 
 def validate_against_master_curves(
@@ -1950,10 +2211,6 @@ def validate_against_master_curves(
       - Charger-Limit (rated_power_kw)
       - Vehicle-Limit aus Masterkurve (SoC->max kW an Batterie, über Effizienz auf Standortseite)
 
-    Erwartet:
-      - charger_traces_dataframe mit timestamp, vehicle_name, power_kw (oder power_kw_site), state_of_charge
-      - sessions_out (plugged Sessions) mit vehicle_name und idealerweise session_id, charger_id etc.
-
     Rückgabe:
       (validation_dataframe, violations_dataframe)
     """
@@ -1961,29 +2218,21 @@ def validate_against_master_curves(
         return pd.DataFrame(), pd.DataFrame()
 
     dataframe = charger_traces_dataframe.copy()
-    dataframe["timestamp"] = pd.to_datetime(dataframe["timestamp"])
+    dataframe = _filter_time_window(dataframe, "timestamp", start=start, end=end)
 
-    if start is not None:
-        dataframe = dataframe[dataframe["timestamp"] >= pd.to_datetime(start)]
-    if end is not None:
-        dataframe = dataframe[dataframe["timestamp"] <= pd.to_datetime(end)]
+    power_column_name = _get_column_name(dataframe, ["power_kw", "power_kw_site", "site_power_kw"])
+    if power_column_name is None:
+        raise ValueError("charger_traces_dataframe: keine Leistungsspalte gefunden (power_kw / power_kw_site / site_power_kw).")
 
-    power_column = _get_column_name(dataframe, ["power_kw", "power_kw_site", "site_power_kw"])
-    if power_column is None:
-        raise ValueError("charger_traces_dataframe: keine Leistungsspalte gefunden (power_kw / power_kw_site).")
-
-    state_of_charge_column = _get_column_name(dataframe, ["state_of_charge", "state_of_charge_fraction", "soc"])
-    if state_of_charge_column is None:
-        raise ValueError("charger_traces_dataframe: keine SoC-Spalte gefunden (state_of_charge / state_of_charge_fraction).")
+    state_of_charge_column_name = _get_column_name(dataframe, ["state_of_charge", "state_of_charge_fraction", "soc"])
+    if state_of_charge_column_name is None:
+        raise ValueError("charger_traces_dataframe: keine SoC-Spalte gefunden (state_of_charge / state_of_charge_fraction / soc).")
 
     if "vehicle_name" not in dataframe.columns:
         raise ValueError("charger_traces_dataframe: vehicle_name fehlt.")
 
     rated_power_kw = float(scenario["site"]["rated_power_kw"])
-    charger_efficiency = max(float(scenario["site"]["charger_efficiency"]), 1e-9)
 
-    # Wir brauchen Zugriff auf die Masterkurven: im Modul liegt i.d.R. read_vehicle_load_profiles_from_csv
-    # -> wir lesen hier einmal ein und mappen per vehicle_name.
     vehicle_curves_by_name = read_vehicle_load_profiles_from_csv(str(scenario["vehicles"]["vehicle_curve_csv"]))
 
     validation_rows: List[dict] = []
@@ -1992,8 +2241,8 @@ def validate_against_master_curves(
         vehicle_name = str(row["vehicle_name"])
         curve = vehicle_curves_by_name.get(vehicle_name)
 
-        power_kw_site = float(row[power_column])
-        state_of_charge_fraction = float(row[state_of_charge_column])
+        power_kw_site = float(row[power_column_name])
+        state_of_charge_fraction = float(row[state_of_charge_column_name])
 
         charger_limit_ok = power_kw_site <= rated_power_kw + 1e-9
 
@@ -2009,7 +2258,7 @@ def validate_against_master_curves(
                 )
             )
             power_kw_at_battery = max(power_kw_at_battery, 0.0)
-            vehicle_limit_kw_site = power_kw_at_battery / charger_efficiency
+            vehicle_limit_kw_site = power_kw_at_battery
             vehicle_limit_ok = power_kw_site <= vehicle_limit_kw_site + 1e-9
 
         validation_rows.append(
@@ -2028,6 +2277,7 @@ def validate_against_master_curves(
         )
 
     validation_dataframe = pd.DataFrame(validation_rows)
+
     violations_dataframe = validation_dataframe[
         (~validation_dataframe["ok_charger_limit"]) | (~validation_dataframe["ok_vehicle_limit"])
     ].copy()
@@ -2035,213 +2285,155 @@ def validate_against_master_curves(
     return validation_dataframe, violations_dataframe
 
 
-def plot_charger_power_heatmap(
+def build_charger_power_heatmap_matrix(
     charger_traces_dataframe: pd.DataFrame,
-    charging_strategy: str,
-    strategy_status: str,
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
-):
+) -> Dict[str, Any]:
     """
-    Heatmap: Zeit (x) vs Ladepunkt (y) -> Leistung [kW]
-    Erwartet charger_traces_dataframe mit:
-      - timestamp
-      - charger_id
-      - power_kw (oder power_kw_site)
+    Liefert Heatmap-Matrix für Ladepunktleistung.
+
+    Rückgabe:
+      - matrix (np.ndarray)
+      - charger_ids (List[int])
+      - timestamps (List[pd.Timestamp])
     """
-    if charger_traces_dataframe is None or len(charger_traces_dataframe) == 0:
-        print("charger_traces_dataframe ist leer – keine Heatmap möglich.")
-        return
+    charger_traces_dataframe = _require_non_empty_dataframe(charger_traces_dataframe, "charger_traces_dataframe")
 
     dataframe = charger_traces_dataframe.copy()
-    dataframe["timestamp"] = pd.to_datetime(dataframe["timestamp"])
+    dataframe = _filter_time_window(dataframe, "timestamp", start=start, end=end)
 
-    power_column = _get_column_name(dataframe, ["power_kw", "power_kw_site", "site_power_kw"])
-    if power_column is None:
-        print("Keine Leistungsspalte gefunden (power_kw/power_kw_site).")
-        return
+    power_column_name = _get_column_name(dataframe, ["power_kw", "power_kw_site", "site_power_kw"])
+    if power_column_name is None:
+        raise ValueError("Keine Leistungsspalte gefunden (power_kw / power_kw_site / site_power_kw).")
 
-    if start is not None:
-        dataframe = dataframe[dataframe["timestamp"] >= pd.to_datetime(start)]
-    if end is not None:
-        dataframe = dataframe[dataframe["timestamp"] <= pd.to_datetime(end)]
-
-    if len(dataframe) == 0:
-        print("Heatmap: Keine Daten im gewählten Zeitfenster.")
-        return
-
-    # Pivot: rows=charger_id, cols=timestamp
     pivot = dataframe.pivot_table(
         index="charger_id",
         columns="timestamp",
-        values=power_column,
+        values=power_column_name,
         aggfunc="sum",
         fill_value=0.0,
     ).sort_index(axis=0).sort_index(axis=1)
 
-    plt.figure(figsize=(12, 4))
-    plt.imshow(pivot.values, aspect="auto", interpolation="nearest")
-    plt.colorbar(label="Leistung [kW]")
-    plt.yticks(ticks=np.arange(len(pivot.index)), labels=[f"LP {int(i)}" for i in pivot.index])
-    plt.xticks(
-        ticks=np.linspace(0, max(len(pivot.columns) - 1, 1), num=min(8, len(pivot.columns))).astype(int),
-        labels=[pivot.columns[i].strftime("%H:%M") for i in np.linspace(0, max(len(pivot.columns) - 1, 1), num=min(8, len(pivot.columns))).astype(int)],
-        rotation=0,
-    )
-    plt.title(f"Heatmap Ladepunktleistung | {str(charging_strategy).upper()} / {str(strategy_status).upper()}")
-    plt.xlabel("Zeit")
-    plt.ylabel("Ladepunkt")
-    plt.tight_layout()
-    plt.show()
+    return {
+        "matrix": pivot.values,
+        "charger_ids": list(pivot.index),
+        "timestamps": list(pivot.columns),
+    }
 
 
-def plot_site_overview(
+def build_site_overview_plot_data(
     timeseries_dataframe: pd.DataFrame,
     scenario: dict,
-    charging_strategy: str,
-    strategy_status: str,
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
-):
+) -> Dict[str, Any]:
     """
-    Standortübersicht:
-      - base_load_kw
-      - ev_load_kw
-      - total_load_kw (base + ev)
-      - pv_generation_kw (optional)
-      - grid_limit_kw (Linie)
+    Bereitet Daten für eine Standortübersicht (Notebook-Plot) vor.
 
-    Erwartet timeseries_dataframe mit:
-      - timestamp
-      - base_load_kw
-      - ev_load_kw
-      - pv_generation_kw (optional)
+    Liefert:
+      - dataframe: gefilterter DF (mit 'timestamp' als datetime)
+      - base_load_kw: pd.Series
+      - ev_load_kw: pd.Series
+      - total_load_kw: pd.Series
+      - pv_generation_kw: Optional[pd.Series]
+      - grid_limit_kw: float
+      - charger_limit_kw_total: float
+
+    WICHTIG:
+      - keine plt-Aufrufe
+      - keine print-Ausgaben
+      - 'Grid + ChargerTotal' wird nur als Zahl geliefert, nicht geplottet
     """
-    if timeseries_dataframe is None or len(timeseries_dataframe) == 0:
-        print("timeseries_dataframe ist leer – kein Site-Overview möglich.")
-        return
+    timeseries_dataframe = _require_non_empty_dataframe(timeseries_dataframe, "timeseries_dataframe")
 
     dataframe = timeseries_dataframe.copy()
-    dataframe["timestamp"] = pd.to_datetime(dataframe["timestamp"])
-
-    if start is not None:
-        dataframe = dataframe[dataframe["timestamp"] >= pd.to_datetime(start)]
-    if end is not None:
-        dataframe = dataframe[dataframe["timestamp"] <= pd.to_datetime(end)]
-
-    if len(dataframe) == 0:
-        print("Site-Overview: Keine Daten im gewählten Zeitfenster.")
-        return
+    dataframe = _filter_time_window(dataframe, "timestamp", start=start, end=end)
 
     grid_limit_kw = float(scenario["site"]["grid_limit_p_avb_kw"])
     charger_limit_kw_total = float(scenario["site"]["rated_power_kw"]) * float(scenario["site"]["number_chargers"])
 
-    base_load_kw = dataframe["base_load_kw"].astype(float) if "base_load_kw" in dataframe.columns else 0.0
-    ev_load_kw = dataframe["ev_load_kw"].astype(float) if "ev_load_kw" in dataframe.columns else 0.0
-    total_load_kw = base_load_kw + ev_load_kw
+    if "base_load_kw" in dataframe.columns:
+        base_load_kw = dataframe["base_load_kw"].astype(float).fillna(0.0)
+    else:
+        base_load_kw = pd.Series(np.zeros(len(dataframe), dtype=float), index=dataframe.index)
 
-    plt.figure(figsize=(12, 4))
-    plt.plot(dataframe["timestamp"], total_load_kw, linewidth=2, label="Total (Base + EV)")
+    if "ev_load_kw" in dataframe.columns:
+        ev_load_kw = dataframe["ev_load_kw"].astype(float).fillna(0.0)
+    else:
+        ev_load_kw = pd.Series(np.zeros(len(dataframe), dtype=float), index=dataframe.index)
+
+    total_load_kw = (base_load_kw + ev_load_kw).fillna(0.0)
+
+    pv_generation_kw = None
     if "pv_generation_kw" in dataframe.columns:
-        plt.plot(dataframe["timestamp"], dataframe["pv_generation_kw"].astype(float), linewidth=2, label="PV-Erzeugung")
+        pv_generation_kw = dataframe["pv_generation_kw"].astype(float).fillna(0.0)
 
-    plt.axhline(grid_limit_kw, linestyle="--", linewidth=1.5, label="Grid-Limit")
-    plt.axhline(grid_limit_kw + charger_limit_kw_total, linestyle=":", linewidth=1.0, label="(Grid + ChargerTotal) Hinweis")
-
-    plt.xlabel("Zeit")
-    plt.ylabel("Leistung [kW]")
-    plt.title(f"Standort-Übersicht | {str(charging_strategy).upper()} / {str(strategy_status).upper()}")
-    plt.grid(True, alpha=0.3)
-    plt.legend(loc="upper right")
-    plt.tight_layout()
-    plt.gcf().autofmt_xdate()
-    plt.show()
-
-    # Zusätzlich: Stackplot wie im alten Notebook (Base + EV)
-    plt.figure(figsize=(12, 4))
-    plt.stackplot(
-        dataframe["timestamp"],
-        base_load_kw,
-        ev_load_kw,
-        labels=["Grundlast", "EV-Ladeleistung"],
-        alpha=0.9,
-    )
-    plt.xlabel("Zeit")
-    plt.ylabel("Leistung [kW]")
-    plt.title(f"Standortlast gestapelt | {str(charging_strategy).upper()} / {str(strategy_status).upper()}")
-    plt.grid(True, alpha=0.3)
-    plt.legend(loc="upper right")
-    plt.tight_layout()
-    plt.gcf().autofmt_xdate()
-    plt.show()
+    return {
+        "dataframe": dataframe,
+        "base_load_kw": base_load_kw,
+        "ev_load_kw": ev_load_kw,
+        "total_load_kw": total_load_kw,
+        "pv_generation_kw": pv_generation_kw,
+        "grid_limit_kw": grid_limit_kw,
+        "charger_limit_kw_total": charger_limit_kw_total,
+    }
 
 
-def plot_ev_power_by_mode_stack_from_cols(
-    charger_traces_dataframe: pd.DataFrame,
+def build_ev_power_by_mode_timeseries_dataframe(
     timeseries_dataframe: pd.DataFrame,
-    title: str,
     sessions_out: Optional[List[dict]] = None,
     scenario: Optional[dict] = None,
-):
+) -> pd.DataFrame:
     """
-    Stack-Plot EV-Leistung nach Modus:
-      - Generation (PV-gezielt)
-      - Market
-      - Immediate
+    Erstellt ein DataFrame mit EV-Leistung nach Modus für Notebook-Plots.
 
-    Unterstützte Datenquellen:
-    A) timeseries_dataframe enthält bereits Spalten:
+    Ergebnis-Spalten:
+      - timestamp
+      - ev_generation_kw
+      - ev_market_kw
+      - ev_immediate_kw
+
+    Datenquellen:
+    A) Wenn timeseries_dataframe bereits Spalten enthält:
          ev_generation_kw, ev_market_kw, ev_immediate_kw
-       -> Dann werden die direkt geplottet.
-    B) sessions_out ist gegeben UND scenario ist gegeben
-       -> Dann aggregieren wir aus plan_*_kwh_per_step je Session auf Zeitschritte und rechnen in kW um.
+       -> werden direkt übernommen.
+    B) Wenn nicht vorhanden, aber sessions_out + scenario gegeben:
+       -> Aggregation aus plan_*_kwh_per_step über arrival_step/departure_step.
 
-    Hinweis: charger_traces_dataframe wird hier nicht zwingend benötigt, ist aber kompatibel zur Notebook-Signatur.
+    WICHTIG:
+      - keine plt-Aufrufe
+      - keine print-Ausgaben
     """
-    if timeseries_dataframe is None or len(timeseries_dataframe) == 0:
-        print("timeseries_dataframe ist leer – Mode-Stack nicht möglich.")
-        return
+    timeseries_dataframe = _require_non_empty_dataframe(timeseries_dataframe, "timeseries_dataframe")
 
     dataframe = timeseries_dataframe.copy()
     dataframe["timestamp"] = pd.to_datetime(dataframe["timestamp"])
 
-    # A) Direkte Spalten
-    generation_column = _get_column_name(dataframe, ["ev_generation_kw", "generation_kw"])
-    market_column = _get_column_name(dataframe, ["ev_market_kw", "market_kw"])
-    immediate_column = _get_column_name(dataframe, ["ev_immediate_kw", "immediate_kw"])
+    has_generation = "ev_generation_kw" in dataframe.columns
+    has_market = "ev_market_kw" in dataframe.columns
+    has_immediate = "ev_immediate_kw" in dataframe.columns
 
-    if generation_column and market_column and immediate_column:
-        plt.figure(figsize=(12, 4))
-        plt.stackplot(
-            dataframe["timestamp"],
-            dataframe[generation_column].astype(float).fillna(0.0),
-            dataframe[market_column].astype(float).fillna(0.0),
-            dataframe[immediate_column].astype(float).fillna(0.0),
-            labels=["Generation", "Market", "Immediate"],
-            alpha=0.9,
+    if has_generation and has_market and has_immediate:
+        return pd.DataFrame(
+            {
+                "timestamp": dataframe["timestamp"],
+                "ev_generation_kw": dataframe["ev_generation_kw"].astype(float).fillna(0.0),
+                "ev_market_kw": dataframe["ev_market_kw"].astype(float).fillna(0.0),
+                "ev_immediate_kw": dataframe["ev_immediate_kw"].astype(float).fillna(0.0),
+            }
         )
-        plt.xlabel("Zeit")
-        plt.ylabel("Leistung [kW]")
-        plt.title(title)
-        plt.legend(loc="upper right")
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        plt.gcf().autofmt_xdate()
-        plt.show()
-        return
 
-    # B) Aggregation aus sessions_out
     if sessions_out is None or scenario is None:
-        print(
-            "Mode-Stack: Es fehlen entweder Mode-Spalten im timeseries_dataframe "
-            "ODER sessions_out+scenario für Aggregation."
+        raise ValueError(
+            "Mode-Daten fehlen: Weder Mode-Spalten im timeseries_dataframe "
+            "noch sessions_out+scenario für Aggregation verfügbar."
         )
-        return
 
     time_resolution_min = int(scenario["time_resolution_min"])
     step_hours = float(time_resolution_min) / 60.0
-    number_steps_total = int(len(dataframe))
 
+    number_steps_total = int(len(dataframe))
     generation_kwh_per_step = np.zeros(number_steps_total, dtype=float)
     market_kwh_per_step = np.zeros(number_steps_total, dtype=float)
     immediate_kwh_per_step = np.zeros(number_steps_total, dtype=float)
@@ -2249,6 +2441,7 @@ def plot_ev_power_by_mode_stack_from_cols(
     for session in sessions_out:
         if session.get("status") != "plugged":
             continue
+
         arrival_step = int(session["arrival_step"])
         departure_step = int(session["departure_step"])
         window_length = int(departure_step - arrival_step)
@@ -2270,20 +2463,272 @@ def plot_ev_power_by_mode_stack_from_cols(
     market_kw = market_kwh_per_step / max(step_hours, 1e-12)
     immediate_kw = immediate_kwh_per_step / max(step_hours, 1e-12)
 
-    plt.figure(figsize=(12, 4))
-    plt.stackplot(
-        dataframe["timestamp"],
-        generation_kw,
-        market_kw,
-        immediate_kw,
-        labels=["Generation", "Market", "Immediate"],
-        alpha=0.9,
+    return pd.DataFrame(
+        {
+            "timestamp": dataframe["timestamp"],
+            "ev_generation_kw": generation_kw,
+            "ev_market_kw": market_kw,
+            "ev_immediate_kw": immediate_kw,
+        }
     )
-    plt.xlabel("Zeit")
-    plt.ylabel("Leistung [kW]")
-    plt.title(title)
-    plt.legend(loc="upper right")
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.gcf().autofmt_xdate()
-    plt.show()
+
+
+
+def get_most_used_vehicle_name(
+    sessions_out: Optional[list[dict]] = None,
+    charger_traces_dataframe: Optional[pd.DataFrame] = None,
+    only_plugged_sessions: bool = True,
+) -> str:
+    """
+    Determine the most-used vehicle name.
+
+    Priority:
+    1) If sessions_out is provided: count vehicle_name by sessions (recommended).
+       If only_plugged_sessions=True, only sessions with status == 'plugged' are counted.
+    2) Otherwise, fall back to counting occurrences in charger_traces_dataframe.
+
+    Returns
+    -------
+    str
+        Vehicle name with the highest count.
+    """
+    if sessions_out is not None and len(sessions_out) > 0:
+        if only_plugged_sessions:
+            vehicle_names = [s.get("vehicle_name") for s in sessions_out if s.get("status") == "plugged"]
+        else:
+            vehicle_names = [s.get("vehicle_name") for s in sessions_out]
+
+        vehicle_names = [v for v in vehicle_names if isinstance(v, str) and v.strip() != ""]
+        if len(vehicle_names) > 0:
+            return pd.Series(vehicle_names).value_counts().idxmax()
+
+    if charger_traces_dataframe is None or len(charger_traces_dataframe) == 0:
+        raise ValueError("Neither sessions_out (usable) nor charger_traces_dataframe (non-empty) provided.")
+
+    if "vehicle_name" not in charger_traces_dataframe.columns:
+        raise ValueError("charger_traces_dataframe: column 'vehicle_name' missing.")
+
+    return charger_traces_dataframe["vehicle_name"].value_counts().idxmax()
+
+
+def build_master_curve_and_actual_points_for_vehicle(
+    charger_traces_dataframe: pd.DataFrame,
+    scenario: dict,
+    vehicle_name: str,
+    start: Optional[pd.Timestamp] = None,
+    end: Optional[pd.Timestamp] = None,
+) -> Dict[str, Any]:
+    """
+    Build plot/validation data for one vehicle:
+
+    - Master curve from vehicle CSV: maximum battery power [kW] vs SoC [-]
+    - Actual points from simulation traces: charged power [kW] vs SoC [-]
+    - Violations: actual power > master max power at the same SoC
+
+    Parameters
+    ----------
+    charger_traces_dataframe:
+        Trace points from the simulation. Must contain at least:
+        - timestamp
+        - vehicle_name
+        - power column (e.g. power_kw / power_kw_site / site_power_kw)
+        - SoC column (e.g. state_of_charge / soc / ...)
+    scenario:
+        Scenario dict containing vehicles.vehicle_curve_csv.
+    vehicle_name:
+        Vehicle name to filter for (must exist in the vehicle curve CSV).
+    start, end:
+        Optional time window filter (inclusive). Use None for full horizon.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Keys used by the notebook plot:
+          - vehicle_name
+          - master_soc
+          - master_power_battery_kw
+          - actual_soc
+          - actual_power_kw
+          - allowed_power_kw_at_actual
+          - violation_mask
+          - number_violations
+          - number_points
+    """
+    if charger_traces_dataframe is None or len(charger_traces_dataframe) == 0:
+        raise ValueError("charger_traces_dataframe is empty (did you set record_charger_traces=True?).")
+
+    dataframe = charger_traces_dataframe.copy()
+
+    # Required columns
+    for column_name in ["timestamp", "vehicle_name"]:
+        if column_name not in dataframe.columns:
+            raise ValueError(f"charger_traces_dataframe: column '{column_name}' missing.")
+
+    power_column_name = _get_column_name(dataframe, ["power_kw", "power_kw_site", "site_power_kw"])
+    if power_column_name is None:
+        raise ValueError("charger_traces_dataframe: no power column found (power_kw/power_kw_site/site_power_kw).")
+
+    soc_column_name = _get_column_name(
+        dataframe, ["state_of_charge", "state_of_charge_fraction", "soc", "state_of_charge_trace"]
+    )
+    if soc_column_name is None:
+        raise ValueError("charger_traces_dataframe: no SoC column found (state_of_charge/.../soc).")
+
+    # Parse + filter time window
+    dataframe["timestamp"] = pd.to_datetime(dataframe["timestamp"], errors="coerce")
+    dataframe = dataframe.dropna(subset=["timestamp"])
+
+    if start is not None:
+        dataframe = dataframe[dataframe["timestamp"] >= pd.to_datetime(start)]
+    if end is not None:
+        dataframe = dataframe[dataframe["timestamp"] <= pd.to_datetime(end)]
+
+    # Filter vehicle
+    dataframe = dataframe[dataframe["vehicle_name"] == str(vehicle_name)]
+    if len(dataframe) == 0:
+        raise ValueError(f"No charger trace points found for vehicle_name='{vehicle_name}' in the selected window.")
+
+    # Actual points
+    actual_soc = pd.to_numeric(dataframe[soc_column_name], errors="coerce").to_numpy(dtype=float)
+    actual_power_kw = pd.to_numeric(dataframe[power_column_name], errors="coerce").to_numpy(dtype=float)
+
+    valid_mask = np.isfinite(actual_soc) & np.isfinite(actual_power_kw)
+    actual_soc = actual_soc[valid_mask]
+    actual_power_kw = actual_power_kw[valid_mask]
+
+    if len(actual_soc) == 0:
+        raise ValueError("All actual points are invalid after numeric conversion (soc/power).")
+
+    # Master curve from CSV
+    vehicle_curves_by_name = read_vehicle_load_profiles_from_csv(str(scenario["vehicles"]["vehicle_curve_csv"]))
+    if str(vehicle_name) not in vehicle_curves_by_name:
+        example_names = list(vehicle_curves_by_name.keys())[:10]
+        raise ValueError(f"Vehicle '{vehicle_name}' not found in master curves. Example names: {example_names}")
+
+    curve = vehicle_curves_by_name[str(vehicle_name)]
+    master_soc = np.array(curve.state_of_charge_fraction, dtype=float)
+    master_power_battery_kw = np.array(curve.power_kw, dtype=float)
+
+    # Allowed power at each actual SoC (battery-side, same unit)
+    allowed_power_kw_at_actual = np.interp(actual_soc, master_soc, master_power_battery_kw)
+    violation_mask = actual_power_kw > (allowed_power_kw_at_actual + 1e-9)
+
+    return {
+        "vehicle_name": str(vehicle_name),
+        "master_soc": master_soc,
+        "master_power_battery_kw": master_power_battery_kw,
+        "actual_soc": actual_soc,
+        "actual_power_kw": actual_power_kw,
+        "allowed_power_kw_at_actual": allowed_power_kw_at_actual,
+        "violation_mask": violation_mask,
+        "number_violations": int(np.sum(violation_mask)),
+        "number_points": int(len(actual_soc)),
+    }
+
+
+def choose_vehicle_for_master_curve_plot(
+    sessions_out: list[dict],
+    charger_traces_dataframe: pd.DataFrame,
+    scenario: dict,
+    start: Optional[pd.Timestamp] = None,
+    end: Optional[pd.Timestamp] = None,
+    fallback_to_window_vehicle: bool = True,
+) -> Dict[str, Any]:
+    """
+    Select a vehicle for master-curve validation.
+
+    Primary choice:
+      - Most used vehicle across the full simulation horizon (based on sessions_out).
+
+    If that vehicle has no charging trace points in the selected time window [start, end],
+    the function can optionally fall back to:
+      - Most used vehicle within the selected window (based on charger_traces_dataframe).
+
+    Parameters
+    ----------
+    sessions_out:
+        Output sessions list from the simulation.
+    charger_traces_dataframe:
+        DataFrame of per-charger trace points (requires record_charger_traces=True).
+    scenario:
+        Scenario dict (used for master curve lookup).
+    start, end:
+        Optional time window filter. If None, no filtering is applied.
+    fallback_to_window_vehicle:
+        If True, fall back to the most used vehicle in the window when the global most used
+        vehicle has no points in that window.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Keys:
+          - vehicle_name_selected
+          - vehicle_name_global_most_used
+          - used_fallback (bool)
+          - plot_data (dict): result of build_master_curve_and_actual_points_for_vehicle(...)
+    """
+    if charger_traces_dataframe is None or len(charger_traces_dataframe) == 0:
+        raise ValueError("charger_traces_dataframe is empty (did you set record_charger_traces=True?).")
+
+    # Always determine the global most-used vehicle (entire horizon)
+    vehicle_name_global = get_most_used_vehicle_name(
+        sessions_out=sessions_out,
+        charger_traces_dataframe=charger_traces_dataframe,
+        only_plugged_sessions=True,
+    )
+
+    # Try to build plot data in the requested window
+    try:
+        plot_data = build_master_curve_and_actual_points_for_vehicle(
+            charger_traces_dataframe=charger_traces_dataframe,
+            scenario=scenario,
+            vehicle_name=vehicle_name_global,
+            start=start,
+            end=end,
+        )
+        return {
+            "vehicle_name_selected": vehicle_name_global,
+            "vehicle_name_global_most_used": vehicle_name_global,
+            "used_fallback": False,
+            "plot_data": plot_data,
+        }
+    except ValueError as exc:
+        message = str(exc)
+
+        if (not fallback_to_window_vehicle) or ("No charger trace points found" not in message):
+            raise
+
+        # Fallback: choose most-used vehicle inside the window
+        window_dataframe = charger_traces_dataframe.copy()
+        window_dataframe["timestamp"] = pd.to_datetime(window_dataframe["timestamp"], errors="coerce")
+        vehicle_name_window = window_dataframe["vehicle_name"].value_counts().idxmax()
+        window_dataframe = window_dataframe.dropna(subset=["vehicle_name"])
+        window_dataframe = window_dataframe[window_dataframe["vehicle_name"].astype(str).str.strip() != ""]
+
+        if start is not None:
+            window_dataframe = window_dataframe[window_dataframe["timestamp"] >= pd.to_datetime(start)]
+        if end is not None:
+            window_dataframe = window_dataframe[window_dataframe["timestamp"] <= pd.to_datetime(end)]
+
+        if len(window_dataframe) == 0:
+            raise ValueError(
+                "Selected window contains no charger trace points at all. "
+                "Expand the window or set start/end to None."
+            )
+
+        vehicle_name_window = window_dataframe["vehicle_name"].value_counts().idxmax()
+
+        plot_data = build_master_curve_and_actual_points_for_vehicle(
+            charger_traces_dataframe=charger_traces_dataframe,
+            scenario=scenario,
+            vehicle_name=vehicle_name_window,
+            start=start,
+            end=end,
+        )
+
+        return {
+            "vehicle_name_selected": vehicle_name_window,
+            "vehicle_name_global_most_used": vehicle_name_global,
+            "used_fallback": True,
+            "plot_data": plot_data,
+        }
