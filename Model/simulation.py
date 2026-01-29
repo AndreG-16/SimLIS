@@ -62,6 +62,11 @@ def read_scenario_from_yaml(scenario_path: str) -> dict:
     for key in required_site_keys:
         if key not in scenario["site"]:
             raise ValueError(f"Pflichtfeld fehlt in YAML.site: '{key}'")
+        
+    if "timezone" not in scenario or scenario["timezone"] in (None, "", "null"):
+        inferred_tz = infer_timezone_from_holidays(scenario)
+    if inferred_tz is not None:
+        scenario["timezone"] = inferred_tz
 
     return scenario
 
@@ -149,7 +154,7 @@ def _ensure_datetime_index(
         dataframe = dataframe.groupby(level=0).mean(numeric_only=True)
 
     # Optional: Zeitzone setzen (DST-/Sommerzeit-Winterzeit-robust)
-    if timezone is not None and getattr(dataframe.index, "timezone", None) is None:
+    if timezone is not None and dataframe.index.tz is None:
         try:
             dataframe.index = dataframe.index.tz_localize(
                 timezone,
@@ -325,7 +330,7 @@ def read_local_load_profile_from_csv(
     value_column_name = original_columns[value_column_zero_based]
 
     # 2) DatetimeIndex setzen (Zeitzone von den Simulations-Timestamps übernehmen, falls vorhanden)
-    timezone = getattr(timestamps, "timezone", None)
+    timezone = timestamps.tz
     dataframe = _ensure_datetime_index(dataframe, datetime_column_name, timezone=timezone)
 
     # 3) Werte lesen (negatives abschneiden)
@@ -410,7 +415,7 @@ def read_market_profile_from_csv(
     value_column_name = original_columns[value_column_zero_based]
 
     # 2) DatetimeIndex setzen
-    timezone = getattr(timestamps, "timezone", None)
+    timezone = timestamps.tz
     dataframe = _ensure_datetime_index(dataframe, datetime_column_name, timezone=timezone)
 
     # 3) Werte lesen + Einheit konvertieren
@@ -492,7 +497,7 @@ def build_simulation_timestamps(scenario: dict) -> pd.DatetimeIndex:
     time_resolution_min = int(scenario["time_resolution_min"])
     simulation_horizon_days = int(scenario["simulation_horizon_days"])
 
-    timezone = scenario.get("timezone", None)  # falls du sie vorher im Szenario setzt/ableitest
+    timezone = scenario.get("timezone", None)
 
     start = pd.Timestamp(str(scenario["start_datetime"]))
 
@@ -502,7 +507,7 @@ def build_simulation_timestamps(scenario: dict) -> pd.DatetimeIndex:
         else:
             start = start.tz_convert(timezone)
 
-    number_steps_total = int(simulation_horizon_days) * int(24 * 60 / time_resolution_min)
+    number_steps_total = simulation_horizon_days * int(24 * 60 / time_resolution_min)
 
     timestamps = pd.date_range(
         start=start,
@@ -552,7 +557,7 @@ def read_generation_profile_from_csv(
     value_column_name = original_columns[value_column_zero_based]
 
     # 2) Jetzt DatetimeIndex setzen
-    timezone = getattr(timestamps, "timezone", None)
+    timezone = timestamps.tz
     dataframe = _ensure_datetime_index(dataframe, datetime_column_name, timezone=timezone)
 
     # 3) Werte aus der gewählten Spalte ziehen (Spalte existiert weiterhin)
@@ -746,7 +751,7 @@ def sample_sessions_for_simulation_day(
     """
     time_resolution_min = int(scenario["time_resolution_min"])
     
-    timezone = getattr(timestamps, "timezone", None)
+    timezone = timestamps.tz
     day_start = pd.Timestamp(simulation_day_start)
     if timezone is not None:
         if day_start.tzinfo is None:
@@ -896,22 +901,51 @@ def _vehicle_site_limit_kwh_per_step_from_curve(
     scenario: dict,
 ) -> float:
     """
-    Berechnet das fahrzeugseitige Energiemaximum pro Simulationsschritt (kWh/step)
-    aus der Master-Ladekurve (max. Ladeleistung in kW als Funktion des SoC).
+    Gibt die maximal zulässige Energiemenge [kWh] für genau einen Simulationsschritt zurück,
+    so dass die Master-Ladekurve auch dann nicht überschritten wird, wenn der SoC innerhalb
+    des Schritts ansteigt.
 
-    Wichtig: Die Masterkurve ist in kW. Für den Planner wird daraus kWh pro Schritt,
-    indem mit der Schritt-Dauer in Stunden multipliziert wird.
+    Idee:
+    - Ein Simulationsschritt (z.B. 15 min) wird intern in kleine Teilschritte zerlegt
+      (standardmäßig 1 Minute).
+    - In jedem Teilschritt wird die erlaubte Leistung aus der Masterkurve am aktuellen SoC
+      bestimmt und daraus die maximal zulässige Energie berechnet.
+    - So entsteht automatisch ein „Tapering“ innerhalb des Schritts.
     """
     time_resolution_min = int(scenario["time_resolution_min"])
     step_hours = _step_hours(time_resolution_min)
 
+    battery_capacity_kwh = max(float(curve.battery_capacity_kwh), 1e-9)
     soc = float(np.clip(state_of_charge_fraction, 0.0, 1.0))
 
-    max_power_kw = float(np.interp(soc, curve.state_of_charge_fraction, curve.power_kw))
-    max_power_kw = max(max_power_kw, 0.0)
+    # Substepping: 1 Minute pro Substep (bei 15-min Schritt => 15 Substeps)
+    n_substeps = max(1, min(int(time_resolution_min), 60))
+    dt_hours = float(step_hours) / float(n_substeps)
 
-    # kW * h -> kWh pro Simulationsschritt
-    return float(max_power_kw * step_hours)
+    energy_kwh_total = 0.0
+
+    for _ in range(n_substeps):
+        power_kw_allowed = float(
+            np.interp(soc, curve.state_of_charge_fraction, curve.power_kw)
+        )
+        power_kw_allowed = max(power_kw_allowed, 0.0)
+
+        # Maximal mögliche Energie in diesem Substep
+        energy_kwh = power_kw_allowed * dt_hours
+
+        # Nicht "überfüllen"
+        remaining_to_full_kwh = max(0.0, (1.0 - soc) * battery_capacity_kwh)
+        if energy_kwh > remaining_to_full_kwh:
+            energy_kwh = remaining_to_full_kwh
+
+        energy_kwh_total += energy_kwh
+        soc = min(1.0, soc + energy_kwh / battery_capacity_kwh)
+
+        if soc >= 1.0 - 1e-12:
+            break
+
+    return float(max(energy_kwh_total, 0.0))
+
 
 
 def _required_battery_energy_kwh(
@@ -1398,175 +1432,130 @@ def plan_charging_pv_first_fair_share(
       (wichtig für SoC-Kopplung in nachgelagerten Planern).
     """
     number_steps = int(session_departure_step) - int(session_arrival_step)
-    plan_site_kwh_per_step = np.zeros(number_steps, dtype=float)
+    plan_total = np.zeros(number_steps, dtype=float)
 
     if remaining_site_energy_kwh <= 0.0 or number_steps <= 0:
-        return plan_site_kwh_per_step, float(remaining_site_energy_kwh), {}
-
-    charger_limit_kwh_per_step = _charger_limit_site_kwh_per_step(scenario)
-
-    # Merkt sich, wie viel in jedem absoluten Simulationsschritt dieser Session bereits eingeplant wurde.
-    # Damit kann später ein physikalisch korrekter SoC pro Slot bestimmt werden (auch bei mehrstufiger Planung).
-    allocations: Dict[int, float] = {}
+        return plan_total, float(remaining_site_energy_kwh), {}
 
     step_indices = np.arange(int(session_arrival_step), int(session_departure_step), dtype=int)
 
-    # PV-Rest je Schritt: PV nach Grundlast minus bereits reservierter PV→EV-Anteil anderer Sessions.
-    pv_available_each_step = np.array(
+    # PV-Rest je Schritt (nach Grundlast und bereits reserviertem PV->EV)
+    pv_remaining = np.array(
         [
             _pv_available_site_energy_kwh_for_new_reservation(
                 pv_generation_kwh_per_step=pv_generation_kwh_per_step,
                 base_load_kwh_per_step=base_load_kwh_per_step,
                 reserved_pv_ev_energy_kwh_per_step=reserved_pv_ev_energy_kwh_per_step,
-                step_index=int(step_index),
+                step_index=int(i),
             )
-            for step_index in step_indices
+            for i in step_indices
         ],
         dtype=float,
     )
 
-    # PV-Slots sind nur die Zeitschritte, in denen tatsächlich PV-Überschuss für EV verfügbar ist.
-    pv_slot_mask = pv_available_each_step > 1e-12
-    pv_slot_indices = step_indices[pv_slot_mask]
-    if len(pv_slot_indices) == 0:
-        return plan_site_kwh_per_step, float(remaining_site_energy_kwh), allocations
+    pv_slot_mask = pv_remaining > 1e-12
+    pv_slots = step_indices[pv_slot_mask]
+    if len(pv_slots) == 0:
+        return plan_total, float(remaining_site_energy_kwh), {}
 
-    # Fair-Share: gleiche Energiemenge pro PV-Slot als „Zielwert“ (wird pro Slot durch Limits begrenzt).
-    fair_share_kwh_per_step = float(remaining_site_energy_kwh) / float(len(pv_slot_indices))
+    # -----------------------------
+    # PASS 1: Fair-share (chronologisch), Cap pro PV-slot
+    # -----------------------------
+    fair_share_cap = float(remaining_site_energy_kwh) / float(len(pv_slots))
 
-    # 1) Fair Share über alle PV-Slots (chronologisch)
-    for absolute_step_index in pv_slot_indices:
-        if remaining_site_energy_kwh <= 1e-12:
-            break
-
-        relative_step_index = int(absolute_step_index - int(session_arrival_step))
-
-        pv_available_kwh = _pv_available_site_energy_kwh_for_new_reservation(
+    def supply_headroom_fair(step_index: int) -> float:
+        pv_rem = _pv_available_site_energy_kwh_for_new_reservation(
             pv_generation_kwh_per_step=pv_generation_kwh_per_step,
             base_load_kwh_per_step=base_load_kwh_per_step,
             reserved_pv_ev_energy_kwh_per_step=reserved_pv_ev_energy_kwh_per_step,
-            step_index=int(absolute_step_index),
+            step_index=int(step_index),
         )
-        if pv_available_kwh <= 1e-12:
-            continue
-
-        current_state_of_charge = _compute_state_of_charge_for_step_from_allocations(
-            state_of_charge_at_arrival=float(state_of_charge_at_arrival),
-            curve=curve,
-            scenario=scenario,
-            allocated_site_kwh_by_absolute_step=allocations,
-            absolute_step_index=int(absolute_step_index),
-        )
-        vehicle_limit_kwh_per_step = _vehicle_site_limit_kwh_per_step_from_curve(
-            curve, current_state_of_charge, scenario
-        )
-
-        # Standort-Headroom: schützt davor, dass durch Grundlast/Reservierungen das Standortlimit verletzt wird.
-        # Auch wenn wir „PV-only“ planen wollen, bleibt die Gesamtbilanz (PV + Grid-Limit - Grundlast - EV-Reservierung) relevant.
-        site_headroom_kwh_per_step = _available_site_energy_kwh_for_new_reservation(
+        site_headroom = _available_site_energy_kwh_for_new_reservation(
             pv_generation_kwh_per_step=pv_generation_kwh_per_step,
             base_load_kwh_per_step=base_load_kwh_per_step,
             reserved_total_ev_energy_kwh_per_step=reserved_total_ev_energy_kwh_per_step,
             scenario=scenario,
-            step_index=int(absolute_step_index),
+            step_index=int(step_index),
         )
+        # PV-only + fair-share cap
+        return float(max(0.0, min(pv_rem, site_headroom, fair_share_cap)))
 
-        # Effektive Allokation im Slot ist die minimale Grenze aus:
-        # PV-Rest, Fair-Share-Ziel, Standort-Headroom, Charger-Limit, Fahrzeuglimit, Restbedarf.
-        allocated_site_kwh = float(
-            np.minimum(
-                np.minimum(
-                    np.minimum(np.minimum(pv_available_kwh, fair_share_kwh_per_step), site_headroom_kwh_per_step),
-                    charger_limit_kwh_per_step,
-                ),
-                np.minimum(vehicle_limit_kwh_per_step, remaining_site_energy_kwh),
-            )
-        )
-        allocated_site_kwh = max(allocated_site_kwh, 0.0)
+    def pv_share_pv_only(allocated_site_kwh: float, step_index: int) -> float:
+        # PV-only: wenn headroom korrekt ist, ist PV-Anteil = Allokation
+        return float(max(0.0, allocated_site_kwh))
 
-        if allocated_site_kwh <= 0.0:
-            continue
+    plan_1, remaining_after_1, allocations_1 = _reserve_session_energy_generic(
+        session_arrival_step=int(session_arrival_step),
+        session_departure_step=int(session_departure_step),
+        remaining_site_energy_kwh=float(remaining_site_energy_kwh),
+        ordered_step_indices=np.sort(pv_slots),  # chronologisch
+        supply_headroom_function=supply_headroom_fair,
+        pv_share_function=pv_share_pv_only,
+        reserved_total_ev_energy_kwh_per_step=reserved_total_ev_energy_kwh_per_step,
+        reserved_pv_ev_energy_kwh_per_step=reserved_pv_ev_energy_kwh_per_step,
+        curve=curve,
+        state_of_charge_at_arrival=float(state_of_charge_at_arrival),
+        scenario=scenario,
+        initial_allocations_site_kwh_by_absolute_step=None,
+    )
 
-        plan_site_kwh_per_step[relative_step_index] += allocated_site_kwh
-        reserved_total_ev_energy_kwh_per_step[int(absolute_step_index)] += allocated_site_kwh
+    plan_total += plan_1
 
-        # PV-only: dieser Teilplan reserviert PV→EV explizit (kein Grid-Anteil).
-        reserved_pv_ev_energy_kwh_per_step[int(absolute_step_index)] += allocated_site_kwh
+    if remaining_after_1 <= 1e-12:
+        return plan_total, float(remaining_after_1), allocations_1
 
-        allocations[int(absolute_step_index)] = float(allocations.get(int(absolute_step_index), 0.0)) + allocated_site_kwh
-        remaining_site_energy_kwh -= allocated_site_kwh
-
-    if remaining_site_energy_kwh <= 1e-12:
-        return plan_site_kwh_per_step, float(remaining_site_energy_kwh), allocations
-
-    # 2) Extra-Laden in PV-starken Slots (absteigend nach PV-Verfügbarkeit)
+    # -----------------------------
+    # PASS 2: Extra-Laden (PV-stärkste Slots zuerst), ohne Fair-share cap
+    # -----------------------------
+    # PV-Rest neu bewerten (nach PASS 1, weil reserved_pv... jetzt verändert ist)
     pv_strength = np.array(
         [
             _pv_available_site_energy_kwh_for_new_reservation(
                 pv_generation_kwh_per_step=pv_generation_kwh_per_step,
                 base_load_kwh_per_step=base_load_kwh_per_step,
                 reserved_pv_ev_energy_kwh_per_step=reserved_pv_ev_energy_kwh_per_step,
-                step_index=int(step_index),
+                step_index=int(i),
             )
-            for step_index in pv_slot_indices
+            for i in pv_slots
         ],
         dtype=float,
     )
-    pv_strength_ordered = pv_slot_indices[np.argsort(-pv_strength)]
+    pv_strength_order = pv_slots[np.argsort(-pv_strength)]  # absteigend
 
-    for absolute_step_index in pv_strength_ordered:
-        if remaining_site_energy_kwh <= 1e-12:
-            break
-
-        relative_step_index = int(absolute_step_index - int(session_arrival_step))
-
-        pv_available_kwh = _pv_available_site_energy_kwh_for_new_reservation(
+    def supply_headroom_extra(step_index: int) -> float:
+        pv_rem = _pv_available_site_energy_kwh_for_new_reservation(
             pv_generation_kwh_per_step=pv_generation_kwh_per_step,
             base_load_kwh_per_step=base_load_kwh_per_step,
             reserved_pv_ev_energy_kwh_per_step=reserved_pv_ev_energy_kwh_per_step,
-            step_index=int(absolute_step_index),
+            step_index=int(step_index),
         )
-        if pv_available_kwh <= 1e-12:
-            continue
-
-        current_state_of_charge = _compute_state_of_charge_for_step_from_allocations(
-            state_of_charge_at_arrival=float(state_of_charge_at_arrival),
-            curve=curve,
-            scenario=scenario,
-            allocated_site_kwh_by_absolute_step=allocations,
-            absolute_step_index=int(absolute_step_index),
-        )
-        vehicle_limit_kwh_per_step = _vehicle_site_limit_kwh_per_step_from_curve(
-            curve, current_state_of_charge, scenario
-        )
-
-        site_headroom_kwh_per_step = _available_site_energy_kwh_for_new_reservation(
+        site_headroom = _available_site_energy_kwh_for_new_reservation(
             pv_generation_kwh_per_step=pv_generation_kwh_per_step,
             base_load_kwh_per_step=base_load_kwh_per_step,
             reserved_total_ev_energy_kwh_per_step=reserved_total_ev_energy_kwh_per_step,
             scenario=scenario,
-            step_index=int(absolute_step_index),
+            step_index=int(step_index),
         )
+        return float(max(0.0, min(pv_rem, site_headroom)))
 
-        allocated_site_kwh = float(
-            np.minimum(
-                np.minimum(np.minimum(pv_available_kwh, site_headroom_kwh_per_step), charger_limit_kwh_per_step),
-                np.minimum(vehicle_limit_kwh_per_step, remaining_site_energy_kwh),
-            )
-        )
-        allocated_site_kwh = max(allocated_site_kwh, 0.0)
+    plan_2, remaining_after_2, allocations_2 = _reserve_session_energy_generic(
+        session_arrival_step=int(session_arrival_step),
+        session_departure_step=int(session_departure_step),
+        remaining_site_energy_kwh=float(remaining_after_1),
+        ordered_step_indices=pv_strength_order,
+        supply_headroom_function=supply_headroom_extra,
+        pv_share_function=pv_share_pv_only,
+        reserved_total_ev_energy_kwh_per_step=reserved_total_ev_energy_kwh_per_step,
+        reserved_pv_ev_energy_kwh_per_step=reserved_pv_ev_energy_kwh_per_step,
+        curve=curve,
+        state_of_charge_at_arrival=float(state_of_charge_at_arrival),
+        scenario=scenario,
+        # wichtig für SoC- & Charger-Headroom-Kopplung PV-Pass1 -> PV-Pass2
+        initial_allocations_site_kwh_by_absolute_step=allocations_1,
+    )
 
-        if allocated_site_kwh <= 0.0:
-            continue
-
-        plan_site_kwh_per_step[relative_step_index] += allocated_site_kwh
-        reserved_total_ev_energy_kwh_per_step[int(absolute_step_index)] += allocated_site_kwh
-        reserved_pv_ev_energy_kwh_per_step[int(absolute_step_index)] += allocated_site_kwh
-
-        allocations[int(absolute_step_index)] = float(allocations.get(int(absolute_step_index), 0.0)) + allocated_site_kwh
-        remaining_site_energy_kwh -= allocated_site_kwh
-
-    return plan_site_kwh_per_step, float(remaining_site_energy_kwh), allocations
+    plan_total += plan_2
+    return plan_total, float(remaining_after_2), allocations_2
 
 
 def plan_ev_charging_session(
@@ -1766,7 +1755,7 @@ def simulate_charging_sessions_fcfs(
     debug_rows: List[dict] = []
     sessions_out: List[dict] = []
 
-    timestamps_timezone = getattr(timestamps, "timezone", None)
+    timestamps_timezone = timestamps.tz
 
     def _normalize_datetime_to_timestamps_timezone(datetime_value) -> pd.Timestamp:
         """
@@ -2152,7 +2141,7 @@ def build_strategy_signal_series(
     timestamps: pd.DatetimeIndex,
     charging_strategy: str,
     normalize_to_internal: bool = True,
-    strategy_resolution_min: int = 15,
+    strategy_resolution_min: int | None = None,
 ) -> Tuple[pd.Series, str]:
     """
     Lädt ein strategieabhängiges Signal (generation: pv, market: Preis) und gibt Serie + Achsenlabel zurück.
