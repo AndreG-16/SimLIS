@@ -12,7 +12,7 @@ holidays:
 
 site:
   number_chargers: 5                                          # Anzahl der Ladepunkte am Standort
-  rated_power_kw: 12                                          # Verfügbare Leistung pro Ladepunkt
+  rated_power_kw: 30                                          # Verfügbare Leistung pro Ladepunkt
   grid_limit_p_avb_kw: 200                                    # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
   expected_sessions_per_charger_per_day: [3.0, 5.0]           # erwartete Ladevorgänge pro LP und Tag
   charger_efficiency: 0.95                                    # Verhäl0tnis Fahrzeugaufnahme zu abgegebener LP-Leistung

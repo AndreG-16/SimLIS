@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Tuple, Any, Callable
+from pathlib import Path
 
 # =============================================================================
 # Modulüberblick
@@ -2472,7 +2473,7 @@ def build_ev_power_by_mode_timeseries_dataframe(
         }
     )
 
-
+# Ladekurvenvalidierung: BEV-spezifische Ladekurve vs. Ist-Ladekurve
 
 def get_most_used_vehicle_name(
     sessions_out: Optional[list[dict]] = None,
@@ -2630,105 +2631,280 @@ def choose_vehicle_for_master_curve_plot(
     sessions_out: list[dict],
     charger_traces_dataframe: pd.DataFrame,
     scenario: dict,
-    start: Optional[pd.Timestamp] = None,
-    end: Optional[pd.Timestamp] = None,
-    fallback_to_window_vehicle: bool = True,
 ) -> Dict[str, Any]:
     """
-    Select a vehicle for master-curve validation.
-
-    Primary choice:
-      - Most used vehicle across the full simulation horizon (based on sessions_out).
-
-    If that vehicle has no charging trace points in the selected time window [start, end],
-    the function can optionally fall back to:
-      - Most used vehicle within the selected window (based on charger_traces_dataframe).
-
-    Parameters
-    ----------
-    sessions_out:
-        Output sessions list from the simulation.
-    charger_traces_dataframe:
-        DataFrame of per-charger trace points (requires record_charger_traces=True).
-    scenario:
-        Scenario dict (used for master curve lookup).
-    start, end:
-        Optional time window filter. If None, no filtering is applied.
-    fallback_to_window_vehicle:
-        If True, fall back to the most used vehicle in the window when the global most used
-        vehicle has no points in that window.
+    Select the globally most-used vehicle (based on sessions_out) and build master-curve
+    vs actual charging points over the full simulation horizon.
 
     Returns
     -------
     Dict[str, Any]
         Keys:
-          - vehicle_name_selected
-          - vehicle_name_global_most_used
-          - used_fallback (bool)
-          - plot_data (dict): result of build_master_curve_and_actual_points_for_vehicle(...)
+          - vehicle_name
+          - plot_data (dict): output of build_master_curve_and_actual_points_for_vehicle(...)
     """
     if charger_traces_dataframe is None or len(charger_traces_dataframe) == 0:
-        raise ValueError("charger_traces_dataframe is empty (did you set record_charger_traces=True?).")
+        raise ValueError("charger_traces_dataframe is empty (record_charger_traces=True?).")
 
-    # Always determine the global most-used vehicle (entire horizon)
     vehicle_name_global = get_most_used_vehicle_name(
         sessions_out=sessions_out,
         charger_traces_dataframe=charger_traces_dataframe,
         only_plugged_sessions=True,
     )
 
-    # Try to build plot data in the requested window
+    plot_data = build_master_curve_and_actual_points_for_vehicle(
+        charger_traces_dataframe=charger_traces_dataframe,
+        scenario=scenario,
+        vehicle_name=vehicle_name_global,
+        start=None,
+        end=None,
+    )
+
+    return {
+        "vehicle_name": vehicle_name_global,
+        "plot_data": plot_data,
+    }
+
+# =============================================================================
+# Notebook helpers (optional)
+# =============================================================================
+
+def show_strategy_status(charging_strategy: str, strategy_status: str) -> None:
+    """
+    Print a short status block for the chosen charging strategy.
+
+    Parameters
+    ----------
+    charging_strategy:
+        Strategy name from scenario (e.g. "immediate", "market", "generation").
+    strategy_status:
+        Status label (e.g. "ACTIVE", "IMMEDIATE").
+    """
+    strategy_name = (charging_strategy or "immediate").capitalize()
+    status_name = (strategy_status or "immediate").capitalize()
+    print(f"Charging Strategy: {strategy_name}")
+    print(f"Strategy Status: {status_name}")
+
+
+def decorate_title_with_status(base_title: str, charging_strategy: str, strategy_status: str) -> str:
+    """
+    Build a plot title that includes charging strategy and status.
+
+    Parameters
+    ----------
+    base_title:
+        Base plot title.
+    charging_strategy:
+        Strategy name.
+    strategy_status:
+        Status label.
+
+    Returns
+    -------
+    str
+        Combined title string.
+    """
+    strategy_name = (charging_strategy or "immediate").capitalize()
+    status_name = (strategy_status or "immediate").capitalize()
+    return f"{base_title} ({strategy_name}, {status_name})"
+
+
+def initialize_time_window(
+    timestamps: pd.DatetimeIndex,
+    scenario: dict,
+    days: int = 1,
+) -> tuple[Optional[int], Optional[pd.Timestamp], Optional[pd.Timestamp]]:
+    """
+    Create a zoom window for plots based on the first N days of the simulation.
+
+    Parameters
+    ----------
+    timestamps:
+        Simulation timestamps.
+    scenario:
+        Scenario dict (must include "time_resolution_min").
+    days:
+        Number of days to include in the zoom window.
+
+    Returns
+    -------
+    (steps_per_day, window_start, window_end)
+    """
+    if timestamps is None or len(timestamps) == 0:
+        return None, None, None
+
+    time_resolution_min = int(scenario["time_resolution_min"])
+    steps_per_day = int(24 * 60 / time_resolution_min)
+    steps_total = int(max(1, days)) * steps_per_day
+
+    window_start = pd.to_datetime(timestamps[0])
+    window_end = pd.to_datetime(timestamps[min(len(timestamps) - 1, steps_total - 1)])
+    return steps_per_day, window_start, window_end
+
+
+def get_holiday_dates_from_scenario(scenario: dict, timestamps: pd.DatetimeIndex) -> list[datetime]:
+    """
+    Read holiday dates from scenario configuration.
+
+    Supports:
+      - Manual ISO dates in scenario["holidays"]["dates"]
+      - Optional python-holidays lookup (country + subdivision)
+
+    Parameters
+    ----------
+    scenario:
+        Scenario dict.
+    timestamps:
+        Simulation timestamps (used to derive years).
+
+    Returns
+    -------
+    list[datetime]
+        Unique holiday dates normalized to date (00:00).
+    """
+    holidays_configuration = (scenario.get("holidays") or {})
+    manual_dates = holidays_configuration.get("dates") or []
+    holiday_dates: list[datetime] = []
+
+    for date_text in manual_dates:
+        try:
+            holiday_dates.append(datetime.fromisoformat(str(date_text)))
+        except Exception:
+            pass
+
     try:
-        plot_data = build_master_curve_and_actual_points_for_vehicle(
-            charger_traces_dataframe=charger_traces_dataframe,
-            scenario=scenario,
-            vehicle_name=vehicle_name_global,
-            start=start,
-            end=end,
-        )
-        return {
-            "vehicle_name_selected": vehicle_name_global,
-            "vehicle_name_global_most_used": vehicle_name_global,
-            "used_fallback": False,
-            "plot_data": plot_data,
-        }
-    except ValueError as exc:
-        message = str(exc)
+        import holidays as python_holidays  # optional dependency
 
-        if (not fallback_to_window_vehicle) or ("No charger trace points found" not in message):
-            raise
+        country_code = str(holidays_configuration.get("country", "DE"))
+        subdivision_code = holidays_configuration.get("subdivision", None)
+        years = sorted({pd.to_datetime(timestamp).year for timestamp in timestamps})
+        holiday_calendar = python_holidays.country_holidays(country_code, subdiv=subdivision_code, years=years)
+        for day in holiday_calendar.keys():
+            holiday_dates.append(datetime(day.year, day.month, day.day))
+    except Exception:
+        pass
 
-        # Fallback: choose most-used vehicle inside the window
-        window_dataframe = charger_traces_dataframe.copy()
-        window_dataframe["timestamp"] = pd.to_datetime(window_dataframe["timestamp"], errors="coerce")
-        vehicle_name_window = window_dataframe["vehicle_name"].value_counts().idxmax()
-        window_dataframe = window_dataframe.dropna(subset=["vehicle_name"])
-        window_dataframe = window_dataframe[window_dataframe["vehicle_name"].astype(str).str.strip() != ""]
+    unique_by_date = sorted({d.date(): d for d in holiday_dates}.values(), key=lambda x: x.date())
+    return unique_by_date
 
-        if start is not None:
-            window_dataframe = window_dataframe[window_dataframe["timestamp"] >= pd.to_datetime(start)]
-        if end is not None:
-            window_dataframe = window_dataframe[window_dataframe["timestamp"] <= pd.to_datetime(end)]
 
-        if len(window_dataframe) == 0:
-            raise ValueError(
-                "Selected window contains no charger trace points at all. "
-                "Expand the window or set start/end to None."
-            )
+def get_daytype_calendar(start_datetime: datetime, horizon_days: int, holiday_dates: list[datetime]) -> dict:
+    """
+    Create a day-type calendar (working_day/saturday/sunday_holiday) over the simulation horizon.
 
-        vehicle_name_window = window_dataframe["vehicle_name"].value_counts().idxmax()
+    NOTE: This function expects that _get_day_type(...) exists in this module.
 
-        plot_data = build_master_curve_and_actual_points_for_vehicle(
-            charger_traces_dataframe=charger_traces_dataframe,
-            scenario=scenario,
-            vehicle_name=vehicle_name_window,
-            start=start,
-            end=end,
-        )
+    Parameters
+    ----------
+    start_datetime:
+        Start of simulation day 0.
+    horizon_days:
+        Number of simulated days.
+    holiday_dates:
+        Holiday list.
 
-        return {
-            "vehicle_name_selected": vehicle_name_window,
-            "vehicle_name_global_most_used": vehicle_name_global,
-            "used_fallback": True,
-            "plot_data": plot_data,
-        }
+    Returns
+    -------
+    dict
+        {"working_day": [...], "saturday": [...], "sunday_holiday": [...]}
+    """
+    out = {"working_day": [], "saturday": [], "sunday_holiday": []}
+    for day_index in range(int(horizon_days)):
+        day_start = start_datetime + timedelta(days=day_index)
+        day_type = _get_day_type(day_start, holiday_dates)  # <-- IMPORTANT: no "sim."
+        out[day_type].append(day_start.date())
+    return out
+
+
+def group_sessions_by_day(sessions_out: list[dict], only_plugged: bool = False) -> dict:
+    """
+    Group sessions by arrival date.
+
+    Parameters
+    ----------
+    sessions_out:
+        Simulation output session dicts.
+    only_plugged:
+        If True, only sessions with status == "plugged" are included.
+
+    Returns
+    -------
+    dict
+        {date: [session_dict, ...], ...}
+    """
+    grouped: dict = {}
+    for session in sessions_out:
+        if only_plugged and session.get("status") != "plugged":
+            continue
+        day = pd.to_datetime(session.get("arrival_time")).date()
+        grouped.setdefault(day, []).append(session)
+    return grouped
+
+
+def resolve_paths_relative_to_yaml(scenario: dict, scenario_path: str) -> dict:
+    """
+    Resolve relative CSV paths in a loaded scenario dict relative to the YAML file location.
+
+    Parameters
+    ----------
+    scenario:
+        Loaded scenario dict.
+    scenario_path:
+        Path to scenario YAML.
+
+    Returns
+    -------
+    dict
+        Scenario copy with absolute paths.
+    """
+    base_directory = Path(scenario_path).resolve().parent
+    scenario_copy = dict(scenario)
+
+    site_section = dict(scenario_copy.get("site", {}))
+    vehicles_section = dict(scenario_copy.get("vehicles", {}))
+
+    for key in ["generation_strategy_csv", "market_strategy_csv", "base_load_csv"]:
+        if key in site_section and site_section[key]:
+            path_value = Path(str(site_section[key]))
+            if not path_value.is_absolute():
+                site_section[key] = str((base_directory / path_value).resolve())
+
+    if "vehicle_curve_csv" in vehicles_section and vehicles_section["vehicle_curve_csv"]:
+        path_value = Path(str(vehicles_section["vehicle_curve_csv"]))
+        if not path_value.is_absolute():
+            vehicles_section["vehicle_curve_csv"] = str((base_directory / path_value).resolve())
+
+    scenario_copy["site"] = site_section
+    scenario_copy["vehicles"] = vehicles_section
+    return scenario_copy
+
+
+def make_timeseries_dataframe(
+    timestamps: pd.DatetimeIndex,
+    ev_load_kw: np.ndarray,
+    scenario: dict,
+    debug_rows=None,
+    pv_generation_series=None,
+    market_price_series=None,
+) -> pd.DataFrame:
+    """
+    Build the central timeseries DataFrame for plotting.
+
+    This is a thin wrapper around build_timeseries_dataframe(...) that also ensures
+    a pandas datetime column "ts" exists.
+
+    Returns
+    -------
+    pd.DataFrame
+    """
+    dataframe = build_timeseries_dataframe(  # <-- IMPORTANT: no "sim."
+        timestamps=timestamps,
+        ev_load_kw=ev_load_kw,
+        scenario=scenario,
+        debug_rows=debug_rows,
+        generation_series=pv_generation_series,
+        market_series=market_price_series,
+    )
+    if "timestamp" in dataframe.columns and "ts" not in dataframe.columns:
+        dataframe["ts"] = pd.to_datetime(dataframe["timestamp"])
+    return dataframe
