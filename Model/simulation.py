@@ -66,6 +66,24 @@ def read_scenario_from_yaml(scenario_path: str) -> dict:
     return scenario
 
 
+def infer_timezone_from_holidays(scenario: dict) -> str | None:
+    """
+    Leitet eine Zeitzone aus der Angabe `scenario["holidays"]["country"]` ab.
+
+    Hinweis: Das ist nur für Länder mit genau einer relevanten Zeitzone eindeutig.
+    Für Deutschland ("DE") wird "Europe/Berlin" zurückgegeben.
+    """
+    holidays_cfg = scenario.get("holidays") or {}
+    country = str(holidays_cfg.get("country", "")).strip().upper()
+
+    # Minimales Mapping (bei Bedarf um weitere Länder erweitern)
+    if country == "DE":
+        return "Europe/Berlin"
+
+    # Fallback: timezone-naives Verhalten beibehalten
+    return None
+
+
 def _step_hours(time_resolution_min: int) -> float:
     """
     Rechnet eine Zeitauflösung in Minuten in Stunden pro Zeitschritt um.
@@ -73,16 +91,22 @@ def _step_hours(time_resolution_min: int) -> float:
     return float(time_resolution_min) / 60.0
 
 
-def _ensure_datetime_index(dataframe: pd.DataFrame, datetime_column_name: str) -> pd.DataFrame:
+def _ensure_datetime_index(
+    dataframe: pd.DataFrame,
+    datetime_column_name: str,
+    timezone: Any = None,
+) -> pd.DataFrame:
     """
-    Ensure a DataFrame has a clean, sorted DatetimeIndex created from a given datetime column.
+    Erstellt aus einer Zeitstempel-Spalte einen sauberen, sortierten DatetimeIndex.
 
-    Supported datetime formats (explicit, no guessing):
-      1) ISO with seconds:        "2018-01-01 02:30:00"
-      2) ISO without seconds:     "2025-06-04 00:00"
-      3) ISO with 'T':            "2025-06-04T00:00:00"
-      4) German long format:      "14.06.2025 14:00"
-      5) German short year:       "01.01.25 00:00"
+    Es werden mehrere explizite Datums-/Zeitformate unterstützt (ohne „Raten“), u.a. ISO-Formate
+    sowie gängige deutsche Formate. Ungültige Zeitstempel werden verworfen.
+
+    Optional kann eine Zeitzone übergeben werden: Dann werden die Zeitstempel in diese Zeitzone
+    lokalisiert und DST-Fälle (Sommer-/Winterzeit) werden robust behandelt:
+    - Bei doppelten Zeiten (Winterzeit-Umstellung) wird nach Möglichkeit automatisch aufgelöst.
+    - Bei nicht existierenden Zeiten (Sommerzeit-Umstellung) wird nach vorne verschoben.
+    Falls das nicht möglich ist, werden problematische Zeitstempel auf NaT gesetzt und entfernt.
     """
     dataframe = dataframe.copy()
 
@@ -123,6 +147,23 @@ def _ensure_datetime_index(dataframe: pd.DataFrame, datetime_column_name: str) -
 
     if not dataframe.index.is_unique:
         dataframe = dataframe.groupby(level=0).mean(numeric_only=True)
+
+    # Optional: Zeitzone setzen (DST-/Sommerzeit-Winterzeit-robust)
+    if timezone is not None and getattr(dataframe.index, "timezone", None) is None:
+        try:
+            dataframe.index = dataframe.index.tz_localize(
+                timezone,
+                ambiguous="infer",            # Winterzeit: doppelte Stunde -> versuchen zu inferieren
+                nonexistent="shift_forward",  # Sommerzeit: fehlende Stunde -> nach vorne schieben
+            )
+        except Exception:
+            # Konservativer Fallback: problematische Zeitstempel auf NaT setzen und entfernen
+            dataframe.index = dataframe.index.tz_localize(
+                timezone,
+                ambiguous="NaT",
+                nonexistent="NaT",
+            )
+            dataframe = dataframe[~dataframe.index.isna()]
 
     return dataframe
 
@@ -192,20 +233,29 @@ def _reindex_to_simulation_timestamps(
     method: str = "nearest",
 ) -> pd.Series:
     """
-    Reindiziert eine Zeitreihe auf die Simulations-Zeitstempel.
-    Robust gegen doppelte Zeitstempel (z.B. SMARD CSV): wir aggregieren Duplikate.
+    Bringt eine Zeitreihe auf das Zeitraster der Simulation.
+
+    Dabei werden zwei typische Probleme abgefangen:
+    1) Unsortierte Zeitstempel → werden zuerst sortiert.
+    2) Doppelte Zeitstempel (kommt z.B. bei Exporten/Marktdaten vor) → werden vor dem Reindex
+       zusammengeführt, weil `reindex()` sonst fehlschlagen kann.
+
+    Das Ergebnis enthält genau die `timestamps` der Simulation. Fehlende Werte werden gemäß
+    `method` (Standard: "nearest") aus den vorhandenen Punkten abgeleitet.
     """
+    # Reihenfolge sicherstellen (für groupby/reindex hilfreich und deterministisch)
     series = series.sort_index()
 
-    # 1) Duplikate im Index fixen (sonst knallt reindex)
+    # Doppelte Zeitstempel auflösen, damit `reindex()` sauber funktioniert.
+    # Standard: Mittelwert pro Zeitstempel (passt meist für PV-/Preiszeitreihen, wenn Duplikate identisch/ähnlich sind).
     if not series.index.is_unique:
-        # Option A: Mittelwert (bei PV/Preisen ok, wenn Duplikate identisch oder sehr nah)
         series = series.groupby(level=0).mean()
 
-        # Alternativ Option B: letztes gewinnt
+        # Alternative (falls du lieber "letzter gewinnt" willst):
         # series = series[~series.index.duplicated(keep="last")]
 
-    # 2) Reindex
+    # Auf die Simulationszeitstempel bringen (z.B. 15-min Raster).
+    # method="nearest" nimmt den zeitlich nächstgelegenen Messpunkt.
     return series.reindex(timestamps, method=method)
 
 
@@ -213,8 +263,19 @@ def _reindex_to_simulation_timestamps(
 # 1) Daten-Reader: Gebäudeprofil / Marktpreise / Ladekurven / PV-Generation
 # =============================================================================
 
-@dataclass
+@dataclass                          # erzeugt automatisch __init__, __repr__ und __eq__ für eine Klasse, die primär Daten hält.
 class VehicleChargingCurve:
+    """
+    Container für eine fahrzeugspezifische Ladekennlinie.
+
+    Die Kennlinie beschreibt die maximal aufnehmbare Ladeleistung in Abhängigkeit vom
+    Ladezustand (SoC). Sie wird z.B. genutzt, um pro Zeitschritt die zulässige
+    Ladeleistung zu begrenzen (SoC-abhängiges Fahrzeuglimit).
+
+    - `state_of_charge_fraction` enthält SoC-Werte als Bruchteil von 0.0 bis 1.0
+      (typischerweise aufsteigend sortiert).
+    - `power_kw` enthält die dazugehörige Ladeleistung in kW (gleiche Länge wie SoC-Array).
+    """
     vehicle_name: str
     manufacturer: str
     model: str
@@ -233,15 +294,27 @@ def read_local_load_profile_from_csv(
     timestamps: pd.DatetimeIndex,
 ) -> pd.Series:
     """
-    Liest ein Gebäude-/Grundlastprofil aus CSV ein, skaliert es auf einen Jahreswert
-    und liefert kWh/step zurück.
-    value_column_one_based bezieht sich auf die Original-CSV-Spalten (inkl. Zeitspalte).
+    Liest ein Gebäude-/Grundlastprofil aus einer CSV und gibt es als kWh pro Simulationszeitschritt zurück.
+
+    Skalierungslogik (Option A):
+    - 'annual_scaling_value' wird als Jahresenergie in kWh/Jahr interpretiert.
+    - Das gilt unabhängig davon, ob die CSV-Werte als
+        * "kWh" (Energie pro CSV-Zeitschritt) oder
+        * "kW"  (mittlere Leistung pro CSV-Zeitschritt)
+      vorliegen.
+
+    Das Profil wird so skaliert, dass die daraus resultierende Energie der betrachteten CSV-Zeitspanne
+    zur vorgegebenen Jahresenergie passt. Deckt die CSV nicht genau ein Jahr ab, wird anteilig skaliert:
+        Zielenergie für CSV-Zeitraum = Jahresenergie * (CSV-Stunden / 8760)
+
+    Am Ende wird das Profil auf kWh pro SIMULATIONS-Zeitschritt umgerechnet und auf `timestamps`
+    reindiziert (Zeitpunkte werden auf das Simulationsraster gemappt).
     """
     dataframe = _read_table_flex(csv_path, prefer_decimal_comma=True)
 
     datetime_column_name = "DateTime" if "DateTime" in dataframe.columns else str(dataframe.columns[0])
 
-    # 1) Wertspalte anhand ORIGINAL-CSV bestimmen (vor set_index!)
+    # 1) Wertspalte bestimmen, bevor der Index gesetzt wird (Original-Spalten der CSV)
     original_columns = list(dataframe.columns)
     value_column_zero_based = int(value_column_one_based) - 1
     if value_column_zero_based < 0 or value_column_zero_based >= len(original_columns):
@@ -251,38 +324,65 @@ def read_local_load_profile_from_csv(
         )
     value_column_name = original_columns[value_column_zero_based]
 
-    # 2) Jetzt DatetimeIndex setzen
-    dataframe = _ensure_datetime_index(dataframe, datetime_column_name)
+    # 2) DatetimeIndex setzen (Zeitzone von den Simulations-Timestamps übernehmen, falls vorhanden)
+    timezone = getattr(timestamps, "timezone", None)
+    dataframe = _ensure_datetime_index(dataframe, datetime_column_name, timezone=timezone)
 
-    # 3) Werte ziehen
+    # 3) Werte lesen (negatives abschneiden)
     raw_values = pd.to_numeric(dataframe[value_column_name], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    raw_values = np.maximum(raw_values, 0.0)
 
     cleaned_unit = (value_unit or "").strip()
 
+    # --- Zeitschrittweite des Profils in Stunden bestimmen (aus den CSV-Timestamps) ---
+    sim_step_hours = _step_hours(time_resolution_min)
+
+    profile_step_hours = sim_step_hours  # Fallback: gleiche Auflösung wie Simulation annehmen
+    if len(dataframe.index) >= 2:
+        diffs = pd.Series(dataframe.index).diff().dropna()
+        if len(diffs) > 0:
+            median_seconds = float(diffs.dt.total_seconds().median())
+            if np.isfinite(median_seconds) and median_seconds > 0:
+                profile_step_hours = median_seconds / 3600.0
+
+    # Gesamtstunden, die die CSV ungefähr abdeckt
+    csv_hours = float(len(raw_values)) * float(profile_step_hours)
+    if csv_hours <= 0:
+        raise ValueError("Gebäudeprofil: CSV-Zeitraum ist leer oder Schrittweite ungültig.")
+
+    # Zielenergie für genau den Zeitraum, den die CSV abdeckt (kWh)
+    annual_kwh = float(annual_scaling_value)
+    if annual_kwh <= 0:
+        raise ValueError("annual_scaling_value (kWh/Jahr) muss > 0 sein.")
+    target_kwh_for_csv_period = annual_kwh * (csv_hours / 8760.0)
+
+    # --- CSV-Werte zunächst in kWh pro CSV-Zeitschritt umrechnen (noch unskaliert) ---
     if cleaned_unit == "kWh":
-        shape_kwh_per_step = np.maximum(raw_values, 0.0)
-        shape_sum = float(np.sum(shape_kwh_per_step))
-        if shape_sum <= 0.0:
-            raise ValueError("Gebäudeprofil: Summe der Shape-Werte ist 0 (kWh).")
-        scaling_factor = float(annual_scaling_value) / shape_sum
-        scaled_kwh_per_step = shape_kwh_per_step * scaling_factor
+        shape_kwh_per_csv_step = raw_values.astype(float)
 
     elif cleaned_unit == "kW":
-        shape_kw = np.maximum(raw_values, 0.0)
-        shape_mean_kw = float(np.mean(shape_kw))
-        if shape_mean_kw <= 0.0:
-            raise ValueError("Gebäudeprofil: Mittelwert der Shape-Werte ist 0 (kW).")
-        scaling_factor = float(annual_scaling_value) / shape_mean_kw
-        scaled_kw = shape_kw * scaling_factor
-        scaled_kwh_per_step = scaled_kw * _step_hours(time_resolution_min)
+        # kW * Stunden_pro_CSV_Schritt -> kWh pro CSV-Schritt
+        shape_kwh_per_csv_step = raw_values.astype(float) * float(profile_step_hours)
 
     else:
         raise ValueError("value_unit muss 'kWh' oder 'kW' sein.")
 
-    series = pd.Series(scaled_kwh_per_step, index=dataframe.index, name="base_load_kwh_per_step")
+    shape_sum_kwh = float(np.sum(shape_kwh_per_csv_step))
+    if shape_sum_kwh <= 0.0:
+        raise ValueError("Gebäudeprofil: Summe der (kWh-)Shape-Werte ist 0.")
+
+    # --- Skaliert so, dass die Energie im CSV-Zeitraum der Zielenergie entspricht ---
+    scaling_factor = float(target_kwh_for_csv_period) / float(shape_sum_kwh)
+    scaled_kwh_per_csv_step = shape_kwh_per_csv_step * scaling_factor
+
+    # --- Umrechnung auf kWh pro SIMULATIONS-Zeitschritt ---
+    # erst in Leistung (kW) zurückrechnen, dann auf Simulationsschritt-Energie (kWh/step)
+    scaled_power_kw = scaled_kwh_per_csv_step / max(float(profile_step_hours), 1e-12)
+    scaled_kwh_per_sim_step = scaled_power_kw * float(sim_step_hours)
+
+    series = pd.Series(scaled_kwh_per_sim_step, index=dataframe.index, name="base_load_kwh_per_step")
     series = _reindex_to_simulation_timestamps(series, timestamps, method="nearest")
     return series
-
 
 
 def read_market_profile_from_csv(
@@ -299,7 +399,7 @@ def read_market_profile_from_csv(
 
     datetime_column_name = "Datum von" if "Datum von" in dataframe.columns else str(dataframe.columns[0])
 
-    # 1) Spaltenname anhand ORIGINALER CSV-Spalten bestimmen (vor set_index!)
+    # 1) Spaltenname anhand originaler CSV-Spalten bestimmen 
     original_columns = list(dataframe.columns)
     value_column_zero_based = int(value_column_one_based) - 1
     if value_column_zero_based < 0 or value_column_zero_based >= len(original_columns):
@@ -309,15 +409,16 @@ def read_market_profile_from_csv(
         )
     value_column_name = original_columns[value_column_zero_based]
 
-    # 2) Jetzt DatetimeIndex setzen
-    dataframe = _ensure_datetime_index(dataframe, datetime_column_name)
+    # 2) DatetimeIndex setzen
+    timezone = getattr(timestamps, "timezone", None)
+    dataframe = _ensure_datetime_index(dataframe, datetime_column_name, timezone=timezone)
 
     # 3) Werte lesen + Einheit konvertieren
     raw_values = pd.to_numeric(dataframe[value_column_name], errors="coerce").fillna(0.0).to_numpy(dtype=float)
     prices_eur_per_kwh = _convert_price_series_to_eur_per_kwh(raw_values, value_unit)
 
     series = pd.Series(prices_eur_per_kwh, index=dataframe.index, name="market_price_eur_per_kwh")
-    series = _reindex_to_simulation_timestamps(series, timestamps, method="nearest")
+    series = _reindex_to_simulation_timestamps(series, timestamps, method="ffill")
     return series
 
 
@@ -386,13 +487,28 @@ def read_vehicle_load_profiles_from_csv(vehicle_curve_csv: str) -> Dict[str, Veh
 def build_simulation_timestamps(scenario: dict) -> pd.DatetimeIndex:
     """
     Baut die Simulations-Zeitstempel anhand von Startdatum, Horizont (Tage) und Zeitschritt (min).
+    Optional werden die Zeitstempel in einer Zeitzone erzeugt (tz-aware), wenn diese im Szenario ableitbar ist.
     """
     time_resolution_min = int(scenario["time_resolution_min"])
     simulation_horizon_days = int(scenario["simulation_horizon_days"])
-    start_datetime = datetime.fromisoformat(str(scenario["start_datetime"]))
+
+    timezone = scenario.get("timezone", None)  # falls du sie vorher im Szenario setzt/ableitest
+
+    start = pd.Timestamp(str(scenario["start_datetime"]))
+
+    if timezone is not None:
+        if start.tzinfo is None:
+            start = start.tz_localize(timezone)
+        else:
+            start = start.tz_convert(timezone)
 
     number_steps_total = int(simulation_horizon_days) * int(24 * 60 / time_resolution_min)
-    timestamps = pd.date_range(start=start_datetime, periods=number_steps_total, freq=f"{time_resolution_min}min")
+
+    timestamps = pd.date_range(
+        start=start,
+        periods=number_steps_total,
+        freq=f"{time_resolution_min}min",
+    )
     return pd.DatetimeIndex(timestamps)
 
 
@@ -423,7 +539,7 @@ def read_generation_profile_from_csv(
 
     datetime_column_name = _infer_datetime_column_name_for_signal(dataframe)
 
-    # 1) Spaltenname anhand ORIGINALER CSV-Spalten bestimmen (vor set_index!)
+    # 1) Spaltenname anhand originaler CSV-Spalten bestimmen
     original_columns = list(dataframe.columns)
     value_column_zero_based = int(value_column_one_based) - 1
 
@@ -436,7 +552,8 @@ def read_generation_profile_from_csv(
     value_column_name = original_columns[value_column_zero_based]
 
     # 2) Jetzt DatetimeIndex setzen
-    dataframe = _ensure_datetime_index(dataframe, datetime_column_name)
+    timezone = getattr(timestamps, "timezone", None)
+    dataframe = _ensure_datetime_index(dataframe, datetime_column_name, timezone=timezone)
 
     # 3) Werte aus der gewählten Spalte ziehen (Spalte existiert weiterhin)
     raw_values = pd.to_numeric(dataframe[value_column_name], errors="coerce").fillna(0.0).to_numpy(dtype=float)
@@ -469,6 +586,17 @@ def read_generation_profile_from_csv(
 
 @dataclass
 class SampledSession:
+    """
+    Repräsentiert eine zufällig erzeugte (gesampelte) Ladesession innerhalb der Simulation.
+
+    Eine Session beschreibt das Verhalten eines Fahrzeugs am Standort:
+    - wann es ankommt und wieder abfährt (Zeitstempel),
+    - welche Zeitschritt-Indizes diese Zeiten im Simulationsraster haben,
+    - wie lange es parkt,
+    - mit welchem Ladezustand (SoC) es ankommt,
+    - welches Fahrzeugmodell und welche Fahrzeugklasse betroffen sind,
+    - sowie den Tagtyp (z.B. Werktag/Samstag/Sonn- bzw. Feiertag), der für die Sampling-Logik genutzt wird.
+    """
     session_id: str
     arrival_time: datetime
     departure_time: datetime
@@ -510,7 +638,6 @@ def _sample_from_distribution_component(component: dict, random_generator: np.ra
         return float(random_generator.beta(a=alpha_value, b=beta_value))
 
     if distribution_name == "lognormal":
-        # numpy: lognormal(mean, sigma) nutzt mean/sigma der zugrunde liegenden Normalverteilung
         mean_value = _sample_uniform_from_range(component.get("mu"), random_generator)  # YAML nutzt "mu"
         standard_deviation = _sample_uniform_from_range(component.get("sigma"), random_generator)  # YAML nutzt "sigma"
         standard_deviation = max(float(standard_deviation), 1e-9)
@@ -615,10 +742,24 @@ def sample_sessions_for_simulation_day(
     day_index: int,
 ) -> List[SampledSession]:
     """
-    Erzeugt (sampelt) Sessions für genau einen Tag.
+    Erzeugt Sessions für genau einen Tag.
     """
     time_resolution_min = int(scenario["time_resolution_min"])
-    steps_per_day = int(24 * 60 / time_resolution_min)
+    
+    timezone = getattr(timestamps, "timezone", None)
+    day_start = pd.Timestamp(simulation_day_start)
+    if timezone is not None:
+        if day_start.tzinfo is None:
+            day_start = day_start.tz_localize(timezone)
+        else:
+            day_start = day_start.tz_convert(timezone)
+
+    day_key = day_start.normalize()
+    day_timestamps = timestamps[timestamps.normalize() == day_key]
+    steps_per_day = int(len(day_timestamps))
+    if steps_per_day <= 0:
+        return []
+    day_start_abs_step = int(timestamps.get_loc(day_timestamps[0]))
 
     site_configuration = scenario["site"]
     number_chargers = int(site_configuration["number_chargers"])
@@ -670,7 +811,8 @@ def sample_sessions_for_simulation_day(
 
         arrival_step = int(np.floor(arrival_minutes / float(time_resolution_min)))
         arrival_step = int(np.clip(arrival_step, 0, steps_per_day - 1))
-        arrival_time = simulation_day_start + timedelta(minutes=arrival_step * time_resolution_min)
+        arrival_abs_step = day_start_abs_step + int(arrival_step)
+        arrival_time = pd.to_datetime(timestamps[arrival_abs_step]).to_pydatetime()
 
         duration_minutes = sample_from_distribution_specification(
             {"type": "mixture", "components": parking_duration_components},
@@ -686,7 +828,14 @@ def sample_sessions_for_simulation_day(
         if not allow_cross_day_charging:
             departure_step = int(min(departure_step, steps_per_day))
 
-        departure_time = simulation_day_start + timedelta(minutes=departure_step * time_resolution_min)
+        departure_abs_step = day_start_abs_step + int(departure_step)
+
+        # departure_step may equal steps_per_day (exclusive end) -> could be first step of next day
+        if departure_abs_step < len(timestamps):
+            departure_time = pd.to_datetime(timestamps[departure_abs_step]).to_pydatetime()
+        else:
+            # end boundary outside horizon: set to last timestamp + one step
+            departure_time = (pd.to_datetime(timestamps[-1]) + pd.Timedelta(minutes=time_resolution_min)).to_pydatetime()
 
         sampled_state_of_charge = sample_from_distribution_specification(
             {"type": "mixture", "components": state_of_charge_components},
@@ -721,6 +870,7 @@ def sample_sessions_for_simulation_day(
     return sampled_sessions
 
 
+
 # =============================================================================
 # 3) Strategie: Reservierungsbasierte Session-Planung (immediate / market / generation)
 # =============================================================================
@@ -728,7 +878,7 @@ def sample_sessions_for_simulation_day(
 def _charger_limit_site_kwh_per_step(scenario: dict) -> float:
     """
     Maximale abgebbare Energie pro Zeitschritt am Standort (Charger-Leistungsgrenze pro Ladepunkt).
-    Hinweis: In deinem Modell wird die Charger-Grenze pro Session/Ladepunkt angewendet.
+    Hinweis: Im Modell wird die Charger-Grenze pro Session/Ladepunkt angewendet.
     """
     return float(scenario["site"]["rated_power_kw"]) * _step_hours(int(scenario["time_resolution_min"]))
 
@@ -1496,37 +1646,6 @@ def _find_free_charger_for_interval(
     return None
 
 
-def normalize_datetime_to_simulation_grid(
-    datetime_value,
-    timestamps: pd.DatetimeIndex,
-    time_resolution_min: int,
-) -> pd.Timestamp:
-    """
-    Normalisiert einen Zeitstempel auf das Simulations-Zeitraster.
-
-    - passt Zeitzone an die Simulations-Timestamps an
-    - entfernt Sekunden/Mikrosekunden
-    - rundet nach unten auf das Zeitraster (floor auf time_resolution_min)
-    """
-    timestamps_timezone = getattr(timestamps, "tz", None)
-    timestamp_value = pd.Timestamp(datetime_value)
-
-    # Zeitzonen-Handling: an Simulations-Timestamps anpassen
-    if timestamps_timezone is not None:
-        if timestamp_value.tzinfo is None:
-            timestamp_value = timestamp_value.tz_localize(timestamps_timezone)
-        else:
-            timestamp_value = timestamp_value.tz_convert(timestamps_timezone)
-    else:
-        # Simulations-Timestamps sind tz-naiv → Session-Zeiten ebenfalls tz-naiv halten
-        if timestamp_value.tzinfo is not None:
-            timestamp_value = timestamp_value.tz_convert(None).tz_localize(None)
-
-    # Sekunden und Mikrosekunden entfernen und auf Raster runden
-    timestamp_value = timestamp_value.replace(second=0, microsecond=0)
-    timestamp_value = timestamp_value.flo
-
-
 def simulate_charging_sessions_fcfs(
     sessions: List[SampledSession],
     vehicle_curves_by_name: Dict[str, VehicleChargingCurve],
@@ -1561,7 +1680,7 @@ def simulate_charging_sessions_fcfs(
     debug_rows: List[dict] = []
     sessions_out: List[dict] = []
 
-    timestamps_timezone = getattr(timestamps, "tz", None)
+    timestamps_timezone = getattr(timestamps, "timezone", None)
 
     def _normalize_datetime_to_timestamps_timezone(datetime_value) -> pd.Timestamp:
         """
@@ -2007,14 +2126,29 @@ def build_plugged_sessions_preview_table(sessions_out: List[dict], n: int = 20) 
     return dataframe.head(int(n))
 
 
-# =============================================================================
-# Notebook-kompatible Builder
-# =============================================================================
+# -----------------------------------------------------------------------------
+# Interne Helper (klein, wiederverwendet)
+# -----------------------------------------------------------------------------
+
+POWER_COLUMN_CANDIDATES: List[str] = ["power_kw", "power_kw_site", "site_power_kw"]
+SOC_COLUMN_CANDIDATES: List[str] = ["state_of_charge", "state_of_charge_fraction", "soc", "state_of_charge_trace"]
 
 
 def _get_column_name(dataframe: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     """
-    Gibt den ersten Spaltennamen aus `candidates` zurück, der im DataFrame existiert.
+    Return the first column name from `candidates` that exists in `dataframe`.
+
+    Parameters
+    ----------
+    dataframe:
+        Input DataFrame.
+    candidates:
+        Column name candidates, ordered by preference.
+
+    Returns
+    -------
+    Optional[str]
+        First matching column name, or None if none exist.
     """
     for candidate in candidates:
         if candidate in dataframe.columns:
@@ -2024,7 +2158,24 @@ def _get_column_name(dataframe: pd.DataFrame, candidates: List[str]) -> Optional
 
 def _require_non_empty_dataframe(dataframe: Optional[pd.DataFrame], dataframe_name: str) -> pd.DataFrame:
     """
-    Stellt sicher, dass ein DataFrame existiert und nicht leer ist.
+    Ensure a DataFrame exists and is not empty.
+
+    Parameters
+    ----------
+    dataframe:
+        DataFrame to check.
+    dataframe_name:
+        Human-readable name for error messages.
+
+    Returns
+    -------
+    pd.DataFrame
+        The same DataFrame if valid.
+
+    Raises
+    ------
+    ValueError
+        If dataframe is None or empty.
     """
     if dataframe is None or len(dataframe) == 0:
         raise ValueError(f"{dataframe_name} ist leer.")
@@ -2038,10 +2189,38 @@ def _filter_time_window(
     end: Optional[datetime],
 ) -> pd.DataFrame:
     """
-    Filtert ein DataFrame auf ein Zeitfenster [start, end] basierend auf einer Timestamp-Spalte.
+    Filter a DataFrame by an inclusive time window [start, end] using a timestamp column.
+
+    The function parses timestamps with `errors="coerce"` and drops invalid timestamps.
+
+    Parameters
+    ----------
+    dataframe:
+        Input DataFrame.
+    timestamp_column_name:
+        Name of the timestamp column.
+    start:
+        Inclusive start timestamp. If None, no lower bound.
+    end:
+        Inclusive end timestamp. If None, no upper bound.
+
+    Returns
+    -------
+    pd.DataFrame
+        Filtered DataFrame (copy).
+
+    Raises
+    ------
+    ValueError
+        If no rows remain after filtering.
     """
     dataframe = dataframe.copy()
-    dataframe[timestamp_column_name] = pd.to_datetime(dataframe[timestamp_column_name])
+
+    if timestamp_column_name not in dataframe.columns:
+        raise ValueError(f"Timestamp column '{timestamp_column_name}' fehlt im DataFrame.")
+
+    dataframe[timestamp_column_name] = pd.to_datetime(dataframe[timestamp_column_name], errors="coerce")
+    dataframe = dataframe.dropna(subset=[timestamp_column_name])
 
     if start is not None:
         dataframe = dataframe[dataframe[timestamp_column_name] >= pd.to_datetime(start)]
@@ -2053,6 +2232,33 @@ def _filter_time_window(
     return dataframe
 
 
+def _clean_non_empty_strings(values: List[Any]) -> List[str]:
+    """
+    Helper to keep only non-empty strings.
+
+    Parameters
+    ----------
+    values:
+        List of candidate values.
+
+    Returns
+    -------
+    List[str]
+        Cleaned list of non-empty strings.
+    """
+    out: List[str] = []
+    for value in values:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped != "":
+                out.append(stripped)
+    return out
+
+
+# -----------------------------------------------------------------------------
+# Notebook-kompatible Builder (keine plt / keine print)
+# -----------------------------------------------------------------------------
+
 def build_power_per_charger_timeseries(
     charger_traces_dataframe: pd.DataFrame,
     charger_id: int,
@@ -2060,63 +2266,104 @@ def build_power_per_charger_timeseries(
     end: Optional[datetime] = None,
 ) -> pd.DataFrame:
     """
-    Liefert Zeitreihe der Ladeleistung eines einzelnen Ladepunkts.
+    Build a time series of charging power for one charger.
 
-    Rückgabe-Spalten:
-      - timestamp
-      - power_kw
+    Parameters
+    ----------
+    charger_traces_dataframe:
+        Trace points from the simulation. Expected columns:
+        - timestamp
+        - charger_id
+        - one of: power_kw / power_kw_site / site_power_kw
+    charger_id:
+        Charger identifier (as used in traces, usually 0-based).
+    start, end:
+        Optional inclusive time window.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns:
+          - timestamp
+          - power_kw
+          - session_id (if available)
+          - vehicle_name (if available)
+
+    Notes
+    -----
+    - This function does NOT relabel charger ids to 1..N. Do that in the notebook label only.
     """
     charger_traces_dataframe = _require_non_empty_dataframe(charger_traces_dataframe, "charger_traces_dataframe")
+    dataframe = _filter_time_window(charger_traces_dataframe, "timestamp", start=start, end=end)
 
-    dataframe = charger_traces_dataframe.copy()
-    dataframe = _filter_time_window(dataframe, "timestamp", start=start, end=end)
+    if "charger_id" not in dataframe.columns:
+        raise ValueError("charger_traces_dataframe: Spalte 'charger_id' fehlt.")
 
     dataframe = dataframe[dataframe["charger_id"] == int(charger_id)]
     if len(dataframe) == 0:
         raise ValueError(f"Keine Daten für charger_id={int(charger_id)} im gewählten Zeitfenster.")
 
-    power_column_name = _get_column_name(dataframe, ["power_kw_site", "site_power_kw", "power_kw"])
+    power_column_name = _get_column_name(dataframe, POWER_COLUMN_CANDIDATES)
     if power_column_name is None:
         raise ValueError("Keine Leistungsspalte gefunden (power_kw / power_kw_site / site_power_kw).")
 
-    out = dataframe[["timestamp", power_column_name]].copy()
+    columns_to_take = ["timestamp", power_column_name]
+    if "session_id" in dataframe.columns:
+        columns_to_take.append("session_id")
+    if "vehicle_name" in dataframe.columns:
+        columns_to_take.append("vehicle_name")
+
+    out = dataframe[columns_to_take].copy()
     out = out.rename(columns={power_column_name: "power_kw"})
-    out["power_kw"] = out["power_kw"].astype(float).fillna(0.0)
+    out["power_kw"] = pd.to_numeric(out["power_kw"], errors="coerce").astype(float).fillna(0.0)
+    out["timestamp"] = pd.to_datetime(out["timestamp"], errors="coerce")
+    out = out.dropna(subset=["timestamp"]).sort_values("timestamp")
 
     return out
 
 
 def build_ev_power_by_source_timeseries(timeseries_dataframe: pd.DataFrame) -> pd.DataFrame:
     """
-    Liefert EV-Leistung nach Quelle (PV vs Grid).
+    Build EV power time series split by source (pv vs grid).
 
-    Erwartete Spalten im timeseries_dataframe:
-      - pv_to_ev_kw
-      - grid_to_ev_kw
+    Parameters
+    ----------
+    timeseries_dataframe:
+        Central time series DataFrame (typically from build_timeseries_dataframe).
+        Expected columns:
+          - timestamp
+          - pv_to_ev_kw
+          - grid_to_ev_kw
 
-    Rückgabe:
-      - timestamp
-      - ev_from_pv_kw
-      - ev_from_grid_kw
+    Returns
+    -------
+    pd.DataFrame
+        Columns:
+          - timestamp
+          - ev_from_pv_kw
+          - ev_from_grid_kw
     """
     timeseries_dataframe = _require_non_empty_dataframe(timeseries_dataframe, "timeseries_dataframe")
 
     if "pv_to_ev_kw" not in timeseries_dataframe.columns:
-        raise ValueError("timeseries_dataframe: Spalte 'pv_to_ev_kw' fehlt (Debug nicht aktiv?).")
+        raise ValueError("timeseries_dataframe: Spalte 'pv_to_ev_kw' fehlt (record_debug=True?).")
     if "grid_to_ev_kw" not in timeseries_dataframe.columns:
-        raise ValueError("timeseries_dataframe: Spalte 'grid_to_ev_kw' fehlt (Debug nicht aktiv?).")
+        raise ValueError("timeseries_dataframe: Spalte 'grid_to_ev_kw' fehlt (record_debug=True?).")
 
     dataframe = timeseries_dataframe.copy()
-    dataframe["timestamp"] = pd.to_datetime(dataframe["timestamp"])
+    if "timestamp" not in dataframe.columns:
+        raise ValueError("timeseries_dataframe: Spalte 'timestamp' fehlt.")
 
-    out = pd.DataFrame(
+    dataframe["timestamp"] = pd.to_datetime(dataframe["timestamp"], errors="coerce")
+    dataframe = dataframe.dropna(subset=["timestamp"])
+
+    return pd.DataFrame(
         {
             "timestamp": dataframe["timestamp"],
-            "ev_from_pv_kw": dataframe["pv_to_ev_kw"].astype(float).fillna(0.0),
-            "ev_from_grid_kw": dataframe["grid_to_ev_kw"].astype(float).fillna(0.0),
+            "ev_from_pv_kw": pd.to_numeric(dataframe["pv_to_ev_kw"], errors="coerce").astype(float).fillna(0.0),
+            "ev_from_grid_kw": pd.to_numeric(dataframe["grid_to_ev_kw"], errors="coerce").astype(float).fillna(0.0),
         }
     )
-    return out
 
 
 def build_soc_timeseries_by_charger(
@@ -2128,47 +2375,43 @@ def build_soc_timeseries_by_charger(
     """
     Build per-charger state-of-charge (SoC) time series for notebook plotting.
 
-    The returned DataFrames include the following columns:
-      - timestamp: datetime-like
-      - soc: state of charge as float in [0, 1] (or whatever your trace uses)
-      - session_id: identifier of the charging session (if available in traces)
-      - vehicle_name: vehicle name (if available in traces)
-
-    Including session_id enables notebook plots to break the SoC line whenever a
-    charging session ends (unplug) and a new one begins.
+    The returned DataFrames include session_id (if present) so that notebook plots can
+    break lines between sessions (unplug/replug).
 
     Parameters
     ----------
     charger_traces_dataframe:
-        DataFrame containing charger trace points. Expected columns include:
-        'timestamp', 'charger_id', and one SoC column such as
-        'state_of_charge' / 'state_of_charge_fraction' / 'soc' / 'state_of_charge_trace'.
-        If present, 'session_id' and 'vehicle_name' are propagated to the output.
+        Trace points from the simulation. Expected columns include:
+        - timestamp
+        - charger_id
+        - SoC column: state_of_charge / state_of_charge_fraction / soc / state_of_charge_trace
+        Optional:
+        - session_id
+        - vehicle_name
     charger_ids:
-        List of charger IDs to include.
+        Charger IDs to include (as used in traces, usually 0-based).
     start, end:
-        Optional inclusive time window. If provided, trace points are filtered to [start, end].
+        Optional inclusive time window.
 
     Returns
     -------
     Dict[int, pd.DataFrame]
-        Mapping charger_id -> DataFrame with columns:
-        ['timestamp', 'soc', 'session_id'(optional), 'vehicle_name'(optional)].
+        charger_id -> DataFrame with columns:
+          - timestamp
+          - soc
+          - session_id (optional)
+          - vehicle_name (optional)
     """
-    charger_traces_dataframe = _require_non_empty_dataframe(
-        charger_traces_dataframe, "charger_traces_dataframe"
-    )
+    charger_traces_dataframe = _require_non_empty_dataframe(charger_traces_dataframe, "charger_traces_dataframe")
+    dataframe = _filter_time_window(charger_traces_dataframe, "timestamp", start=start, end=end)
 
-    dataframe = charger_traces_dataframe.copy()
-    dataframe = _filter_time_window(dataframe, "timestamp", start=start, end=end)
+    if "charger_id" not in dataframe.columns:
+        raise ValueError("charger_traces_dataframe: Spalte 'charger_id' fehlt.")
 
-    state_of_charge_column_name = _get_column_name(
-        dataframe,
-        ["state_of_charge", "state_of_charge_fraction", "soc", "state_of_charge_trace"],
-    )
-    if state_of_charge_column_name is None:
+    soc_column_name = _get_column_name(dataframe, SOC_COLUMN_CANDIDATES)
+    if soc_column_name is None:
         raise ValueError(
-            "No SoC column found (state_of_charge/state_of_charge_fraction/soc/state_of_charge_trace)."
+            "Keine SoC-Spalte gefunden (state_of_charge/state_of_charge_fraction/soc/state_of_charge_trace)."
         )
 
     has_session_id = "session_id" in dataframe.columns
@@ -2181,19 +2424,18 @@ def build_soc_timeseries_by_charger(
         if len(charger_dataframe) == 0:
             continue
 
-        columns_to_take = ["timestamp", state_of_charge_column_name]
+        columns_to_take = ["timestamp", soc_column_name]
         if has_session_id:
             columns_to_take.append("session_id")
         if has_vehicle_name:
             columns_to_take.append("vehicle_name")
 
         out = charger_dataframe[columns_to_take].copy()
-        out = out.rename(columns={state_of_charge_column_name: "soc"})
-        out["soc"] = out["soc"].astype(float).fillna(0.0)
+        out = out.rename(columns={soc_column_name: "soc"})
 
-        # Keep ordering stable for plotting/grouping
+        out["soc"] = pd.to_numeric(out["soc"], errors="coerce").astype(float)
         out["timestamp"] = pd.to_datetime(out["timestamp"], errors="coerce")
-        out = out.dropna(subset=["timestamp"]).sort_values("timestamp")
+        out = out.dropna(subset=["timestamp", "soc"]).sort_values("timestamp")
 
         output_by_charger_id[int(charger_id)] = out
 
@@ -2208,32 +2450,70 @@ def validate_against_master_curves(
     end: Optional[datetime] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Validiert gemessene/zugewiesene Ladeleistung gegen:
-      - Charger-Limit (rated_power_kw)
-      - Vehicle-Limit aus Masterkurve (SoC->max kW an Batterie, über Effizienz auf Standortseite)
+    Validate assigned charging power against:
+      1) Charger limit from scenario["site"]["rated_power_kw"]
+      2) Vehicle master curve limit (battery max power vs SoC) from vehicle curve CSV
 
-    Rückgabe:
-      (validation_dataframe, violations_dataframe)
+    IMPORTANT
+    ---------
+    This function assumes that trace power is already expressed in the same "kW" basis
+    you want to compare to the master curve. If you treat traces as battery-side power,
+    then you compare directly to the master curve (battery max power). If your traces
+    are site-side power, you must make sure your master curve is also site-side.
+    (You currently removed charger_efficiency, so this is battery-side comparison.)
+
+    Parameters
+    ----------
+    charger_traces_dataframe:
+        Trace points. Required:
+          - timestamp
+          - charger_id
+          - vehicle_name
+          - power column (power_kw / power_kw_site / site_power_kw)
+          - SoC column
+    sessions_out:
+        Unused for now (kept for backward compatibility with your notebook).
+    scenario:
+        Must contain:
+          - site.rated_power_kw
+          - vehicles.vehicle_curve_csv
+    start, end:
+        Optional inclusive time window.
+
+    Returns
+    -------
+    (validation_dataframe, violations_dataframe)
+        validation_dataframe columns:
+          - timestamp
+          - charger_id
+          - session_id
+          - vehicle_name
+          - state_of_charge
+          - power_kw
+          - charger_limit_kw
+          - vehicle_limit_kw
+          - ok_charger_limit
+          - ok_vehicle_limit
     """
     if charger_traces_dataframe is None or len(charger_traces_dataframe) == 0:
         return pd.DataFrame(), pd.DataFrame()
 
-    dataframe = charger_traces_dataframe.copy()
-    dataframe = _filter_time_window(dataframe, "timestamp", start=start, end=end)
+    dataframe = _filter_time_window(charger_traces_dataframe, "timestamp", start=start, end=end)
 
-    power_column_name = _get_column_name(dataframe, ["power_kw", "power_kw_site", "site_power_kw"])
+    power_column_name = _get_column_name(dataframe, POWER_COLUMN_CANDIDATES)
     if power_column_name is None:
         raise ValueError("charger_traces_dataframe: keine Leistungsspalte gefunden (power_kw / power_kw_site / site_power_kw).")
 
-    state_of_charge_column_name = _get_column_name(dataframe, ["state_of_charge", "state_of_charge_fraction", "soc"])
-    if state_of_charge_column_name is None:
-        raise ValueError("charger_traces_dataframe: keine SoC-Spalte gefunden (state_of_charge / state_of_charge_fraction / soc).")
+    soc_column_name = _get_column_name(dataframe, SOC_COLUMN_CANDIDATES)
+    if soc_column_name is None:
+        raise ValueError("charger_traces_dataframe: keine SoC-Spalte gefunden (state_of_charge / soc / ...).")
 
     if "vehicle_name" not in dataframe.columns:
-        raise ValueError("charger_traces_dataframe: vehicle_name fehlt.")
+        raise ValueError("charger_traces_dataframe: Spalte 'vehicle_name' fehlt.")
 
     rated_power_kw = float(scenario["site"]["rated_power_kw"])
 
+    # Uses existing reader in this module
     vehicle_curves_by_name = read_vehicle_load_profiles_from_csv(str(scenario["vehicles"]["vehicle_curve_csv"]))
 
     validation_rows: List[dict] = []
@@ -2242,25 +2522,29 @@ def validate_against_master_curves(
         vehicle_name = str(row["vehicle_name"])
         curve = vehicle_curves_by_name.get(vehicle_name)
 
-        power_kw_site = float(row[power_column_name])
-        state_of_charge_fraction = float(row[state_of_charge_column_name])
+        power_kw = float(pd.to_numeric(row[power_column_name], errors="coerce"))
+        soc_value = float(pd.to_numeric(row[soc_column_name], errors="coerce"))
 
-        charger_limit_ok = power_kw_site <= rated_power_kw + 1e-9
+        if not np.isfinite(power_kw) or not np.isfinite(soc_value):
+            continue
 
-        vehicle_limit_kw_site = np.nan
+        charger_limit_ok = power_kw <= rated_power_kw + 1e-9
+
+        vehicle_limit_kw = np.nan
         vehicle_limit_ok = True
 
         if curve is not None:
-            power_kw_at_battery = float(
+            soc_clipped = float(np.clip(soc_value, 0.0, 1.0))
+            max_power_kw_from_curve = float(
                 np.interp(
-                    float(np.clip(state_of_charge_fraction, 0.0, 1.0)),
+                    soc_clipped,
                     curve.state_of_charge_fraction,
                     curve.power_kw,
                 )
             )
-            power_kw_at_battery = max(power_kw_at_battery, 0.0)
-            vehicle_limit_kw_site = power_kw_at_battery
-            vehicle_limit_ok = power_kw_site <= vehicle_limit_kw_site + 1e-9
+            max_power_kw_from_curve = max(max_power_kw_from_curve, 0.0)
+            vehicle_limit_kw = max_power_kw_from_curve
+            vehicle_limit_ok = power_kw <= vehicle_limit_kw + 1e-9
 
         validation_rows.append(
             {
@@ -2268,16 +2552,18 @@ def validate_against_master_curves(
                 "charger_id": int(row["charger_id"]) if "charger_id" in row else np.nan,
                 "session_id": str(row["session_id"]) if "session_id" in row else "",
                 "vehicle_name": vehicle_name,
-                "state_of_charge": state_of_charge_fraction,
-                "power_kw_site": power_kw_site,
-                "charger_limit_kw_site": rated_power_kw,
-                "vehicle_limit_kw_site": float(vehicle_limit_kw_site) if np.isfinite(vehicle_limit_kw_site) else np.nan,
+                "state_of_charge": soc_value,
+                "power_kw": power_kw,
+                "charger_limit_kw": rated_power_kw,
+                "vehicle_limit_kw": float(vehicle_limit_kw) if np.isfinite(vehicle_limit_kw) else np.nan,
                 "ok_charger_limit": bool(charger_limit_ok),
                 "ok_vehicle_limit": bool(vehicle_limit_ok),
             }
         )
 
     validation_dataframe = pd.DataFrame(validation_rows)
+    if len(validation_dataframe) == 0:
+        return validation_dataframe, validation_dataframe.copy()
 
     violations_dataframe = validation_dataframe[
         (~validation_dataframe["ok_charger_limit"]) | (~validation_dataframe["ok_vehicle_limit"])
@@ -2292,19 +2578,33 @@ def build_charger_power_heatmap_matrix(
     end: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """
-    Liefert Heatmap-Matrix für Ladepunktleistung.
+    Build a heatmap matrix for per-charger power.
 
-    Rückgabe:
-      - matrix (np.ndarray)
-      - charger_ids (List[int])
-      - timestamps (List[pd.Timestamp])
+    Parameters
+    ----------
+    charger_traces_dataframe:
+        Trace points. Required:
+          - timestamp
+          - charger_id
+          - power column (power_kw / power_kw_site / site_power_kw)
+    start, end:
+        Optional inclusive time window.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Keys:
+          - matrix: np.ndarray (rows = chargers, cols = timestamps)
+          - charger_ids: List[int] (as used in traces, usually 0-based)
+          - timestamps: List[pd.Timestamp]
     """
     charger_traces_dataframe = _require_non_empty_dataframe(charger_traces_dataframe, "charger_traces_dataframe")
+    dataframe = _filter_time_window(charger_traces_dataframe, "timestamp", start=start, end=end)
 
-    dataframe = charger_traces_dataframe.copy()
-    dataframe = _filter_time_window(dataframe, "timestamp", start=start, end=end)
+    if "charger_id" not in dataframe.columns:
+        raise ValueError("charger_traces_dataframe: Spalte 'charger_id' fehlt.")
 
-    power_column_name = _get_column_name(dataframe, ["power_kw", "power_kw_site", "site_power_kw"])
+    power_column_name = _get_column_name(dataframe, POWER_COLUMN_CANDIDATES)
     if power_column_name is None:
         raise ValueError("Keine Leistungsspalte gefunden (power_kw / power_kw_site / site_power_kw).")
 
@@ -2330,45 +2630,66 @@ def build_site_overview_plot_data(
     end: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """
-    Bereitet Daten für eine Standortübersicht (Notebook-Plot) vor.
+    Prepare data for a site overview plot (no plotting here).
 
-    Liefert:
-      - dataframe: gefilterter DF (mit 'timestamp' als datetime)
-      - base_load_kw: pd.Series
-      - ev_load_kw: pd.Series
-      - total_load_kw: pd.Series
-      - pv_generation_kw: Optional[pd.Series]
-      - grid_limit_kw: float
-      - charger_limit_kw_total: float
+    Parameters
+    ----------
+    timeseries_dataframe:
+        Central time series DataFrame. Required:
+          - timestamp
+        Optional:
+          - base_load_kw
+          - ev_load_kw
+          - pv_generation_kw
+          - market_price_eur_per_kwh (or market_price)
+    scenario:
+        Must contain:
+          - site.grid_limit_p_avb_kw
+          - site.rated_power_kw
+          - site.number_chargers
+    start, end:
+        Optional inclusive time window.
 
-    WICHTIG:
-      - keine plt-Aufrufe
-      - keine print-Ausgaben
-      - 'Grid + ChargerTotal' wird nur als Zahl geliefert, nicht geplottet
+    Returns
+    -------
+    Dict[str, Any]
+        Keys:
+          - dataframe (filtered, timestamp parsed)
+          - base_load_kw (Series)
+          - ev_load_kw (Series)
+          - total_load_kw (Series)
+          - pv_generation_kw (Optional[Series])
+          - market_price_eur_per_kwh (Optional[Series])
+          - grid_limit_kw (float)
+          - charger_limit_kw_total (float)
     """
     timeseries_dataframe = _require_non_empty_dataframe(timeseries_dataframe, "timeseries_dataframe")
-
-    dataframe = timeseries_dataframe.copy()
-    dataframe = _filter_time_window(dataframe, "timestamp", start=start, end=end)
+    dataframe = _filter_time_window(timeseries_dataframe, "timestamp", start=start, end=end)
 
     grid_limit_kw = float(scenario["site"]["grid_limit_p_avb_kw"])
     charger_limit_kw_total = float(scenario["site"]["rated_power_kw"]) * float(scenario["site"]["number_chargers"])
 
     if "base_load_kw" in dataframe.columns:
-        base_load_kw = dataframe["base_load_kw"].astype(float).fillna(0.0)
+        base_load_kw = pd.to_numeric(dataframe["base_load_kw"], errors="coerce").astype(float).fillna(0.0)
     else:
         base_load_kw = pd.Series(np.zeros(len(dataframe), dtype=float), index=dataframe.index)
 
     if "ev_load_kw" in dataframe.columns:
-        ev_load_kw = dataframe["ev_load_kw"].astype(float).fillna(0.0)
+        ev_load_kw = pd.to_numeric(dataframe["ev_load_kw"], errors="coerce").astype(float).fillna(0.0)
     else:
         ev_load_kw = pd.Series(np.zeros(len(dataframe), dtype=float), index=dataframe.index)
 
     total_load_kw = (base_load_kw + ev_load_kw).fillna(0.0)
 
-    pv_generation_kw = None
+    pv_generation_kw: Optional[pd.Series] = None
     if "pv_generation_kw" in dataframe.columns:
-        pv_generation_kw = dataframe["pv_generation_kw"].astype(float).fillna(0.0)
+        pv_generation_kw = pd.to_numeric(dataframe["pv_generation_kw"], errors="coerce").astype(float).fillna(0.0)
+
+    market_price_eur_per_kwh: Optional[pd.Series] = None
+    if "market_price_eur_per_kwh" in dataframe.columns:
+        market_price_eur_per_kwh = pd.to_numeric(dataframe["market_price_eur_per_kwh"], errors="coerce").astype(float)
+    elif "market_price" in dataframe.columns:
+        market_price_eur_per_kwh = pd.to_numeric(dataframe["market_price"], errors="coerce").astype(float)
 
     return {
         "dataframe": dataframe,
@@ -2376,6 +2697,7 @@ def build_site_overview_plot_data(
         "ev_load_kw": ev_load_kw,
         "total_load_kw": total_load_kw,
         "pv_generation_kw": pv_generation_kw,
+        "market_price_eur_per_kwh": market_price_eur_per_kwh,
         "grid_limit_kw": grid_limit_kw,
         "charger_limit_kw_total": charger_limit_kw_total,
     }
@@ -2387,29 +2709,38 @@ def build_ev_power_by_mode_timeseries_dataframe(
     scenario: Optional[dict] = None,
 ) -> pd.DataFrame:
     """
-    Erstellt ein DataFrame mit EV-Leistung nach Modus für Notebook-Plots.
+    Build a time series DataFrame of EV power split by charging mode.
 
-    Ergebnis-Spalten:
+    Output columns:
       - timestamp
       - ev_generation_kw
       - ev_market_kw
       - ev_immediate_kw
 
-    Datenquellen:
-    A) Wenn timeseries_dataframe bereits Spalten enthält:
-         ev_generation_kw, ev_market_kw, ev_immediate_kw
-       -> werden direkt übernommen.
-    B) Wenn nicht vorhanden, aber sessions_out + scenario gegeben:
-       -> Aggregation aus plan_*_kwh_per_step über arrival_step/departure_step.
+    If the mode columns already exist in timeseries_dataframe, they are used directly.
+    Otherwise, the function aggregates from sessions_out plans (kWh per step) using scenario time resolution.
 
-    WICHTIG:
-      - keine plt-Aufrufe
-      - keine print-Ausgaben
+    Parameters
+    ----------
+    timeseries_dataframe:
+        Central time series DataFrame containing at least 'timestamp'.
+    sessions_out:
+        Simulation output sessions list (required if mode columns are missing).
+    scenario:
+        Scenario dict (required if mode columns are missing).
+
+    Returns
+    -------
+    pd.DataFrame
+        Mode power time series.
     """
     timeseries_dataframe = _require_non_empty_dataframe(timeseries_dataframe, "timeseries_dataframe")
 
     dataframe = timeseries_dataframe.copy()
-    dataframe["timestamp"] = pd.to_datetime(dataframe["timestamp"])
+    if "timestamp" not in dataframe.columns:
+        raise ValueError("timeseries_dataframe: Spalte 'timestamp' fehlt.")
+    dataframe["timestamp"] = pd.to_datetime(dataframe["timestamp"], errors="coerce")
+    dataframe = dataframe.dropna(subset=["timestamp"])
 
     has_generation = "ev_generation_kw" in dataframe.columns
     has_market = "ev_market_kw" in dataframe.columns
@@ -2419,9 +2750,9 @@ def build_ev_power_by_mode_timeseries_dataframe(
         return pd.DataFrame(
             {
                 "timestamp": dataframe["timestamp"],
-                "ev_generation_kw": dataframe["ev_generation_kw"].astype(float).fillna(0.0),
-                "ev_market_kw": dataframe["ev_market_kw"].astype(float).fillna(0.0),
-                "ev_immediate_kw": dataframe["ev_immediate_kw"].astype(float).fillna(0.0),
+                "ev_generation_kw": pd.to_numeric(dataframe["ev_generation_kw"], errors="coerce").astype(float).fillna(0.0),
+                "ev_market_kw": pd.to_numeric(dataframe["ev_market_kw"], errors="coerce").astype(float).fillna(0.0),
+                "ev_immediate_kw": pd.to_numeric(dataframe["ev_immediate_kw"], errors="coerce").astype(float).fillna(0.0),
             }
         )
 
@@ -2449,16 +2780,16 @@ def build_ev_power_by_mode_timeseries_dataframe(
         if window_length <= 0:
             continue
 
-        plan_generation = np.array(session.get("plan_pv_site_kwh_per_step", []), dtype=float)
-        plan_market = np.array(session.get("plan_market_site_kwh_per_step", []), dtype=float)
-        plan_immediate = np.array(session.get("plan_immediate_site_kwh_per_step", []), dtype=float)
+        plan_generation_kwh = np.array(session.get("plan_pv_site_kwh_per_step", []), dtype=float)
+        plan_market_kwh = np.array(session.get("plan_market_site_kwh_per_step", []), dtype=float)
+        plan_immediate_kwh = np.array(session.get("plan_immediate_site_kwh_per_step", []), dtype=float)
 
-        if len(plan_generation) == window_length:
-            generation_kwh_per_step[arrival_step:departure_step] += plan_generation
-        if len(plan_market) == window_length:
-            market_kwh_per_step[arrival_step:departure_step] += plan_market
-        if len(plan_immediate) == window_length:
-            immediate_kwh_per_step[arrival_step:departure_step] += plan_immediate
+        if len(plan_generation_kwh) == window_length:
+            generation_kwh_per_step[arrival_step:departure_step] += plan_generation_kwh
+        if len(plan_market_kwh) == window_length:
+            market_kwh_per_step[arrival_step:departure_step] += plan_market_kwh
+        if len(plan_immediate_kwh) == window_length:
+            immediate_kwh_per_step[arrival_step:departure_step] += plan_immediate_kwh
 
     generation_kw = generation_kwh_per_step / max(step_hours, 1e-12)
     market_kw = market_kwh_per_step / max(step_hours, 1e-12)
@@ -2473,10 +2804,13 @@ def build_ev_power_by_mode_timeseries_dataframe(
         }
     )
 
-# Ladekurvenvalidierung: BEV-spezifische Ladekurve vs. Ist-Ladekurve
+
+# -----------------------------------------------------------------------------
+# Ladekurvenvalidierung (Masterkurve vs Ist-Punkte) – global (ganzer Horizont)
+# -----------------------------------------------------------------------------
 
 def get_most_used_vehicle_name(
-    sessions_out: Optional[list[dict]] = None,
+    sessions_out: Optional[List[dict]] = None,
     charger_traces_dataframe: Optional[pd.DataFrame] = None,
     only_plugged_sessions: bool = True,
 ) -> str:
@@ -2484,9 +2818,17 @@ def get_most_used_vehicle_name(
     Determine the most-used vehicle name.
 
     Priority:
-    1) If sessions_out is provided: count vehicle_name by sessions (recommended).
-       If only_plugged_sessions=True, only sessions with status == 'plugged' are counted.
-    2) Otherwise, fall back to counting occurrences in charger_traces_dataframe.
+      1) Use sessions_out (recommended): count vehicle_name by sessions.
+      2) Fallback: use charger_traces_dataframe vehicle_name counts.
+
+    Parameters
+    ----------
+    sessions_out:
+        Session dicts from simulation output.
+    charger_traces_dataframe:
+        Trace points DataFrame for fallback.
+    only_plugged_sessions:
+        If True, only sessions with status == "plugged" are counted.
 
     Returns
     -------
@@ -2495,13 +2837,12 @@ def get_most_used_vehicle_name(
     """
     if sessions_out is not None and len(sessions_out) > 0:
         if only_plugged_sessions:
-            vehicle_names = [s.get("vehicle_name") for s in sessions_out if s.get("status") == "plugged"]
+            names = [s.get("vehicle_name") for s in sessions_out if s.get("status") == "plugged"]
         else:
-            vehicle_names = [s.get("vehicle_name") for s in sessions_out]
-
-        vehicle_names = [v for v in vehicle_names if isinstance(v, str) and v.strip() != ""]
-        if len(vehicle_names) > 0:
-            return pd.Series(vehicle_names).value_counts().idxmax()
+            names = [s.get("vehicle_name") for s in sessions_out]
+        names = _clean_non_empty_strings(names)
+        if len(names) > 0:
+            return pd.Series(names).value_counts().idxmax()
 
     if charger_traces_dataframe is None or len(charger_traces_dataframe) == 0:
         raise ValueError("Neither sessions_out (usable) nor charger_traces_dataframe (non-empty) provided.")
@@ -2509,7 +2850,10 @@ def get_most_used_vehicle_name(
     if "vehicle_name" not in charger_traces_dataframe.columns:
         raise ValueError("charger_traces_dataframe: column 'vehicle_name' missing.")
 
-    return charger_traces_dataframe["vehicle_name"].value_counts().idxmax()
+    names = _clean_non_empty_strings(list(charger_traces_dataframe["vehicle_name"].tolist()))
+    if len(names) == 0:
+        raise ValueError("charger_traces_dataframe: no usable vehicle_name values found.")
+    return pd.Series(names).value_counts().idxmax()
 
 
 def build_master_curve_and_actual_points_for_vehicle(
@@ -2522,29 +2866,29 @@ def build_master_curve_and_actual_points_for_vehicle(
     """
     Build plot/validation data for one vehicle:
 
-    - Master curve from vehicle CSV: maximum battery power [kW] vs SoC [-]
-    - Actual points from simulation traces: charged power [kW] vs SoC [-]
-    - Violations: actual power > master max power at the same SoC
+      - Master curve (from vehicle CSV): max battery power [kW] vs SoC [-]
+      - Actual points (from charger traces): charged power [kW] vs SoC [-]
+      - Violations: actual power > master max power at the same SoC
 
     Parameters
     ----------
     charger_traces_dataframe:
-        Trace points from the simulation. Must contain at least:
-        - timestamp
-        - vehicle_name
-        - power column (e.g. power_kw / power_kw_site / site_power_kw)
-        - SoC column (e.g. state_of_charge / soc / ...)
+        Simulation trace points. Must contain:
+          - timestamp
+          - vehicle_name
+          - power column (power_kw / power_kw_site / site_power_kw)
+          - SoC column (state_of_charge / soc / ...)
     scenario:
-        Scenario dict containing vehicles.vehicle_curve_csv.
+        Must contain vehicles.vehicle_curve_csv.
     vehicle_name:
-        Vehicle name to filter for (must exist in the vehicle curve CSV).
+        Vehicle name to analyze (must exist in vehicle curve CSV).
     start, end:
-        Optional time window filter (inclusive). Use None for full horizon.
+        Optional inclusive time filter. Use None/None for full horizon.
 
     Returns
     -------
     Dict[str, Any]
-        Keys used by the notebook plot:
+        Keys:
           - vehicle_name
           - master_soc
           - master_power_battery_kw
@@ -2555,27 +2899,21 @@ def build_master_curve_and_actual_points_for_vehicle(
           - number_violations
           - number_points
     """
-    if charger_traces_dataframe is None or len(charger_traces_dataframe) == 0:
-        raise ValueError("charger_traces_dataframe is empty (did you set record_charger_traces=True?).")
-
+    charger_traces_dataframe = _require_non_empty_dataframe(charger_traces_dataframe, "charger_traces_dataframe")
     dataframe = charger_traces_dataframe.copy()
 
-    # Required columns
     for column_name in ["timestamp", "vehicle_name"]:
         if column_name not in dataframe.columns:
             raise ValueError(f"charger_traces_dataframe: column '{column_name}' missing.")
 
-    power_column_name = _get_column_name(dataframe, ["power_kw", "power_kw_site", "site_power_kw"])
+    power_column_name = _get_column_name(dataframe, POWER_COLUMN_CANDIDATES)
     if power_column_name is None:
         raise ValueError("charger_traces_dataframe: no power column found (power_kw/power_kw_site/site_power_kw).")
 
-    soc_column_name = _get_column_name(
-        dataframe, ["state_of_charge", "state_of_charge_fraction", "soc", "state_of_charge_trace"]
-    )
+    soc_column_name = _get_column_name(dataframe, SOC_COLUMN_CANDIDATES)
     if soc_column_name is None:
         raise ValueError("charger_traces_dataframe: no SoC column found (state_of_charge/.../soc).")
 
-    # Parse + filter time window
     dataframe["timestamp"] = pd.to_datetime(dataframe["timestamp"], errors="coerce")
     dataframe = dataframe.dropna(subset=["timestamp"])
 
@@ -2584,12 +2922,10 @@ def build_master_curve_and_actual_points_for_vehicle(
     if end is not None:
         dataframe = dataframe[dataframe["timestamp"] <= pd.to_datetime(end)]
 
-    # Filter vehicle
     dataframe = dataframe[dataframe["vehicle_name"] == str(vehicle_name)]
     if len(dataframe) == 0:
         raise ValueError(f"No charger trace points found for vehicle_name='{vehicle_name}' in the selected window.")
 
-    # Actual points
     actual_soc = pd.to_numeric(dataframe[soc_column_name], errors="coerce").to_numpy(dtype=float)
     actual_power_kw = pd.to_numeric(dataframe[power_column_name], errors="coerce").to_numpy(dtype=float)
 
@@ -2600,7 +2936,7 @@ def build_master_curve_and_actual_points_for_vehicle(
     if len(actual_soc) == 0:
         raise ValueError("All actual points are invalid after numeric conversion (soc/power).")
 
-    # Master curve from CSV
+    # Master curve from CSV (uses existing reader in this module)
     vehicle_curves_by_name = read_vehicle_load_profiles_from_csv(str(scenario["vehicles"]["vehicle_curve_csv"]))
     if str(vehicle_name) not in vehicle_curves_by_name:
         example_names = list(vehicle_curves_by_name.keys())[:10]
@@ -2610,7 +2946,6 @@ def build_master_curve_and_actual_points_for_vehicle(
     master_soc = np.array(curve.state_of_charge_fraction, dtype=float)
     master_power_battery_kw = np.array(curve.power_kw, dtype=float)
 
-    # Allowed power at each actual SoC (battery-side, same unit)
     allowed_power_kw_at_actual = np.interp(actual_soc, master_soc, master_power_battery_kw)
     violation_mask = actual_power_kw > (allowed_power_kw_at_actual + 1e-9)
 
@@ -2628,25 +2963,26 @@ def build_master_curve_and_actual_points_for_vehicle(
 
 
 def choose_vehicle_for_master_curve_plot(
-    sessions_out: list[dict],
+    sessions_out: List[dict],
     charger_traces_dataframe: pd.DataFrame,
     scenario: dict,
 ) -> Dict[str, Any]:
     """
-    Select the globally most-used vehicle (based on sessions_out) and build master-curve
-    vs actual charging points over the full simulation horizon.
+    Select the globally most-used vehicle (entire simulation horizon) and build
+    master-curve vs actual points over the full horizon.
+
+    This matches your requirement:
+      - Always use the most-used vehicle overall
+      - Do NOT care whether it appears inside the zoom window
 
     Returns
     -------
     Dict[str, Any]
         Keys:
           - vehicle_name
-          - plot_data (dict): output of build_master_curve_and_actual_points_for_vehicle(...)
+          - plot_data  (output of build_master_curve_and_actual_points_for_vehicle with full horizon)
     """
-    if charger_traces_dataframe is None or len(charger_traces_dataframe) == 0:
-        raise ValueError("charger_traces_dataframe is empty (record_charger_traces=True?).")
-
-    vehicle_name_global = get_most_used_vehicle_name(
+    vehicle_name = get_most_used_vehicle_name(
         sessions_out=sessions_out,
         charger_traces_dataframe=charger_traces_dataframe,
         only_plugged_sessions=True,
@@ -2655,30 +2991,21 @@ def choose_vehicle_for_master_curve_plot(
     plot_data = build_master_curve_and_actual_points_for_vehicle(
         charger_traces_dataframe=charger_traces_dataframe,
         scenario=scenario,
-        vehicle_name=vehicle_name_global,
+        vehicle_name=vehicle_name,
         start=None,
         end=None,
     )
 
-    return {
-        "vehicle_name": vehicle_name_global,
-        "plot_data": plot_data,
-    }
+    return {"vehicle_name": vehicle_name, "plot_data": plot_data}
 
-# =============================================================================
-# Notebook helpers (optional)
-# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Notebook helpers (optional, kleine Utilities)
+# -----------------------------------------------------------------------------
 
 def show_strategy_status(charging_strategy: str, strategy_status: str) -> None:
     """
-    Print a short status block for the chosen charging strategy.
-
-    Parameters
-    ----------
-    charging_strategy:
-        Strategy name from scenario (e.g. "immediate", "market", "generation").
-    strategy_status:
-        Status label (e.g. "ACTIVE", "IMMEDIATE").
+    Gibt einen kurzen Statusblock zur aktuell gewählten Lademanagementstrategie aus.
     """
     strategy_name = (charging_strategy or "immediate").capitalize()
     status_name = (strategy_status or "immediate").capitalize()
@@ -2688,21 +3015,7 @@ def show_strategy_status(charging_strategy: str, strategy_status: str) -> None:
 
 def decorate_title_with_status(base_title: str, charging_strategy: str, strategy_status: str) -> str:
     """
-    Build a plot title that includes charging strategy and status.
-
-    Parameters
-    ----------
-    base_title:
-        Base plot title.
-    charging_strategy:
-        Strategy name.
-    strategy_status:
-        Status label.
-
-    Returns
-    -------
-    str
-        Combined title string.
+    Erzeugt einen Plot-Titel, der den Basistitel um Strategie-Name und Status ergänzt.
     """
     strategy_name = (charging_strategy or "immediate").capitalize()
     status_name = (strategy_status or "immediate").capitalize()
@@ -2713,58 +3026,45 @@ def initialize_time_window(
     timestamps: pd.DatetimeIndex,
     scenario: dict,
     days: int = 1,
-) -> tuple[Optional[int], Optional[pd.Timestamp], Optional[pd.Timestamp]]:
+) -> Tuple[Optional[int], Optional[pd.Timestamp], Optional[pd.Timestamp]]:
     """
-    Create a zoom window for plots based on the first N days of the simulation.
+    Erzeugt ein Zoom-Zeitfenster basierend auf den ersten N Tagen der Simulation.
 
-    Parameters
-    ----------
-    timestamps:
-        Simulation timestamps.
-    scenario:
-        Scenario dict (must include "time_resolution_min").
-    days:
-        Number of days to include in the zoom window.
-
-    Returns
-    -------
-    (steps_per_day, window_start, window_end)
+    Das Fenster wird DST-/Zeitzonen-sicher bestimmt, indem das Ende über „Start + N Tage“
+    berechnet wird (anstatt über eine feste Schrittanzahl pro Tag). Dadurch werden Tage mit
+    23 oder 25 Stunden (Sommer-/Winterzeitumstellung) korrekt abgedeckt.
     """
     if timestamps is None or len(timestamps) == 0:
         return None, None, None
 
     time_resolution_min = int(scenario["time_resolution_min"])
-    steps_per_day = int(24 * 60 / time_resolution_min)
-    steps_total = int(max(1, days)) * steps_per_day
+    days = int(max(1, days))
 
     window_start = pd.to_datetime(timestamps[0])
-    window_end = pd.to_datetime(timestamps[min(len(timestamps) - 1, steps_total - 1)])
-    return steps_per_day, window_start, window_end
+
+    # Ziel: Fenster = [window_start, window_start + days)
+    # window_end ist der letzte gültige Zeitstempel innerhalb dieses Fensters.
+    window_end_target = window_start + pd.Timedelta(days=days) - pd.Timedelta(minutes=time_resolution_min)
+
+    idx = int(timestamps.get_indexer([window_end_target], method="nearest")[0])
+    idx = max(0, min(idx, len(timestamps) - 1))
+
+    window_end = pd.to_datetime(timestamps[idx])
+
+    # steps_per_day ist bei DST nicht konstant -> None
+    return None, window_start, window_end
 
 
-def get_holiday_dates_from_scenario(scenario: dict, timestamps: pd.DatetimeIndex) -> list[datetime]:
+def get_holiday_dates_from_scenario(scenario: dict, timestamps: pd.DatetimeIndex) -> List[datetime]:
     """
-    Read holiday dates from scenario configuration.
+    Liest Feiertage aus dem Szenario und gibt eine eindeutige Liste von Feiertagsdaten zurück.
 
-    Supports:
-      - Manual ISO dates in scenario["holidays"]["dates"]
-      - Optional python-holidays lookup (country + subdivision)
-
-    Parameters
-    ----------
-    scenario:
-        Scenario dict.
-    timestamps:
-        Simulation timestamps (used to derive years).
-
-    Returns
-    -------
-    list[datetime]
-        Unique holiday dates normalized to date (00:00).
+    Es werden manuell angegebene ISO-Daten aus dem Szenario berücksichtigt und – falls verfügbar –
+    zusätzlich Feiertage über das optionale Paket `holidays` für das Land und ggf. die Region erzeugt.
     """
     holidays_configuration = (scenario.get("holidays") or {})
     manual_dates = holidays_configuration.get("dates") or []
-    holiday_dates: list[datetime] = []
+    holiday_dates: List[datetime] = []
 
     for date_text in manual_dates:
         try:
@@ -2788,74 +3088,44 @@ def get_holiday_dates_from_scenario(scenario: dict, timestamps: pd.DatetimeIndex
     return unique_by_date
 
 
-def get_daytype_calendar(start_datetime: datetime, horizon_days: int, holiday_dates: list[datetime]) -> dict:
+def get_daytype_calendar(start_datetime: datetime, horizon_days: int, holiday_dates: List[datetime]) -> Dict[str, List[Any]]:
     """
-    Create a day-type calendar (working_day/saturday/sunday_holiday) over the simulation horizon.
+    Erstellt für den gesamten Simulationshorizont einen Kalender, der jeden Tag einem Tagtyp zuordnet
+    (Arbeitstag, Samstag, Sonntag/Feiertag).
 
-    NOTE: This function expects that _get_day_type(...) exists in this module.
-
-    Parameters
-    ----------
-    start_datetime:
-        Start of simulation day 0.
-    horizon_days:
-        Number of simulated days.
-    holiday_dates:
-        Holiday list.
-
-    Returns
-    -------
-    dict
-        {"working_day": [...], "saturday": [...], "sunday_holiday": [...]}
+    Die Einordnung erfolgt über die interne Logik von `_get_day_type(...)`, wobei explizite Feiertage
+    (holiday_dates) berücksichtigt werden.
     """
-    out = {"working_day": [], "saturday": [], "sunday_holiday": []}
+    out: Dict[str, List[Any]] = {"working_day": [], "saturday": [], "sunday_holiday": []}
     for day_index in range(int(horizon_days)):
         day_start = start_datetime + timedelta(days=day_index)
-        day_type = _get_day_type(day_start, holiday_dates)  # <-- IMPORTANT: no "sim."
+        day_type = _get_day_type(day_start, holiday_dates)  # expects function in this module
         out[day_type].append(day_start.date())
     return out
 
 
-def group_sessions_by_day(sessions_out: list[dict], only_plugged: bool = False) -> dict:
+def group_sessions_by_day(sessions_out: List[dict], only_plugged: bool = False) -> Dict[Any, List[dict]]:
     """
-    Group sessions by arrival date.
+    Gruppiert Sessions nach dem Kalendertag ihrer Ankunftszeit.
 
-    Parameters
-    ----------
-    sessions_out:
-        Simulation output session dicts.
-    only_plugged:
-        If True, only sessions with status == "plugged" are included.
-
-    Returns
-    -------
-    dict
-        {date: [session_dict, ...], ...}
+    Optional können nur Sessions berücksichtigt werden, die tatsächlich „plugged“ sind.
     """
-    grouped: dict = {}
+    grouped: Dict[Any, List[dict]] = {}
     for session in sessions_out:
         if only_plugged and session.get("status") != "plugged":
             continue
-        day = pd.to_datetime(session.get("arrival_time")).date()
+        arrival_time = session.get("arrival_time")
+        day = pd.to_datetime(arrival_time).date()
         grouped.setdefault(day, []).append(session)
     return grouped
 
 
 def resolve_paths_relative_to_yaml(scenario: dict, scenario_path: str) -> dict:
     """
-    Resolve relative CSV paths in a loaded scenario dict relative to the YAML file location.
+    Löst relative Dateipfade innerhalb des Szenarios relativ zum Ordner der YAML-Datei auf.
 
-    Parameters
-    ----------
-    scenario:
-        Loaded scenario dict.
-    scenario_path:
-        Path to scenario YAML.
-
-    Returns
-    -------
-    dict
-        Scenario copy with absolute paths.
+    Dadurch können CSV-Pfade im YAML relativ angegeben werden und werden hier in absolute Pfade
+    umgewandelt, sodass das Laden unabhängig vom aktuellen Working Directory funktioniert.
     """
     base_directory = Path(scenario_path).resolve().parent
     scenario_copy = dict(scenario)
@@ -2888,16 +3158,12 @@ def make_timeseries_dataframe(
     market_price_series=None,
 ) -> pd.DataFrame:
     """
-    Build the central timeseries DataFrame for plotting.
+    Erzeugt das zentrale Timeseries-DataFrame über `build_timeseries_dataframe(...)` und stellt sicher,
+    dass zusätzlich eine gut nutzbare Datetime-Spalte `ts` vorhanden ist.
 
-    This is a thin wrapper around build_timeseries_dataframe(...) that also ensures
-    a pandas datetime column "ts" exists.
-
-    Returns
-    -------
-    pd.DataFrame
+    Diese Funktion ist als bequemer Wrapper gedacht, um Notebook- und Plot-Code zu vereinfachen.
     """
-    dataframe = build_timeseries_dataframe(  # <-- IMPORTANT: no "sim."
+    dataframe = build_timeseries_dataframe(
         timestamps=timestamps,
         ev_load_kw=ev_load_kw,
         scenario=scenario,
@@ -2906,5 +3172,5 @@ def make_timeseries_dataframe(
         market_series=market_price_series,
     )
     if "timestamp" in dataframe.columns and "ts" not in dataframe.columns:
-        dataframe["ts"] = pd.to_datetime(dataframe["timestamp"])
+        dataframe["ts"] = pd.to_datetime(dataframe["timestamp"], errors="coerce")
     return dataframe
