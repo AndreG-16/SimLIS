@@ -12,8 +12,8 @@ holidays:
 
 site:
   number_chargers: 5                                          # Anzahl der Ladepunkte am Standort
-  rated_power_kw: 20                                          # Verfügbare Leistung pro Ladepunkt
-  grid_limit_p_avb_kw: 60                                    # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  rated_power_kw: 100                                          # Verfügbare Leistung pro Ladepunkt
+  grid_limit_p_avb_kw: 200                                    # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
   expected_sessions_per_charger_per_day: [3.0, 5.0]           # erwartete Ladevorgänge pro LP und Tag
   charger_efficiency: 0.95                                    # Verhäl0tnis Fahrzeugaufnahme zu abgegebener LP-Leistung
   allow_cross_day_charging: false                             # Ermöglicht keine Ladungen über Mitternacht hinaus
@@ -61,7 +61,7 @@ site:
   base_load_csv: "../data/building_loads/office_tub_2018.csv"     # Pfad zu den Gebäudeprofilen: "../data/building_loads/office_tub_2018.csv" 
   base_load_value_col: 2                                          # Spalte mit dem Profilwert (1-basiert, z. B. Mean_Value)
   base_load_unit: "kWh"                                           # "kWh" oder "kW"
-  base_load_annual: 50000                                         # jährlicher standortspezifischer Verbrauch (kWh oder kW, passend zur Einheit)
+  base_load_annual: 500000                                         # jährlicher standortspezifischer Verbrauch (kWh oder kW, passend zur Einheit)
 
 
 # =============================================================================

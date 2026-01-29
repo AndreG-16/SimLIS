@@ -896,18 +896,22 @@ def _vehicle_site_limit_kwh_per_step_from_curve(
     scenario: dict,
 ) -> float:
     """
-    Fahrzeuglimit pro Schritt auf Standortseite (kWh/step) aus der Master-Ladekurve,
-    unter Berücksichtigung des Charger-Wirkungsgrads.
+    Berechnet das fahrzeugseitige Energiemaximum pro Simulationsschritt (kWh/step)
+    aus der Master-Ladekurve (max. Ladeleistung in kW als Funktion des SoC).
+
+    Wichtig: Die Masterkurve ist in kW. Für den Planner wird daraus kWh pro Schritt,
+    indem mit der Schritt-Dauer in Stunden multipliziert wird.
     """
     time_resolution_min = int(scenario["time_resolution_min"])
+    step_hours = _step_hours(time_resolution_min)
 
-    state_of_charge_fraction = float(np.clip(state_of_charge_fraction, 0.0, 1.0))
+    soc = float(np.clip(state_of_charge_fraction, 0.0, 1.0))
 
-    power_kw_at_battery = float(np.interp(state_of_charge_fraction, curve.state_of_charge_fraction, curve.power_kw))
-    power_kw_at_battery = max(power_kw_at_battery, 0.0)
+    max_power_kw = float(np.interp(soc, curve.state_of_charge_fraction, curve.power_kw))
+    max_power_kw = max(max_power_kw, 0.0)
 
-    power_kw_site = power_kw_at_battery
-    return max(power_kw_site, 0.0) * _step_hours(time_resolution_min)
+    # kW * h -> kWh pro Simulationsschritt
+    return float(max_power_kw * step_hours)
 
 
 def _required_battery_energy_kwh(
