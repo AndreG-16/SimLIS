@@ -57,7 +57,7 @@ def read_scenario_from_yaml(scenario_path: str) -> dict:
     for key in required_site_keys:
         if key not in scenario["site"]:
             raise ValueError(f"Pflichtfeld fehlt in YAML.site: '{key}'")
-        
+    inferred_tz = None
     if "timezone" not in scenario or scenario["timezone"] in (None, "", "null"):
         inferred_tz = infer_timezone_from_holidays(scenario)
     if inferred_tz is not None:
@@ -2852,45 +2852,6 @@ def choose_vehicle_for_master_curve_plot(
 # -----------------------------------------------------------------------------
 # Notebook Helpers (kleine Utilities)
 # -----------------------------------------------------------------------------
-
-def normalize_to_timestamps_timezone(dt, timestamps: pd.DatetimeIndex) -> pd.Timestamp:
-    """
-    Normalisiert eine Zeitangabe `dt` robust auf die Zeitzonen-Logik der Simulations-Zeitachse `timestamps`.
-
-    Ziel:
-    - Wenn `timestamps` tz-naiv ist: Ergebnis ist tz-naiv (keine tzinfo).
-    - Wenn `timestamps` tz-aware ist: Ergebnis ist tz-aware in genau dieser Zeitzone.
-
-    Regeln:
-    - `dt` kann `datetime`, `pd.Timestamp` oder ISO-String sein (alles, was `pd.Timestamp(...)` versteht).
-    - Falls `timestamps.tz is None` und `dt` tz-aware ist: tzinfo wird entfernt, OHNE die Uhrzeit umzuwandeln
-      (d.h. "lokale Uhrzeit bleibt gleich"). Das ist für "naive lokale" Simulationen typischerweise gewollt.
-    - Falls `timestamps.tz` gesetzt ist:
-        - tz-naives `dt` wird als lokale Zeit in `timestamps.tz` interpretiert (tz_localize).
-        - tz-aware `dt` wird nach `timestamps.tz` konvertiert (tz_convert).
-
-    Parameters
-    ----------
-    dt:
-        Eingabezeit (datetime/Timestamp/str).
-    timestamps:
-        Simulations-Zeitachse (entscheidend für tz-aware vs tz-naiv).
-
-    Returns
-    -------
-    pd.Timestamp
-        Normalisierte Zeit in "timestamps-Zeitzone" bzw. tz-naiv, passend zu `timestamps`.
-    """
-    tz = timestamps.tz
-    ts = pd.Timestamp(dt)
-
-    if tz is None:
-        # Simulation ist tz-naiv -> Ergebnis tz-naiv.
-        # Wenn ts tz-aware ist: tz entfernen OHNE Umrechnung (Uhrzeit bleibt).
-        return ts.tz_localize(None) if ts.tzinfo is not None else ts
-
-    # Simulation ist tz-aware
-    return ts.tz_localize(tz) if ts.tzinfo is None else ts.tz_convert(tz)
 
 
 def show_strategy_status(charging_strategy: str, strategy_status: str) -> None:
