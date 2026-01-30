@@ -27,11 +27,6 @@ from pathlib import Path
 # =============================================================================
 # 0) Hilfsfunktionen: Zeit / Einheiten
 # =============================================================================
-# Konventionen:
-# - Intern wird in kWh pro Zeitschritt gerechnet.
-# - Umrechnung kW -> kWh/step erfolgt mit step_hours = time_resolution_min / 60
-# - CSV-Eingänge können Dezimal-Komma nutzen (z.B. "2,16") und verschiedene Trenner haben.
-
 
 def read_scenario_from_yaml(scenario_path: str) -> dict:
     """
@@ -94,6 +89,33 @@ def _step_hours(time_resolution_min: int) -> float:
     Rechnet eine Zeitauflösung in Minuten in Stunden pro Zeitschritt um.
     """
     return float(time_resolution_min) / 60.0
+
+def normalize_to_timestamps_timezone(dt, timestamps: pd.DatetimeIndex) -> pd.Timestamp:
+    """
+    Normalisiert einen beliebigen Zeitwert auf die Zeitzone (und den TZ-Status) eines Simulations-Zeitrasters.
+
+    Zweck
+    -----
+    In der Simulation treten Zeitwerte in verschiedenen Formen auf (naive/aware `datetime`,
+    Strings, `pd.Timestamp`). Diese Funktion sorgt dafür, dass solche Zeitwerte konsistent zur
+    Zeitzone des Simulationsrasters `timestamps` sind, damit Vergleiche, Reindexing und Mapping
+    auf Simulationsschritte zuverlässig funktionieren – auch über Sommer-/Winterzeit (DST) hinweg.
+    """
+    tz = timestamps.tz
+    ts = pd.Timestamp(dt)
+
+    if tz is None:
+        # falls ts tz-aware: tz entfernen, lokale Zeit beibehalten
+        return ts.tz_localize(None) if ts.tzinfo is not None else ts
+
+    # tz-aware Ziel: ts in tz bringen
+    if ts.tzinfo is None:
+        ts = ts.tz_localize(tz, ambiguous="NaT", nonexistent="shift_forward")
+        if pd.isna(ts):
+            raise ValueError(f"Timestamp ist in Zeitzone {tz} nicht eindeutig/ungültig: {dt}")
+        return ts
+
+    return ts.tz_convert(tz)
 
 
 def _ensure_datetime_index(
@@ -751,13 +773,7 @@ def sample_sessions_for_simulation_day(
     """
     time_resolution_min = int(scenario["time_resolution_min"])
     
-    timezone = timestamps.tz
-    day_start = pd.Timestamp(simulation_day_start)
-    if timezone is not None:
-        if day_start.tzinfo is None:
-            day_start = day_start.tz_localize(timezone)
-        else:
-            day_start = day_start.tz_convert(timezone)
+    day_start = normalize_to_timestamps_timezone(simulation_day_start, timestamps)
 
     day_key = day_start.normalize()
     day_timestamps = timestamps[timestamps.normalize() == day_key]
@@ -1755,68 +1771,85 @@ def simulate_charging_sessions_fcfs(
     debug_rows: List[dict] = []
     sessions_out: List[dict] = []
 
-    timestamps_timezone = timestamps.tz
+    timestamps_timezone = timestamps.tz  # optional; wird unten nicht mehr zwingend gebraucht
 
     def _normalize_datetime_to_timestamps_timezone(datetime_value) -> pd.Timestamp:
         """
         Normalisiert eine Zeitangabe auf:
-        - gleiche Timezone wie timestamps
+        - gleiche Zeitzone wie timestamps
         - Minutenraster (floor auf time_resolution_min)
         - keine Sekunden/Mikrosekunden
         """
-        timestamp_value = pd.Timestamp(datetime_value)
-
-        if timestamps_timezone is not None:
-            if timestamp_value.tzinfo is None:
-                timestamp_value = timestamp_value.tz_localize(timestamps_timezone)
-            else:
-                timestamp_value = timestamp_value.tz_convert(timestamps_timezone)
-        else:
-            if timestamp_value.tzinfo is not None:
-                timestamp_value = timestamp_value.tz_convert(None).tz_localize(None)
-
+        timestamp_value = normalize_to_timestamps_timezone(datetime_value, timestamps)
         timestamp_value = timestamp_value.replace(second=0, microsecond=0)
         timestamp_value = timestamp_value.floor(f"{time_resolution_min}min")
         return timestamp_value
 
+
     def _map_datetime_to_simulation_step(datetime_value) -> int:
         """
-        Mappt eine Zeit auf einen gültigen Simulationsschritt-Index [0, number_steps_total-1].
+        Mappt eine Zeitangabe auf einen gültigen Simulationsschritt-Index [0, number_steps_total - 1].
 
         Vorgehen:
-        - Zeit normalisieren (Timezone + Raster)
-        - exakten Treffer in timestamps suchen
-        - falls nicht enthalten: nearest index bestimmen (robust)
-        - auf Grenzen clampen
+        1) Normalisieren auf die Zeitzone des Simulationsrasters und auf das Minutenraster
+        (`_normalize_datetime_to_timestamps_timezone`).
+        2) Versuchen, den Zeitstempel exakt in `timestamps` zu finden.
+        3) Falls nicht enthalten: robustes Fallback über den nächstgelegenen Index (`method="nearest"`).
+        4) Ergebnis auf gültige Index-Grenzen clampen.
+
+        Warum so?
+        - Inputs können tz-naiv/tz-aware sein oder leicht „off-grid“ liegen (Sekunden/Mikrosekunden, Export-Rundungen).
+        - Der Ansatz ist deterministisch und DST-/Zeitzonen-sicher, sofern `timestamps` korrekt aufgebaut ist.
         """
         normalized_timestamp = _normalize_datetime_to_timestamps_timezone(datetime_value)
 
         try:
             position = timestamps.get_loc(normalized_timestamp)
+
             if isinstance(position, slice):
-                # falls duplicates: nimm den ersten Index der Slice
+                # Falls Duplikate: nimm den ersten Index der Slice
                 step_index = int(position.start)
+
             elif isinstance(position, (np.ndarray, list)):
-                # selten: mehrere Treffer
+                # Selten: mehrere Treffer
                 step_index = int(position[0])
+
             else:
                 step_index = int(position)
+
         except KeyError:
-            # robust: nearest
+            # Robust: nächstgelegenen Zeitschritt finden
             nearest_positions = timestamps.get_indexer([normalized_timestamp], method="nearest")
             step_index = int(nearest_positions[0])
 
-        if step_index < 0:
-            step_index = 0
-        if step_index >= number_steps_total:
-            step_index = number_steps_total - 1
-
+        # Clamp auf gültige Grenzen
+        step_index = max(0, min(step_index, number_steps_total - 1))
         return int(step_index)
 
-    sessions_sorted = sorted(
-        sessions,
-        key=lambda session: pd.Timestamp(session.arrival_time) if getattr(session, "arrival_time", None) is not None else pd.Timestamp.min,
-    )
+
+    # -------------------------------------------------------------------------
+    # Sessions sortieren (FCFS) – Sort-Key ist tz-kompatibel, auch wenn arrival_time fehlt
+    # -------------------------------------------------------------------------
+    fallback_ts = pd.Timestamp(timestamps[0])
+
+    def _session_sort_key(session: SampledSession) -> pd.Timestamp:
+        """
+        Liefert einen sortierbaren, tz-kompatiblen Key für FCFS.
+
+        - Wenn arrival_time fehlt oder nicht parsebar ist, wird ein kompatibler Fallback-Zeitstempel verwendet,
+        damit das Sortieren nicht an tz-aware/tz-naiv Konflikten scheitert.
+        """
+        arrival_time = getattr(session, "arrival_time", None)
+        if arrival_time is None:
+            return fallback_ts
+        try:
+            return normalize_to_timestamps_timezone(arrival_time, timestamps)
+        except Exception:
+            return fallback_ts
+
+
+    sessions_sorted = sorted(sessions, key=_session_sort_key)
+
 
     for session in sessions_sorted:
         if getattr(session, "arrival_time", None) is None or getattr(session, "departure_time", None) is None:
@@ -1884,6 +1917,7 @@ def simulate_charging_sessions_fcfs(
                 }
             )
             continue
+
 
         charger_occupied_until_step[int(chosen_charger_id)] = int(session.departure_step)
 
@@ -2819,6 +2853,46 @@ def choose_vehicle_for_master_curve_plot(
 # Notebook Helpers (kleine Utilities)
 # -----------------------------------------------------------------------------
 
+def normalize_to_timestamps_timezone(dt, timestamps: pd.DatetimeIndex) -> pd.Timestamp:
+    """
+    Normalisiert eine Zeitangabe `dt` robust auf die Zeitzonen-Logik der Simulations-Zeitachse `timestamps`.
+
+    Ziel:
+    - Wenn `timestamps` tz-naiv ist: Ergebnis ist tz-naiv (keine tzinfo).
+    - Wenn `timestamps` tz-aware ist: Ergebnis ist tz-aware in genau dieser Zeitzone.
+
+    Regeln:
+    - `dt` kann `datetime`, `pd.Timestamp` oder ISO-String sein (alles, was `pd.Timestamp(...)` versteht).
+    - Falls `timestamps.tz is None` und `dt` tz-aware ist: tzinfo wird entfernt, OHNE die Uhrzeit umzuwandeln
+      (d.h. "lokale Uhrzeit bleibt gleich"). Das ist für "naive lokale" Simulationen typischerweise gewollt.
+    - Falls `timestamps.tz` gesetzt ist:
+        - tz-naives `dt` wird als lokale Zeit in `timestamps.tz` interpretiert (tz_localize).
+        - tz-aware `dt` wird nach `timestamps.tz` konvertiert (tz_convert).
+
+    Parameters
+    ----------
+    dt:
+        Eingabezeit (datetime/Timestamp/str).
+    timestamps:
+        Simulations-Zeitachse (entscheidend für tz-aware vs tz-naiv).
+
+    Returns
+    -------
+    pd.Timestamp
+        Normalisierte Zeit in "timestamps-Zeitzone" bzw. tz-naiv, passend zu `timestamps`.
+    """
+    tz = timestamps.tz
+    ts = pd.Timestamp(dt)
+
+    if tz is None:
+        # Simulation ist tz-naiv -> Ergebnis tz-naiv.
+        # Wenn ts tz-aware ist: tz entfernen OHNE Umrechnung (Uhrzeit bleibt).
+        return ts.tz_localize(None) if ts.tzinfo is not None else ts
+
+    # Simulation ist tz-aware
+    return ts.tz_localize(tz) if ts.tzinfo is None else ts.tz_convert(tz)
+
+
 def show_strategy_status(charging_strategy: str, strategy_status: str) -> None:
     """
     Gibt einen kurzen Statusblock zur aktuell gewählten Lademanagementstrategie aus.
@@ -2930,9 +3004,17 @@ def group_sessions_by_day(sessions_out: List[dict], only_plugged: bool = False) 
     for session in sessions_out:
         if only_plugged and session.get("status") != "plugged":
             continue
+
         arrival_time = session.get("arrival_time")
-        day = pd.to_datetime(arrival_time).date()
-        grouped.setdefault(day, []).append(session)
+        if arrival_time is None:
+            continue
+
+        day = pd.to_datetime(arrival_time, errors="coerce")
+        if pd.isna(day):
+            continue
+
+        grouped.setdefault(day.date(), []).append(session)
+
     return grouped
 
 
@@ -2946,8 +3028,8 @@ def resolve_paths_relative_to_yaml(scenario: dict, scenario_path: str) -> dict:
     base_directory = Path(scenario_path).resolve().parent
     scenario_copy = dict(scenario)
 
-    site_section = dict(scenario_copy.get("site", {}))
-    vehicles_section = dict(scenario_copy.get("vehicles", {}))
+    site_section = dict(scenario_copy.get("site", {}) or {})
+    vehicles_section = dict(scenario_copy.get("vehicles", {}) or {})
 
     for key in ["generation_strategy_csv", "market_strategy_csv", "base_load_csv"]:
         if key in site_section and site_section[key]:
@@ -2965,6 +3047,116 @@ def resolve_paths_relative_to_yaml(scenario: dict, scenario_path: str) -> dict:
     return scenario_copy
 
 
+def build_base_load_kwh_per_step(scenario: dict, timestamps: pd.DatetimeIndex) -> np.ndarray:
+    """
+    Erzeugt das Base-Load-Profil als Energie pro Simulationsschritt (kWh/step).
+
+    Verhalten:
+    - Wenn `scenario["site"]["base_load_csv"]` gesetzt ist:
+        - es wird über `read_local_load_profile_from_csv(...)` ein Profil eingelesen,
+          auf die interne Auflösung gebracht und als kWh/step zurückgegeben.
+    - Sonst:
+        - es wird eine konstante Grundlast `base_load_kw` angenommen und per Schritt in kWh umgerechnet.
+
+    Returns
+    -------
+    np.ndarray
+        Länge = len(timestamps), Einheit = kWh pro Schritt.
+    """
+    site_configuration = (scenario.get("site") or {})
+    time_resolution_min = int(scenario["time_resolution_min"])
+    step_hours = float(time_resolution_min) / 60.0
+
+    base_load_csv = site_configuration.get("base_load_csv")
+    if base_load_csv:
+        series = read_local_load_profile_from_csv(
+            csv_path=str(base_load_csv),
+            value_column_one_based=int(site_configuration.get("base_load_value_col", 1)),
+            value_unit=str(site_configuration.get("base_load_unit", "kW")),
+            annual_scaling_value=float(site_configuration.get("base_load_annual", 1.0)),
+            time_resolution_min=time_resolution_min,
+            timestamps=timestamps,
+        )
+        return series.to_numpy(dtype=float)
+
+    base_load_kw_constant = float(site_configuration.get("base_load_kw", 0.0))
+    return np.full(len(timestamps), base_load_kw_constant * step_hours, dtype=float)
+
+
+def build_strategy_inputs(
+    scenario: dict,
+    timestamps: pd.DatetimeIndex,
+    strategy_resolution_min: Optional[int] = None,
+    normalize_to_internal: bool = True,
+) -> Tuple[np.ndarray, Optional[Any], Optional[str], Optional[np.ndarray], Optional[Any], Optional[str]]:
+    """
+    Baut die optionalen Strategie-Zeitreihen (PV-Erzeugung, Marktpreis) in einer Notebook-freundlichen Form.
+
+    Diese Funktion kapselt die typische Notebook-Logik:
+    - Builder optional verfügbar?
+    - 2x Builder call (generation/market)
+    - Arrays bauen + Fallbacks setzen
+
+    Returns
+    -------
+    Tuple[
+        pv_generation_kwh_per_step: np.ndarray,
+        pv_generation_series: Optional[Any],
+        pv_generation_ylabel: Optional[str],
+        market_price_eur_per_kwh: Optional[np.ndarray],
+        market_price_series: Optional[Any],
+        market_price_ylabel: Optional[str],
+    ]
+    """
+    time_resolution_min = int(scenario["time_resolution_min"])
+    strategy_resolution_min = int(strategy_resolution_min or time_resolution_min)
+
+    builder = globals().get("build_strategy_signal_series", None)
+
+    pv_generation_series = None
+    pv_generation_ylabel = None
+    market_price_series = None
+    market_price_ylabel = None
+
+    if callable(builder):
+        pv_generation_series, pv_generation_ylabel = builder(
+            scenario=scenario,
+            timestamps=timestamps,
+            charging_strategy="generation",
+            normalize_to_internal=bool(normalize_to_internal),
+            strategy_resolution_min=strategy_resolution_min,
+        )
+
+        market_price_series, market_price_ylabel = builder(
+            scenario=scenario,
+            timestamps=timestamps,
+            charging_strategy="market",
+            normalize_to_internal=bool(normalize_to_internal),
+            strategy_resolution_min=strategy_resolution_min,
+        )
+
+    pv_generation_kwh_per_step = (
+        np.array(pv_generation_series, dtype=float)
+        if pv_generation_series is not None
+        else np.zeros(len(timestamps), dtype=float)
+    )
+
+    market_price_eur_per_kwh = (
+        np.array(market_price_series, dtype=float)
+        if market_price_series is not None
+        else None
+    )
+
+    return (
+        pv_generation_kwh_per_step,
+        pv_generation_series,
+        pv_generation_ylabel,
+        market_price_eur_per_kwh,
+        market_price_series,
+        market_price_ylabel,
+    )
+
+
 def make_timeseries_dataframe(
     timestamps: pd.DatetimeIndex,
     ev_load_kw: np.ndarray,
@@ -2975,9 +3167,14 @@ def make_timeseries_dataframe(
 ) -> pd.DataFrame:
     """
     Erzeugt das zentrale Timeseries-DataFrame über `build_timeseries_dataframe(...)` und stellt sicher,
-    dass zusätzlich eine gut nutzbare Datetime-Spalte `ts` vorhanden ist.
+    dass gut nutzbare Zeitspalten vorhanden sind.
 
-    Diese Funktion ist als bequemer Wrapper gedacht, um Notebook- und Plot-Code zu vereinfachen.
+    Garantien:
+    - Wenn `build_timeseries_dataframe(...)` eine Spalte `timestamp` liefert, bleibt sie erhalten.
+    - Zusätzlich wird eine Datetime-Spalte `ts` hinzugefügt (falls noch nicht vorhanden),
+      die einfach `pd.to_datetime(timestamp)` ist.
+
+    Das ist ein bequemer Wrapper, um Notebook- und Plot-Code zu vereinfachen.
     """
     dataframe = build_timeseries_dataframe(
         timestamps=timestamps,
@@ -2987,6 +3184,8 @@ def make_timeseries_dataframe(
         generation_series=pv_generation_series,
         market_series=market_price_series,
     )
+
     if "timestamp" in dataframe.columns and "ts" not in dataframe.columns:
         dataframe["ts"] = pd.to_datetime(dataframe["timestamp"], errors="coerce")
+
     return dataframe
