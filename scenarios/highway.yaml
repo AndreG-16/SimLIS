@@ -1,32 +1,83 @@
-site_type: highway      # Standort des Ladepunkts
+site_type: highway                    # Standort des Ladepunkts
 
-time_resolution_min: 15         # Zeitschritt, in der die Simulation berechnet wird
-simulation_horizon_days: 10
-+     # gewünschter Analysehorizont in Tagen
+time_resolution_min: 15               # Zeitschritt, in der die Simulation berechnet wird
+simulation_horizon_days: 10           # gewünschter Analysehorizont in Tagen
 
-start_datetime: "2026-01-01 00:00"      # Zeitpunkt, ab dem der Lastgang anfangen soll
+start_datetime: "2025-01-01 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen soll
 holidays:
   country: "DE"
-  subdivision: "BY"     # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
-  dates:                # zusätzliche bekannte betriebsfreie Tage manuell eingeben ("2026-01-01")
-    - 
+  subdivision: "BY"                   # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
+  dates: []                           # zusätzliche bekannte betriebsfreie Tage manuell eingeben, getrennt durch neue Zeile (- "2026-01-01")
+
 
 site:
-  number_chargers: 10                                     # Anzahl der Ladepunkte am Standort
-  rated_power_kw: 300                                     # Verfügbare Leistung pro Ladepunkt
-  grid_limit_p_avb_kw: 5000                               # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
-  expected_sessions_per_charger_per_day: [5.0, 14.0]      # erwartete Ladevorgänge pro LP und Tag
-  charger_efficiency: 0.95                                # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
-  charging_strategy: "immediate"                          # Strombereitstellungsstrategie 
-  allow_cross_day_charging: true                          # Ermöglicht Ladungen über Mitternacht hinaus
+  number_chargers: 10                                         # Anzahl der Ladepunkte am Standort
+  rated_power_kw: 300                                         # Verfügbare Leistung pro Ladepunkt
+  grid_limit_p_avb_kw: 2000                                   # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  expected_sessions_per_charger_per_day: [5.0, 14.0]          # erwartete Ladevorgänge pro LP und Tag
+  charger_efficiency: 0.95                                    # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
+  allow_cross_day_charging: true                              # Ermöglicht Ladungen über Mitternacht hinaus
 
+  # =============================================================================
+  # Lademanagementstrategie des Standorts
+  # =============================================================================
+  # Daten für generation / market: https://www.smard.de/home/downloadcenter/download-marktdaten/
+
+  charging_strategy: "immediate"                                          # Lademanagementstrategie: "immediate" (default), "market", "generation"
+
+  # CSV-Datei: PV-Erzeugung (generation)
+  generation_strategy_csv: "../data/strategies/generation/latest.csv"     # Pfad bei vorhandenen Daten zur Stromgeneration
+  generation_strategy_value_col: 7                                        # Spalte mit den Werten (1-basiert)
+  generation_strategy_unit: "MWh"                                         # Einheit ("MWh", "kWh", "kW", "€/MWh")
+  pv_profile_reference_kwp: 108500000                                     # Referenz installierte Leistung (z. B. DE gesamt)
+  pv_system_size_kwp: 750                                                 # Größe der untersuchten Anlage in kWp
+
+  # CSV-Datei: Marktpreise (market)
+  market_strategy_csv: "../data/strategies/market/latest.csv"             # Pfad bei vorhandenen Daten zu Strompreisen
+  market_strategy_value_col: 3                                            # Spalte mit den Werten (1-basiert)
+  market_strategy_unit: "€/MWh"                                           # Einheit (z. B. "€/MWh", "€/kWh")
+
+
+  # =============================================================================
+  # Grundlast des Standorts - Gebäudeprofil
+  # =============================================================================
+  # Die Grundlast beschreibt den zeitlich aufgelösten Stromverbrauch des Gebäudes im 15-Minuten-Raster 
+  #
+  # Wird eine CSV angegeben, wird deren Profil als zeitlicher Verlauf ("Shape") verwendet und auf den 
+  # angegebenen Standort skaliert:
+  # - base_load_unit = "kWh":
+  #     CSV-Werte sind Energie pro Zeitschritt (z. B. HTW-Profile, auf 1000 kWh/Jahr normiert).
+  #     Die Werte werden auf base_load_annual skaliert und anschließend in kW umgerechnet.
+  # - base_load_unit = "kW":
+  #     CSV-Werte sind mittlere Leistung je Zeitschritt.
+  #     Das Profil wird so skaliert, dass seine mittlere Leistung base_load_annual entspricht.
+  #
+  # Ist keine CSV angegeben, wird eine konstante Grundlast verwendet.
+
+  # Option A: konstante Grundlast (kW)
+  base_load_kw: 10
+
+  # Option B: Grundlast aus CSV-Datei (hat Vorrang gegenüber Option A)
+  base_load_csv:                                                    # Pfad zu den Gebäudeprofilen: "../data/building_loads/office_tub_2018.csv" 
+  base_load_value_col:                                              # Spalte mit dem Profilwert (1-basiert, z. B. Mean_Value)
+  base_load_unit: "kWh"                                             # "kWh" oder "kW"
+  base_load_annual:                                                 # jährlicher standortspezifischer Verbrauch (kWh oder kW, passend zur Einheit)
+
+# =============================================================================
 # Fuhrparkbeschreibung – Ladekurven + Kapazitäten kommen aus CSV
+# =============================================================================
+
 vehicles:
-  soc_target: 1.0                                         # Gewünschter Ladezustand am Ende des Ladeprozesses
-  vehicle_curve_csv: "../data/Ladekurven_Master.csv"      # Batteriekapazität und Ladekurve nach SOC
-  fleet_mix:                                              # Gewichtung der Fahrzeugtypen - PKW & Transporter
+  soc_target: 1.0                                                   # Gewünschter Ladezustand am Ende des Ladeprozesses
+  vehicle_curve_csv: "../data/Ladekurven_Master.csv"                # Batteriekapazität und Ladekurve nach SOC
+  fleet_mix:                                                        # Gewichtung der Fahrzeugtypen - PKW & Transporter
     PKW: 0.70
     Transporter: 0.30
+
+
+# =============================================================================
+# Ankunftszeiten, Standzeit und SoC bei Ankunft
+# =============================================================================
 
 # Ankunftszeiten an den Ladepunkten
 arrival_time_distribution:
@@ -35,96 +86,92 @@ arrival_time_distribution:
 
   # Skalierung der Ladevorgänge je nach Tagtyp
   weekday_weight:
-    working_day: [0.55, 0.95]         # mittlerer bis hoher Betrieb durch Pendler und Lieferungen
-    saturday: [0.40, 0.70]            # mittlerer Betrieb durch Tagesausflüge
-    sunday_holiday: [0.4, 0.80]       # mittlerer Betrieb durch Tages- und Wochenendausflüge
+    working_day: [0.55, 0.95]                         # mittlerer bis hoher Betrieb durch Pendler und Lieferungen
+    saturday: [0.40, 0.70]                            # mittlerer Betrieb durch Tagesausflüge
+    sunday_holiday: [0.4, 0.80]                       # mittlerer Betrieb durch Tages- und Wochenendausflüge
 
   components_per_weekday:
     # Highway: zwei Peaks – mittags und am frühen Abend
     # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
     working_day:
-      - name: peak_1       # Ladungen zur Mittagspause 
-        distribution: normal  
-        mu: [11.0, 14.0]        # Peak in Stunden 12.0 = 12 Uhr
-        sigma: [0.5, 2.5]       # Streuung in Stunden
-        shift_minutes: 0        # Stunden → Minuten (mu * 60 + 0)
-        weight: 0.5             # Gewichtung innerhalb working_day
+      - name: peak_1                                  # Ladungen zur Mittagspause
+        distribution: normal
+        mu: [11.0, 14.0]                              # Peak in Stunden seit Mitternacht (z. B. 12.0 = 12:00 Uhr)
+        sigma: [0.5, 2.5]                             # Streuung in Stunden
+        weight: 0.5                                   # Gewichtung innerhalb working_day
 
-      - name: peak_2   
-        distribution: normal  
-        mu: [17.0, 19.0]      
-        sigma: [0.5, 2.2]     
-        shift_minutes: 0      
-        weight: 0.5          
+      - name: peak_2
+        distribution: normal
+        mu: [17.0, 19.0]
+        sigma: [0.5, 2.2]
+        weight: 0.5
 
     saturday:
-      - name: peak_3   
-        distribution: normal  
-        mu: [11.0, 15.0]   
+      - name: peak_3
+        distribution: normal
+        mu: [11.0, 15.0]
         sigma: [1.0, 2.5]
-        shift_minutes: 0 
-        weight: 0.6      
+        weight: 0.6
 
       - name: peak_4
-        distribution: normal 
-        mu: [17.0, 19.0]    
-        sigma: [0.0, 2.5]    
-        shift_minutes: 0      
-        weight: 0.4          
+        distribution: normal
+        mu: [17.0, 19.0]
+        sigma: [0.0, 2.5]
+        weight: 0.4
 
     sunday_holiday:
-      - name: peak_5  
-        distribution: normal 
-        mu: [11.0, 16.0]    
-        sigma: [0.5, 2.5]   
-        shift_minutes: 0     
-        weight: 0.7         
+      - name: peak_5
+        distribution: normal
+        mu: [11.0, 16.0]
+        sigma: [0.5, 2.5]
+        weight: 0.7
 
-      - name: peak_6   
-        distribution: normal  
-        mu: [17.0, 19.0]      
-        sigma: [0.5, 2.5]   
-        shift_minutes: 0      
-        weight: 0.3        
+      - name: peak_6
+        distribution: normal
+        mu: [17.0, 19.0]
+        sigma: [0.5, 2.5]
+        weight: 0.3
+
 
 # Parkdauer in Minuten ab Ankunft; Verteilung ist eine Mischung aus Kurz- und Langzeitparkern
-# Highway: deutlich mehr Kurzparker, die auf nötigste beschränkt sind (Essen, Tanken, WC-Pause)
+# Highway: deutlich mehr Kurzparker, die auf das Nötigste beschränkt sind (Essen, Tanken, WC-Pause)
 parking_duration_distribution:
   type: mixture
   time_unit: minutes
-  max_duration_minutes: 180     # Obergrenze maximale Ladedauer
-  min_duration_minutes: 10      # Untergrenze minimale Ladedauer
+  max_duration_minutes: 180                 # Obergrenze maximale Ladedauer
+  min_duration_minutes: 10                  # Untergrenze minimale Ladedauer
 
   components:
   # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
-    - name: short_stay          # typischer HPC-Stop (20–40 Minuten)
+    - name: short_stay                      # typischer HPC-Stop (20–40 Minuten)
       distribution: normal
-      weight: 0.85              # Anteil Kurzparker
-      mu: [20, 30]              # mittlere Parkdauer in Minuten
-      sigma: [5, 10]            # Streuung in Minuten 
+      weight: 0.85                          # Anteil Kurzparker
+      mu: [20, 30]                          # mittlere Parkdauer in Minuten
+      sigma: [5, 10]                        # Streuung in Minuten
 
     - name: long_stay
-      distribution: normal 
-      weight: 0.15              # Anteil Langzeitparker
-      mu: [40, 80]              # längere Stopps in Minuten
-      sigma: [10, 15]    
+      distribution: normal
+      weight: 0.15                          # Anteil Langzeitparker
+      mu: [40, 80]                          # längere Stopps in Minuten
+      sigma: [10, 15]
 
-# Batteriezustand bei Ankunft; Verteilung ist eine Mischung aus spontanen Laden und Laden aufgrund niedrigem Batteriezustand
+
+# Batteriezustand bei Ankunft; Verteilung ist eine Mischung aus spontanem Laden und Laden aufgrund niedrigem Batteriezustand
 # Highway: deutlich mehr "low battery"-Charging, weniger opportunistisch
 soc_at_arrival_distribution:
   type: mixture
-  value_unit: fraction                   # 0.0 bis 1.0
-  max_soc: 0.80                          # maximales SoC bei Ankunft
+  value_unit: fraction                      # 0.0 bis 1.0
+  max_soc: 0.80                             # maximales SoC bei Ankunft
 
   components:
   # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
-    - name: low_battery_charging        # Laden aufgrund leerer Batterie / gezielte Anfahrt
+    - name: low_battery_charging            # Laden aufgrund leerer Batterie / gezielte Anfahrt
       distribution: beta
       weight: 0.70
-      alpha: [2.0, 3.0]                 # formt Peak bei ca. 0.10–0.20
+      alpha: [2.0, 3.0]                     # formt Peak bei ca. 0.10–0.20
       beta: [5.0, 7.0]
 
-    - name: opportunistic_charging      # Laden aus Gelegenheit
+    - name: opportunistic_charging          # Laden aus Gelegenheit
       distribution: normal
       weight: 0.30
       mu: [0.45, 0.60]

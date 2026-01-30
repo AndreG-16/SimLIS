@@ -1,7 +1,7 @@
 site_type: office                     # Standort des Ladepunkts
 
 time_resolution_min: 15               # Zeitschritt, in der die Simulation berechnet wird
-simulation_horizon_days: 20           # gewünschter Analysehorizont in Tagen
+simulation_horizon_days: 10           # gewünschter Analysehorizont in Tagen
 
 start_datetime: "2025-03-04 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen soll
 holidays:
@@ -15,7 +15,7 @@ site:
   rated_power_kw: 22                                          # Verfügbare Leistung pro Ladepunkt
   grid_limit_p_avb_kw: 100                                    # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
   expected_sessions_per_charger_per_day: [2.0, 3.0]           # erwartete Ladevorgänge pro LP und Tag
-  charger_efficiency: 0.95                                    # Verhäl0tnis Fahrzeugaufnahme zu abgegebener LP-Leistung
+  charger_efficiency: 0.95                                    # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
   allow_cross_day_charging: false                             # Ermöglicht keine Ladungen über Mitternacht hinaus
   
   # =============================================================================
@@ -31,7 +31,6 @@ site:
   generation_strategy_unit: "MWh"                                         # Einheit, die für den Wert im Lademanagement verwendet wird ("MWh", "kWh", "kW", "€/MWh")
   pv_profile_reference_kwp: 108500000                                     # gesamte installierte Leistung in DE Stand 31.12.2025 = 99,3 GWp, Stand 31.12.2025 = 117 GWp"
   pv_system_size_kwp: 150                                                 # Größe der untersuchten Anlage in kWp
-
 
   # CSV-Datei: Marktpreise (market)
   market_strategy_csv: "../data/strategies/market/latest.csv"             # Pfad bei vorhandenen Daten zu Strompreisen: "../data/strategies//market/latest.csv"
@@ -61,7 +60,7 @@ site:
   base_load_csv: "../data/building_loads/office_tub_2018.csv"     # Pfad zu den Gebäudeprofilen: "../data/building_loads/office_tub_2018.csv" 
   base_load_value_col: 2                                          # Spalte mit dem Profilwert (1-basiert, z. B. Mean_Value)
   base_load_unit: "kWh"                                           # "kWh" oder "kW"
-  base_load_annual: 500000                                         # jährlicher standortspezifischer Verbrauch (kWh oder kW, passend zur Einheit)
+  base_load_annual: 500000                                        # jährlicher standortspezifischer Verbrauch (kWh oder kW, passend zur Einheit)
 
 
 # =============================================================================
