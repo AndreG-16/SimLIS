@@ -117,6 +117,21 @@ def normalize_to_timestamps_timezone(dt, timestamps: pd.DatetimeIndex) -> pd.Tim
 
     return ts.tz_convert(tz)
 
+def normalize_and_floor_to_grid(
+    dt,
+    timestamps: pd.DatetimeIndex,
+    time_resolution_min: int,
+) -> pd.Timestamp:
+    """
+    Normalisiert `dt` auf die Zeitzone von `timestamps` und floort auf das Simulationsraster.
+    - Sekunden/Mikrosekunden werden entfernt
+    - Floor auf f"{time_resolution_min}min"
+    """
+    ts = normalize_to_timestamps_timezone(dt, timestamps)
+    ts = ts.replace(second=0, microsecond=0)
+    ts = ts.floor(f"{int(time_resolution_min)}min")
+    return ts
+
 
 def _ensure_datetime_index(
     dataframe: pd.DataFrame,
@@ -823,8 +838,11 @@ def sample_sessions_for_simulation_day(
 
     sampled_sessions: List[SampledSession] = []
 
+    arrival_component_specification = {"type": "mixture", "components": arrival_components}
+    parking_component_specification = {"type": "mixture", "components": parking_duration_components}
+    soc_component_specification = {"type": "mixture", "components": state_of_charge_components}
+
     for session_number in range(number_sessions):
-        arrival_component_specification = {"type": "mixture", "components": arrival_components}
         arrival_hours = sample_from_distribution_specification(arrival_component_specification, random_generator)
 
         arrival_minutes = float(arrival_hours) * 60.0
@@ -835,10 +853,8 @@ def sample_sessions_for_simulation_day(
         arrival_abs_step = day_start_abs_step + int(arrival_step)
         arrival_time = pd.to_datetime(timestamps[arrival_abs_step]).to_pydatetime()
 
-        duration_minutes = sample_from_distribution_specification(
-            {"type": "mixture", "components": parking_duration_components},
-            random_generator,
-        )
+        duration_minutes = sample_from_distribution_specification(parking_component_specification, random_generator)
+
         duration_minutes = float(np.clip(duration_minutes, min_duration_minutes, max_duration_minutes))
 
         departure_time = arrival_time + timedelta(minutes=float(duration_minutes))
@@ -858,10 +874,8 @@ def sample_sessions_for_simulation_day(
             # end boundary outside horizon: set to last timestamp + one step
             departure_time = (pd.to_datetime(timestamps[-1]) + pd.Timedelta(minutes=time_resolution_min)).to_pydatetime()
 
-        sampled_state_of_charge = sample_from_distribution_specification(
-            {"type": "mixture", "components": state_of_charge_components},
-            random_generator,
-        )
+        sampled_state_of_charge = sample_from_distribution_specification(soc_component_specification, random_generator)
+
         state_of_charge_at_arrival = float(np.clip(sampled_state_of_charge, 0.0, max_state_of_charge))
 
         vehicle_name, vehicle_class = _sample_vehicle_by_class(
@@ -1771,21 +1785,6 @@ def simulate_charging_sessions_fcfs(
     debug_rows: List[dict] = []
     sessions_out: List[dict] = []
 
-    timestamps_timezone = timestamps.tz  # optional; wird unten nicht mehr zwingend gebraucht
-
-    def _normalize_datetime_to_timestamps_timezone(datetime_value) -> pd.Timestamp:
-        """
-        Normalisiert eine Zeitangabe auf:
-        - gleiche Zeitzone wie timestamps
-        - Minutenraster (floor auf time_resolution_min)
-        - keine Sekunden/Mikrosekunden
-        """
-        timestamp_value = normalize_to_timestamps_timezone(datetime_value, timestamps)
-        timestamp_value = timestamp_value.replace(second=0, microsecond=0)
-        timestamp_value = timestamp_value.floor(f"{time_resolution_min}min")
-        return timestamp_value
-
-
     def _map_datetime_to_simulation_step(datetime_value) -> int:
         """
         Mappt eine Zeitangabe auf einen gültigen Simulationsschritt-Index [0, number_steps_total - 1].
@@ -1801,7 +1800,7 @@ def simulate_charging_sessions_fcfs(
         - Inputs können tz-naiv/tz-aware sein oder leicht „off-grid“ liegen (Sekunden/Mikrosekunden, Export-Rundungen).
         - Der Ansatz ist deterministisch und DST-/Zeitzonen-sicher, sofern `timestamps` korrekt aufgebaut ist.
         """
-        normalized_timestamp = _normalize_datetime_to_timestamps_timezone(datetime_value)
+        normalized_timestamp = normalize_and_floor_to_grid(datetime_value, timestamps, time_resolution_min)
 
         try:
             position = timestamps.get_loc(normalized_timestamp)
@@ -2136,6 +2135,9 @@ def build_timeseries_dataframe(
     else:
         dataframe["market_price_eur_per_kwh"] = np.nan
 
+    if "timestamp" in dataframe.columns and "ts" not in dataframe.columns:
+        dataframe["ts"] = pd.to_datetime(dataframe["timestamp"], errors="coerce")
+
     return dataframe
 
 
@@ -2175,7 +2177,6 @@ def build_strategy_signal_series(
     timestamps: pd.DatetimeIndex,
     charging_strategy: str,
     normalize_to_internal: bool = True,
-    strategy_resolution_min: int | None = None,
 ) -> Tuple[pd.Series, str]:
     """
     Lädt ein strategieabhängiges Signal (generation: pv, market: Preis) und gibt Serie + Achsenlabel zurück.
@@ -2443,9 +2444,11 @@ def validate_against_master_curves(
     charger_traces_dataframe: pd.DataFrame,
     sessions_out: List[dict],
     scenario: dict,
+    vehicle_curves_by_name: Optional[Dict[str, VehicleChargingCurve]] = None,
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
+
     """
     Prüft Trace-Leistungen gegen zwei obere Grenzen:
 
@@ -2476,7 +2479,8 @@ def validate_against_master_curves(
 
     rated_power_kw = float(scenario["site"]["rated_power_kw"])
 
-    vehicle_curves_by_name = read_vehicle_load_profiles_from_csv(str(scenario["vehicles"]["vehicle_curve_csv"]))
+    if vehicle_curves_by_name is None:
+        vehicle_curves_by_name = read_vehicle_load_profiles_from_csv(str(scenario["vehicles"]["vehicle_curve_csv"]))
 
     validation_rows: List[dict] = []
 
@@ -2744,9 +2748,11 @@ def build_master_curve_and_actual_points_for_vehicle(
     charger_traces_dataframe: pd.DataFrame,
     scenario: dict,
     vehicle_name: str,
+    vehicle_curves_by_name: Optional[Dict[str, VehicleChargingCurve]] = None,
     start: Optional[pd.Timestamp] = None,
     end: Optional[pd.Timestamp] = None,
 ) -> Dict[str, Any]:
+
     """
     Bereitet Daten auf, um für ein Fahrzeug die Master-Charging-Curve mit realen Trace-Punkten zu vergleichen.
 
@@ -2794,12 +2800,15 @@ def build_master_curve_and_actual_points_for_vehicle(
     if len(actual_soc) == 0:
         raise ValueError("Alle realen Punkte sind nach der Umwandlung ungültig (SoC/Power).")
 
-    vehicle_curves_by_name = read_vehicle_load_profiles_from_csv(str(scenario["vehicles"]["vehicle_curve_csv"]))
+    if vehicle_curves_by_name is None:
+        vehicle_curves_by_name = read_vehicle_load_profiles_from_csv(str(scenario["vehicles"]["vehicle_curve_csv"]))
+
     if str(vehicle_name) not in vehicle_curves_by_name:
         example_names = list(vehicle_curves_by_name.keys())[:10]
         raise ValueError(f"Fahrzeug '{vehicle_name}' nicht in den Masterkurven gefunden. Beispiele: {example_names}")
 
     curve = vehicle_curves_by_name[str(vehicle_name)]
+
     master_soc = np.array(curve.state_of_charge_fraction, dtype=float)
     master_power_battery_kw = np.array(curve.power_kw, dtype=float)
 
@@ -2823,6 +2832,7 @@ def choose_vehicle_for_master_curve_plot(
     sessions_out: List[dict],
     charger_traces_dataframe: pd.DataFrame,
     scenario: dict,
+    vehicle_curves_by_name: Optional[Dict[str, VehicleChargingCurve]] = None,
 ) -> Dict[str, Any]:
     """
     Wählt das insgesamt am häufigsten verwendete Fahrzeug über den kompletten Simulationshorizont
@@ -2842,6 +2852,7 @@ def choose_vehicle_for_master_curve_plot(
         charger_traces_dataframe=charger_traces_dataframe,
         scenario=scenario,
         vehicle_name=vehicle_name,
+        vehicle_curves_by_name=vehicle_curves_by_name,
         start=None,
         end=None,
     )
@@ -3047,7 +3058,6 @@ def build_base_load_kwh_per_step(scenario: dict, timestamps: pd.DatetimeIndex) -
 def build_strategy_inputs(
     scenario: dict,
     timestamps: pd.DatetimeIndex,
-    strategy_resolution_min: Optional[int] = None,
     normalize_to_internal: bool = True,
 ) -> Tuple[np.ndarray, Optional[Any], Optional[str], Optional[np.ndarray], Optional[Any], Optional[str]]:
     """
@@ -3069,32 +3079,25 @@ def build_strategy_inputs(
         market_price_ylabel: Optional[str],
     ]
     """
-    time_resolution_min = int(scenario["time_resolution_min"])
-    strategy_resolution_min = int(strategy_resolution_min or time_resolution_min)
-
-    builder = globals().get("build_strategy_signal_series", None)
-
     pv_generation_series = None
     pv_generation_ylabel = None
     market_price_series = None
     market_price_ylabel = None
 
-    if callable(builder):
-        pv_generation_series, pv_generation_ylabel = builder(
-            scenario=scenario,
-            timestamps=timestamps,
-            charging_strategy="generation",
-            normalize_to_internal=bool(normalize_to_internal),
-            strategy_resolution_min=strategy_resolution_min,
-        )
+    pv_generation_series, pv_generation_ylabel = build_strategy_signal_series(
+        scenario=scenario,
+        timestamps=timestamps,
+        charging_strategy="generation",
+        normalize_to_internal=bool(normalize_to_internal),
+    )
 
-        market_price_series, market_price_ylabel = builder(
-            scenario=scenario,
-            timestamps=timestamps,
-            charging_strategy="market",
-            normalize_to_internal=bool(normalize_to_internal),
-            strategy_resolution_min=strategy_resolution_min,
-        )
+    market_price_series, market_price_ylabel = build_strategy_signal_series(
+        scenario=scenario,
+        timestamps=timestamps,
+        charging_strategy="market",
+        normalize_to_internal=bool(normalize_to_internal),
+    )
+
 
     pv_generation_kwh_per_step = (
         np.array(pv_generation_series, dtype=float)
@@ -3116,37 +3119,3 @@ def build_strategy_inputs(
         market_price_series,
         market_price_ylabel,
     )
-
-
-def make_timeseries_dataframe(
-    timestamps: pd.DatetimeIndex,
-    ev_load_kw: np.ndarray,
-    scenario: dict,
-    debug_rows=None,
-    pv_generation_series=None,
-    market_price_series=None,
-) -> pd.DataFrame:
-    """
-    Erzeugt das zentrale Timeseries-DataFrame über `build_timeseries_dataframe(...)` und stellt sicher,
-    dass gut nutzbare Zeitspalten vorhanden sind.
-
-    Garantien:
-    - Wenn `build_timeseries_dataframe(...)` eine Spalte `timestamp` liefert, bleibt sie erhalten.
-    - Zusätzlich wird eine Datetime-Spalte `ts` hinzugefügt (falls noch nicht vorhanden),
-      die einfach `pd.to_datetime(timestamp)` ist.
-
-    Das ist ein bequemer Wrapper, um Notebook- und Plot-Code zu vereinfachen.
-    """
-    dataframe = build_timeseries_dataframe(
-        timestamps=timestamps,
-        ev_load_kw=ev_load_kw,
-        scenario=scenario,
-        debug_rows=debug_rows,
-        generation_series=pv_generation_series,
-        market_series=market_price_series,
-    )
-
-    if "timestamp" in dataframe.columns and "ts" not in dataframe.columns:
-        dataframe["ts"] = pd.to_datetime(dataframe["timestamp"], errors="coerce")
-
-    return dataframe
