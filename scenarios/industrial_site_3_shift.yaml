@@ -1,88 +1,182 @@
-name: industrial_site
-site_type: industrial_site      # Standort des Ladepunkts
+name: industrial_site_3_shift          # Szenario-/Profilname (frei wählbar)
+site_type: industrial_site             # Standort des Ladepunkts
 
-time_resolution_min: 15     # Zeitschritt, in der die Simulation abgebildet wird
-sim_horizon_days: 7     # Länge der Simulation
+time_resolution_min: 15               # Zeitschritt, in der die Simulation abgebildet wird
+simulation_horizon_days: 7            # gewünschter Analysehorizont in Tagen
+
+start_datetime: "2025-01-01 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen soll
+holidays:
+  country: "DE"
+  subdivision: "BY"                   # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
+  dates: []                           # zusätzliche bekannte betriebsfreie Tage manuell eingeben, getrennt durch neue Zeile (- "2026-01-01")
+
 
 site:
-  number_chargers: 20     # Anzahl der Ladepunkte am Standort
-  rated_power_kw: 150     # Verfügbare Leistung pro Ladepunkt
-  grid_limit_p_avb_kw: 1000     # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
-  operation_window: "00:00 - 23:59"     # Betriebszeiten des Ladepunkts
-  charger_efficiency: 0.95      # Verhältnis der aufgenommenen Leistung des Fahrzeugs zur abgegebenen Leistung des Ladepunkts
-  charging_strategy: "immediate"      # Vom Betreiber festgelegte Strategie zur Bereitstellung des Stroms
+  number_chargers: 20                                         # Anzahl der Ladepunkte am Standort
+  rated_power_kw: 150                                         # Verfügbare Leistung pro Ladepunkt
+  grid_limit_p_avb_kw: 1000                                   # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  charger_efficiency: 0.95                                    # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
+  allow_cross_day_charging: true                              # Ermöglicht Ladungen über Mitternacht hinaus
+
+  # =============================================================================
+  # Lademanagementstrategie des Standorts
+  # =============================================================================
+  # Daten für generation / market: https://www.smard.de/home/downloadcenter/download-marktdaten/
+
+  charging_strategy: "generation"                              # Lademanagementstrategie: "immediate" (default), "market", "generation"
+
+  # CSV-Datei: PV-Erzeugung (generation)
+  generation_strategy_csv: "../data/strategies/generation/latest.csv"   # Pfad bei vorhandenen Daten zur Stromgeneration
+  generation_strategy_value_col: 7                                      # Spalte mit den Werten (1-basiert)
+  generation_strategy_unit: "MWh"                                       # Einheit ("MWh", "kWh", "kW", "€/MWh")
+  pv_profile_reference_kwp: 108500000                                   # Referenz installierte Leistung (z. B. DE gesamt)
+  pv_system_size_kwp: 150                                               # Größe der untersuchten Anlage in kWp
+
+  # CSV-Datei: Marktpreise (market)
+  market_strategy_csv: "../data/strategies/market/latest.csv"           # Pfad bei vorhandenen Daten zu Strompreisen
+  market_strategy_value_col: 3                                          # Spalte mit den Werten (1-basiert)
+  market_strategy_unit: "€/MWh"                                         # Einheit (z. B. "€/MWh", "€/kWh")
+
+  # =============================================================================
+  # Grundlast des Standorts - Gebäudeprofil
+  # =============================================================================
+  # Die Grundlast beschreibt den zeitlich aufgelösten Stromverbrauch des Gebäudes im 15-Minuten-Raster
+  #
+  # Wird eine CSV angegeben, wird deren Profil als zeitlicher Verlauf ("Shape") verwendet und auf den
+  # angegebenen Standort skaliert:
+  # - base_load_unit = "kWh":
+  #     CSV-Werte sind Energie pro Zeitschritt (z. B. HTW-Profile, auf 1000 kWh/Jahr normiert).
+  #     Die Werte werden auf base_load_annual skaliert und anschließend in kW umgerechnet.
+  # - base_load_unit = "kW":
+  #     CSV-Werte sind mittlere Leistung je Zeitschritt.
+  #     Das Profil wird so skaliert, dass seine mittlere Leistung base_load_annual entspricht.
+  #
+  # Ist keine CSV angegeben, wird eine konstante Grundlast verwendet.
+
+  # Option A: konstante Grundlast (kW)
+  base_load_kw: 50
+
+  # Option B: Grundlast aus CSV-Datei (hat Vorrang gegenüber Option A)
+  base_load_csv: "../data/building_loads/office_tub_2018.csv"            # Pfad zu den Gebäudeprofilen: "../data/building_loads/office_tub_2018.csv"
+  base_load_value_col: 2                                                # Spalte mit dem Profilwert (1-basiert, z. B. Mean_Value)
+  base_load_unit: "kWh"                                                 # "kWh" oder "kW"
+  base_load_annual: 500000                                              # jährlicher standortspezifischer Verbrauch (kWh oder kW, passend zur Einheit)
+
+
+# =============================================================================
+# Fuhrparkbeschreibung – Parameter / Datenquellen
+# =============================================================================
 
 vehicles:
-  soc_target: 0.9     # Gewünschter Ladezustand am Ende des Ladeprozesses
-  battery_capacity_kwh: 60      # Batteriekapazität des Fahrzeugs
-  max_pwr_vehicle_kw: 50      # Maximale Ladeleistung, die das Fahrzeug aufnehmen kann
+  soc_target: 0.9                                              # Gewünschter Ladezustand am Ende des Ladeprozesses
+  battery_capacity_kwh: 60                                     # Batteriekapazität des Fahrzeugs
+  max_pwr_vehicle_kw: 50                                       # Maximale Ladeleistung, die das Fahrzeug aufnehmen kann
 
-data:
-  arrivals_xlsx: "data/Ankunft.xlsx"
-  arrivals_sheet: "Ankunft"
-  durations_xlsx: "data/Standzeiten.xlsx"
-  durations_sheet: "Standdauer"
-  soc_xlsx: "data/SoC_Ankunft.xlsx"
-  soc_sheet: "SoC"
 
-arrival_time
-  type: lognormal_mixture
+# =============================================================================
+# Ankunftszeiten, Standzeit und SoC bei Ankunft
+# =============================================================================
+
+# Ankunftszeiten an den Ladepunkten
+arrival_time_distribution:
+  type: mixture
   time_unit: minutes
 
-  weekday_weight:     # Anteil der Mitarbeiter zur Gesamtbelegschaft, die an den entsprechenden Tagen nicht im Home Office oder Außerhalb arbeitet
-    Mon: 0.70
-    Tue: 0.90
-    Wed: 0.95
-    Thu: 0.90
-    Fri: 0.60
-    Sat: 0.00
-    Sun: 0.00
+  # Skalierung der Ladevorgänge je nach Tagtyp
+  weekday_weight:
+    working_day: [0.95, 1.25]               # hoher Betrieb an Arbeitstagen (3-Schicht-Betrieb)
+    saturday: [0.10, 0.35]                  # reduzierter Betrieb am Samstag (Teil-/Sonderbetrieb)
+    sunday_holiday: [0.02, 0.10]            # i. d. R. Not-/Wartungsbetrieb (selten)
 
   components_per_weekday:
-     Mon:
-      - mu: 1.80      # Peak Morgens
-        sigma: 0.25     # Streuung der Ankünfte
-        shift_minutes: 360     # 06:00 Start
-        weight: 0.75      # Anteil der Belegschaft, die Morgens anfängt zu arbeiten
-      - mu: 4.20      # Peak Mittags
-        sigma: 0.45
-        shift_minutes: 360
-        weight: 0.25
-    Tue:
-      - mu: 1.75
-        sigma: 0.27
-        shift_minutes: 360
-        weight: 0.70
-      - mu: 4.10
-        sigma: 0.42
-        shift_minutes: 360
+    # Industrial (3-Schicht): Peaks zu Schichtbeginn (früh, nachmittags, nachts)
+    # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
+    working_day:
+      - name: peak_1                        # Frühschicht / erster Schichtbeginn
+        distribution: normal
+        mu: [5.5, 7.0]                      # Peak in Stunden seit Mitternacht
+        sigma: [0.4, 0.9]                   # Streuung in Stunden
+        weight: 0.35                        # Gewichtung innerhalb working_day
+
+      - name: peak_2                        # Spätschicht / zweiter Schichtbeginn
+        distribution: normal
+        mu: [13.0, 15.0]
+        sigma: [0.4, 1.0]
+        weight: 0.35
+
+      - name: peak_3                        # Nachtschicht / dritter Schichtbeginn
+        distribution: normal
+        mu: [21.5, 23.5]
+        sigma: [0.5, 1.2]
         weight: 0.30
-    Wed:
-      - mu: 1.78
-        sigma: 0.26
-        shift_minutes: 360
-        weight: 0.72
-      - mu: 4.15
-        sigma: 0.42
-        shift_minutes: 360
-        weight: 0.28
-    Thu:
-      - mu: 1.80
-        sigma: 0.27
-        shift_minutes: 360
-        weight: 0.70
-      - mu: 4.20
-        sigma: 0.45
-        shift_minutes: 360
-        weight: 0.30
-    Fri:
-      - mu: 1.60
-        sigma: 0.30
-        shift_minutes: 360
+
+    saturday:
+      - name: peak_4                        # Vormittag (verkürzte/Teilproduktion)
+        distribution: normal
+        mu: [6.5, 9.0]
+        sigma: [0.8, 1.8]
         weight: 0.60
-      - mu: 3.80
-        sigma: 0.50
-        shift_minutes: 360
+
+      - name: peak_5                        # Nachmittag (Restbetrieb / Übergaben)
+        distribution: normal
+        mu: [13.0, 16.0]
+        sigma: [0.9, 2.2]
         weight: 0.40
-    Sat: []
-    Sun: []
+
+    sunday_holiday:
+      - name: peak_6                        # Notbetrieb / Wartung / Security
+        distribution: normal
+        mu: [10.0, 13.0]
+        sigma: [1.5, 2.5]
+        weight: 1.0
+
+
+# Parkdauer in Minuten ab Ankunft; Verteilung ist eine Mischung aus Kurz- und Langzeitparkern
+# Industrial (3-Schicht): überwiegend Schichtparker (≈ 7–10h), plus kürzere Aufenthalte (Übergaben/Meetings)
+parking_duration_distribution:
+  type: mixture
+  time_unit: minutes
+  max_duration_minutes: 720                 # Obergrenze maximale Ladedauer (z. B. 12 Stunden)
+  min_duration_minutes: 20                  # Untergrenze minimale Ladedauer
+
+  components:
+  # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
+    - name: shift_stay                      # typische Schichtparkdauer
+      distribution: normal
+      weight: 0.70
+      mu: [420, 600]                        # 7–10 Stunden
+      sigma: [60, 120]                      # Streuung 1–2 Stunden
+
+    - name: medium_stay                     # Teilzeit / längere Meetings / Übergaben
+      distribution: normal
+      weight: 0.20
+      mu: [180, 360]                        # 3–6 Stunden
+      sigma: [45, 90]
+
+    - name: short_stay                      # Besucher / kurze Termine / Materialabholung
+      distribution: normal
+      weight: 0.10
+      mu: [30, 120]                         # 0.5–2 Stunden
+      sigma: [10, 30]
+
+
+# Batteriezustand bei Ankunft; Verteilung ist eine Mischung aus gezieltem Laden und opportunistischem Laden
+# Industrial (3-Schicht): pendlergetrieben (mittlerer SoC), opportunistisches Laden vorhanden
+soc_at_arrival_distribution:
+  type: mixture
+  value_unit: fraction                      # 0.0 bis 1.0
+  max_soc: 0.75                             # maximales SoC bei Ankunft
+
+  components:
+  # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
+    - name: commuter_charging               # Pendler mit mittlerem SoC, die regelmäßig nachladen
+      distribution: beta
+      weight: 0.75
+      alpha: [2.0, 3.4]                     # Peak grob im Bereich 0.20–0.45
+      beta: [3.0, 5.2]
+
+    - name: opportunistic_charging          # „wenn ich eh da bin“-Laden
+      distribution: normal
+      weight: 0.25
+      mu: [0.50, 0.70]
+      sigma: [0.07, 0.12]
