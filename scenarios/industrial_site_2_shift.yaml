@@ -29,7 +29,7 @@ site:
   generation_strategy_value_col: 7                                      # Spalte mit den Werten (1-basiert)
   generation_strategy_unit: "MWh"                                       # Einheit ("MWh", "kWh", "kW", "€/MWh")
   pv_profile_reference_kwp: 108500000                                   # Referenz installierte Leistung (z. B. DE gesamt)
-  pv_system_size_kwp: 150                                               # Größe der untersuchten Anlage in kWp
+  pv_system_size_kwp: 5000                                               # Größe der untersuchten Anlage in kWp
 
   # CSV-Datei: Marktpreise (market)
   market_strategy_csv: "../data/strategies/market/latest.csv"           # Pfad bei vorhandenen Daten zu Strompreisen
@@ -66,10 +66,11 @@ site:
 # =============================================================================
 
 vehicles:
-  soc_target: 0.9                                              # Gewünschter Ladezustand am Ende des Ladeprozesses
-  battery_capacity_kwh: 60                                     # Batteriekapazität des Fahrzeugs
-  max_pwr_vehicle_kw: 50                                       # Maximale Ladeleistung, die das Fahrzeug aufnehmen kann
-
+  soc_target: 0.95                                                # Gewünschter Ladezustand am Ende des Ladeprozesses
+  vehicle_curve_csv: "../data/Ladekurven_Master.csv"              # Batteriekapazität und Ladekurve nach SOC
+  fleet_mix:                                                      # Gewichtung der Fahrzeugtypen - PKW & Transporter
+    PKW: 0.95
+    Transporter: 0.05
 
 # =============================================================================
 # Ankunftszeiten, Standzeit und SoC bei Ankunft
@@ -155,7 +156,7 @@ soc_at_arrival_distribution:
 
   components:
   # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
-    - name: commuter_charging               # Pendler mit mittlerem SoC, die regelmäßig nachladen
+    - name: low_battery_charging_charging               # Pendler mit mittlerem SoC, die regelmäßig nachladen
       distribution: beta
       weight: 0.80
       alpha: [2.2, 3.6]                     # Peak grob im Bereich 0.25–0.45

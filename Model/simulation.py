@@ -2150,19 +2150,37 @@ def summarize_sessions(sessions_out: List[dict]) -> dict:
     rejected_sessions = [session for session in sessions_out if session.get("status") != "plugged"]
 
     not_reached_rows: List[dict] = []
+
     for session in plugged_sessions:
         remaining_site_kwh = session.get("remaining_site_kwh", 0.0)
-        if remaining_site_kwh is not None and float(remaining_site_kwh) > 1e-6:
-            not_reached_rows.append(
-                {
-                    "session_id": session.get("session_id"),
-                    "vehicle_name": session.get("vehicle_name"),
-                    "charger_id": session.get("charger_id"),
-                    "remaining_energy_kwh": float(remaining_site_kwh),
-                    "state_of_charge_at_arrival": float(session.get("state_of_charge_at_arrival", np.nan)),
-                    "state_of_charge_end": float(session.get("state_of_charge_end", np.nan)),
-                }
-            )
+        if remaining_site_kwh is None or float(remaining_site_kwh) <= 1e-6:
+            continue
+
+        arrival_time = session.get("arrival_time")
+        departure_time = session.get("departure_time")
+
+        # Parkdauer [min]
+        parking_duration_min = np.nan
+        if arrival_time is not None and departure_time is not None:
+            try:
+                parking_duration_min = (
+                    pd.to_datetime(departure_time, errors="coerce")
+                    - pd.to_datetime(arrival_time, errors="coerce")
+                ).total_seconds() / 60.0
+            except Exception:
+                parking_duration_min = np.nan
+
+        not_reached_rows.append(
+            {
+                "session_id": session.get("session_id"),
+                "charger_id": session.get("charger_id"),
+                "arrival_time": arrival_time,
+                "parking_duration_min": float(parking_duration_min) if np.isfinite(parking_duration_min) else np.nan,
+                "soc_arrival": float(session.get("state_of_charge_at_arrival", np.nan)),
+                "soc_end": float(session.get("state_of_charge_end", np.nan)),
+                "remaining_energy_kwh": float(remaining_site_kwh),
+            }
+        )
 
     return {
         "num_sessions_total": number_sessions_total,
