@@ -1785,44 +1785,41 @@ def simulate_charging_sessions_fcfs(
     debug_rows: List[dict] = []
     sessions_out: List[dict] = []
 
-    def _map_datetime_to_simulation_step(datetime_value) -> int:
+    step_delta = pd.Timedelta(minutes=time_resolution_min)
+    horizon_start = pd.Timestamp(timestamps[0])
+    horizon_end_exclusive = pd.Timestamp(timestamps[-1]) + step_delta  # [start, end)
+
+    def _map_datetime_to_simulation_step(datetime_value, allow_end: bool = False) -> int:
         """
-        Mappt eine Zeitangabe auf einen gültigen Simulationsschritt-Index [0, number_steps_total - 1].
-
-        Vorgehen:
-        1) Normalisieren auf die Zeitzone des Simulationsrasters und auf das Minutenraster
-        (`_normalize_datetime_to_timestamps_timezone`).
-        2) Versuchen, den Zeitstempel exakt in `timestamps` zu finden.
-        3) Falls nicht enthalten: robustes Fallback über den nächstgelegenen Index (`method="nearest"`).
-        4) Ergebnis auf gültige Index-Grenzen clampen.
-
-        Warum so?
-        - Inputs können tz-naiv/tz-aware sein oder leicht „off-grid“ liegen (Sekunden/Mikrosekunden, Export-Rundungen).
-        - Der Ansatz ist deterministisch und DST-/Zeitzonen-sicher, sofern `timestamps` korrekt aufgebaut ist.
+        Mappt eine Zeitangabe auf einen gültigen Simulationsschritt-Index.
         """
         normalized_timestamp = normalize_and_floor_to_grid(datetime_value, timestamps, time_resolution_min)
 
+        # Horizon-Clamp (wichtig: departure darf bis horizon_end_exclusive gehen)
+        if normalized_timestamp <= horizon_start:
+            return 0
+
+        if normalized_timestamp >= horizon_end_exclusive:
+            return number_steps_total if allow_end else (number_steps_total - 1)
+
+        # Innerhalb des Horizonts: Index bestimmen
         try:
             position = timestamps.get_loc(normalized_timestamp)
 
             if isinstance(position, slice):
-                # Falls Duplikate: nimm den ersten Index der Slice
                 step_index = int(position.start)
-
             elif isinstance(position, (np.ndarray, list)):
-                # Selten: mehrere Treffer
                 step_index = int(position[0])
-
             else:
                 step_index = int(position)
 
         except KeyError:
-            # Robust: nächstgelegenen Zeitschritt finden
             nearest_positions = timestamps.get_indexer([normalized_timestamp], method="nearest")
             step_index = int(nearest_positions[0])
 
         # Clamp auf gültige Grenzen
-        step_index = max(0, min(step_index, number_steps_total - 1))
+        max_index = number_steps_total if allow_end else (number_steps_total - 1)
+        step_index = max(0, min(step_index, max_index))
         return int(step_index)
 
 
@@ -1876,12 +1873,14 @@ def simulate_charging_sessions_fcfs(
             )
             continue
 
-        arrival_step = _map_datetime_to_simulation_step(session.arrival_time)
-        departure_step = _map_datetime_to_simulation_step(session.departure_time)
+        arrival_step = _map_datetime_to_simulation_step(session.arrival_time, allow_end=False)
+        departure_step = _map_datetime_to_simulation_step(session.departure_time, allow_end=True)
+
 
         # Sicherstellen: departure_step muss nach arrival_step liegen
         if int(departure_step) <= int(arrival_step):
-            departure_step = min(int(arrival_step) + 1, number_steps_total - 1)
+            departure_step = min(int(arrival_step) + 1, number_steps_total)
+
 
         session.arrival_step = int(arrival_step)
         session.departure_step = int(departure_step)
