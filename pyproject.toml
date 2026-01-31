@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "simlis"
+version = "0.1.0"
+description = "Load profile simulation for charging infrastructure scenarios"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "pandas",
+  "pyyaml",
+  "matplotlib",
+]
+
+[tool.setuptools]
+# Wir nutzen eine flache Struktur (model/ liegt direkt im Root)
+# und wollen NUR dieses Package installieren:
+packages = ["model"]
