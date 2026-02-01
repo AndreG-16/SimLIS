@@ -30,7 +30,7 @@ site:
   generation_strategy_csv: "../data/strategies/generation/PV_Erzeugung_Standardprofile_DE.csv"      # Pfad bei vorhandenen Daten zur Stromgeneration: "../data/strategies//generation/PV_Erzeugung_Standardprofile_DE.csv"
   generation_strategy_value_col: 7                                                                  # Spalte, die entsprechende Werte ("MWh", "kWh", o.ä.) enthalten, woran sich die Lademanagementstrategie richtet (1-basierter Code: 1 = erste Spalte)
   generation_strategy_unit: "kW"                                                                    # Einheit, die für den Wert im Lademanagement verwendet wird ("MWh", "kWh", "kW", "€/MWh")
-  pv_system_size_kwp: 150                                                                           # Größe der untersuchten Anlage in kWp
+  pv_system_size_kwp: 500                                                                           # Größe der untersuchten Anlage in kWp
   tilt_angle_solar_module: 10                                                                       # Neigungswinkel des Solarmoduls in Grad ("10", "15", "20", "25", "30")
   location_pv_site: Augsburg                                                                        # Standort der Anlage bzw. vergleichbar laut Globalstrahlung in DE ("Augsburg", "Cottbus", "Hamburg", "Hannover", "Ingolstadt", "Leipzig", "Magdeburg", "Nürnberg", "Regensburg", "Schwerin")
 
