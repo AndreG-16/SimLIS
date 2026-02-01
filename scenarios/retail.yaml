@@ -1,6 +1,6 @@
 site_type: retail                     # Standort des Ladepunkts
 
-time_resolution_min: 15               # Zeitschritt, in der die Simulation abgebildet wird
+time_resolution_min: 1               # Zeitschritt, in der die Simulation abgebildet wird
 simulation_horizon_days: 10           # gewünschter Analysehorizont in Tagen
 
 start_datetime: "2025-01-01 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen soll
@@ -98,14 +98,14 @@ arrival_time_distribution:
     working_day:
       - name: peak_1                        # Einkäufe zur Mittagszeit
         distribution: normal
-        mu: [11.0, 13.5]                    # Peak in Stunden seit Mitternacht
+        mu: [9.0, 13.5]                    # Peak in Stunden seit Mitternacht
         sigma: [0.5, 1.0]                   # Streuung in Stunden
         weight: 0.4                         # Gewichtung innerhalb working_day
 
       - name: peak_2                        # Einkäufe nach der Arbeit
         distribution: normal
-        mu: [16.0, 19.0]
-        sigma: [0.5, 1.2]
+        mu: [17.0, 19.5]
+        sigma: [0.5, 2.0]
         weight: 0.6
 
     # Retail: Samstag mit ausgedehntem Einkauf über den Tag verteilt
@@ -143,21 +143,21 @@ parking_duration_distribution:
   # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
     - name: short_stay                      # kurzer Einkauf / Abholung / Drogerie
       distribution: normal
-      weight: 0.3
-      mu: [20, 40]                          # typische Parkdauer 20–40 Minuten
-      sigma: [5, 10]
+      weight: 0.5
+      mu: [20, 30]                          # typische Parkdauer 20–30 Minuten
+      sigma: [5, 20]
 
     - name: regular_stay                    # typischer Einkaufsaufenthalt
       distribution: normal
-      weight: 0.5
-      mu: [60, 120]                         # typische Parkdauer 1–2 Stunden
-      sigma: [15, 30]
+      weight: 0.4
+      mu: [30, 50]                         # typische Parkdauer 0.5–1 Stunde
+      sigma: [10, 20]
 
     - name: long_stay                       # längere Aufenthalte (z. B. Essen, Kino, großer Einkauf)
       distribution: normal
-      weight: 0.2
-      mu: [120, 200]                        # typische Parkdauer 2–3+ Stunden
-      sigma: [20, 40]
+      weight: 0.1
+      mu: [50, 120]                        # typische Parkdauer 2–3+ Stunden
+      sigma: [10, 20]
 
 
 # Batteriezustand bei Ankunft; Verteilung ist eine Mischung aus opportunistischem Laden und gezieltem Laden

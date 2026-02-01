@@ -19,17 +19,16 @@ from pathlib import Path
 #   (2) Lademanagement (immediate, market, generation inkl. Fallbacks).
 #
 # Ziel ist:
-#   - Zeitprofil der ev-Ladeleistung (kW)
+#   - Zeitprofil der EV-Ladeleistung (kW)
 #   - Session-Details für KPI-Analysen
 #   - optional Debug-Zeitreihen für Notebook-Auswertungen
-
 
 # =============================================================================
 # 0) Hilfsfunktionen: Zeit / Einheiten
 # =============================================================================
 def _require_keys(container: dict, keys: list[str], context: str) -> None:
     """
-    Prüft, ob alle keys im container vorhanden sind, sonst ValueError mit Kontext.
+    Validiert, dass ein Dictionary alle angegebenen Pflicht-Schlüssel enthäl, sonst ValueError mit Kontext.
     """
     missing = [k for k in keys if k not in container]
     if missing:
@@ -43,7 +42,7 @@ def _get_value_column_name(
     csv_path: str,
 ) -> str:
     """
-    Hilfsfunktion: mappt 1-basierte Spaltennummer (inkl. Zeitspalte) auf echten Spaltennamen.
+    Mappt eine 1-basierte Spaltennummer (inkl. Zeitspalte) auf echten Spaltennamen.
     Gibt verständliche Fehlermeldungen, falls außerhalb des Bereichs.
     """
     original_columns = list(columns)
@@ -120,12 +119,11 @@ def _step_hours(time_resolution_min: int) -> float:
     """
     return float(time_resolution_min) / 60.0
 
+
 def normalize_to_timestamps_timezone(dt, timestamps: pd.DatetimeIndex) -> pd.Timestamp:
     """
-    Normalisiert einen beliebigen Zeitwert auf die Zeitzone (und den TZ-Status) eines Simulations-Zeitrasters.
+    Normalisiert einen beliebigen Zeitwert auf die Zeitzone eines Simulations-Zeitrasters.
 
-    Zweck
-    -----
     In der Simulation treten Zeitwerte in verschiedenen Formen auf (naive/aware `datetime`,
     Strings, `pd.Timestamp`). Diese Funktion sorgt dafür, dass solche Zeitwerte konsistent zur
     Zeitzone des Simulationsrasters `timestamps` sind, damit Vergleiche, Reindexing und Mapping
@@ -153,9 +151,8 @@ def normalize_and_floor_to_grid(
     time_resolution_min: int,
 ) -> pd.Timestamp:
     """
-    Normalisiert `dt` auf die Zeitzone von `timestamps` und floort auf das Simulationsraster.
+    Normalisiert `dt` auf die Zeitzone von `timestamps` und floort (Abrunden nach unten) auf das Simulationsraster.
     - Sekunden/Mikrosekunden werden entfernt
-    - Floor auf f"{time_resolution_min}min"
     """
     ts = normalize_to_timestamps_timezone(dt, timestamps)
     ts = ts.replace(second=0, microsecond=0)
@@ -236,25 +233,6 @@ def _ensure_datetime_index(
             dataframe = dataframe[~dataframe.index.isna()]
 
     return dataframe
-
-
-def _convert_energy_series_to_kwh_per_step(values: np.ndarray, unit: str, time_resolution_min: int) -> np.ndarray:
-    """
-    Konvertiert eine Zeitreihe in kWh pro Zeitschritt (kWh/step) anhand der angegebenen Einheit.
-    """
-    cleaned_unit = (unit or "").strip()
-    step_hours = _step_hours(time_resolution_min)
-
-    if cleaned_unit == "kWh":
-        return values.astype(float)
-    if cleaned_unit == "MWh":
-        return values.astype(float) * 1000.0
-    if cleaned_unit == "kW":
-        return values.astype(float) * step_hours
-    if cleaned_unit == "MW":
-        return values.astype(float) * 1000.0 * step_hours
-
-    raise ValueError(f"Unbekannte Energieeinheit: '{cleaned_unit}'")
 
 
 def _convert_price_series_to_eur_per_kwh(values: np.ndarray, unit: str) -> np.ndarray:
@@ -339,12 +317,7 @@ class VehicleChargingCurve:
     Container für eine fahrzeugspezifische Ladekennlinie.
 
     Die Kennlinie beschreibt die maximal aufnehmbare Ladeleistung in Abhängigkeit vom
-    Ladezustand (SoC). Sie wird z.B. genutzt, um pro Zeitschritt die zulässige
-    Ladeleistung zu begrenzen (SoC-abhängiges Fahrzeuglimit).
-
-    - `state_of_charge_fraction` enthält SoC-Werte als Bruchteil von 0.0 bis 1.0
-      (typischerweise aufsteigend sortiert).
-    - `power_kw` enthält die dazugehörige Ladeleistung in kW (gleiche Länge wie SoC-Array).
+    Ladezustand (SoC). Begrenzt die zulässige Ladeleistung pro Zeitschritt.
     """
     vehicle_name: str
     manufacturer: str
@@ -368,10 +341,6 @@ def read_local_load_profile_from_csv(
 
     Skalierungslogik (Option A):
     - 'annual_scaling_value' wird als Jahresenergie in kWh/Jahr interpretiert.
-    - Das gilt unabhängig davon, ob die CSV-Werte als
-        * "kWh" (Energie pro CSV-Zeitschritt) oder
-        * "kW"  (mittlere Leistung pro CSV-Zeitschritt)
-      vorliegen.
 
     Das Profil wird so skaliert, dass die daraus resultierende Energie der betrachteten CSV-Zeitspanne
     zur vorgegebenen Jahresenergie passt. Deckt die CSV nicht genau ein Jahr ab, wird anteilig skaliert:
@@ -599,16 +568,15 @@ def read_generation_profile_from_csv(
     tilt_angle_solar_module: Optional[float] = None,
 ) -> pd.Series:
     """
-    Liest ein PV-Erzeugungsprofil aus einer CSV-Datei ein und gibt es als Zeitreihe in **kWh pro Simulationsschritt**
-    (kWh/step) zurück, reindiziert auf das Simulations-Zeitgitter `timestamps`.
+    Liest ein PV-Erzeugungsprofil aus einer CSV-Datei ein und gibt es als Zeitreihe in kWh pro Simulationsschrit
+    zurück, reindiziert auf das Simulations-Zeitgitter `timestamps`.
 
     Die Funktion unterstützt zwei Eingabeformate und wählt das passende Verhalten automatisch:
     1) Standardprofil-CSV (typisch: normierte PV-Profile)
        - Erkennbar z.B. an Spalten wie "Datum von" und "Datum bis" (Format kann variieren).
-       - Die Wertespalte enthält i.d.R. eine normierte Leistung in **kW/kWp** (bezogen auf 1 kWp).
+       - Die Wertespalte enthält i.d.R. eine normierte Leistung in **kW/kWp**
        - Auswahl der Wertespalte:
          a) bevorzugt über `location_pv_site` + `tilt_angle_solar_module`
-            (tolerant gegenüber "Ort, 10" vs "Ort,10"),
          b) sonst über `value_column_one_based` (1-basiert, inkl. Zeitspalte).
        - Umrechnung:
             P_pv[kW] = P_spez[kW/kWp] * pv_system_size_kwp
@@ -620,13 +588,10 @@ def read_generation_profile_from_csv(
        - Unterstützte Einheiten:
          - "kW": Werte gelten als Leistung pro CSV-Zeitpunkt → direkt zu kWh/step über step_hours.
          - "kWh": Werte gelten als Energie pro CSV-Zeitschritt → CSV-Auflösung wird aus dem Index
-           (Median der Zeitdifferenzen) inferiert, dann über mittlere Leistung auf kWh/step gemappt.
     """
     df_raw = _read_table_flex(csv_path, prefer_decimal_comma=True)
 
-    # -------------------------------------------------------------------------
     # 1) Datetime-Spalte bestimmen
-    # -------------------------------------------------------------------------
     datetime_column_name = None
     for cand in ["Datum von", "datum von", "timestamp", "Timestamp", "datetime", "Datetime", "date", "Date"]:
         if cand in df_raw.columns:
@@ -635,18 +600,14 @@ def read_generation_profile_from_csv(
     if datetime_column_name is None:
         datetime_column_name = _infer_datetime_column_name_for_signal(df_raw)
 
-    # -------------------------------------------------------------------------
     # 2) Standardprofil-Format VOR Index-Set erkennen
-    # -------------------------------------------------------------------------
     def _norm(s: str) -> str:
         return str(s).strip().lower().replace(" ", "")
 
     cols_norm_raw = {_norm(c): c for c in df_raw.columns}
     is_standardprofile_format = ("datumvon" in cols_norm_raw) and ("datumbis" in cols_norm_raw)
 
-    # -------------------------------------------------------------------------
     # 3) Fallback-Wertespalte (1-based inkl. Zeitspalte)
-    # -------------------------------------------------------------------------
     fallback_value_col = _get_value_column_name(
         columns=list(df_raw.columns),
         value_column_one_based=value_column_one_based,
@@ -660,21 +621,16 @@ def read_generation_profile_from_csv(
             f"('{datetime_column_name}'). Bitte eine Wertespalte wählen (meist >=2)."
         )
 
-    # -------------------------------------------------------------------------
-    # 4) EINHEITLICHES Datetime-Handling über _ensure_datetime_index (inkl. TZ/DST/Dupe)
-    # -------------------------------------------------------------------------
-    df = _ensure_datetime_index(df_raw, datetime_column_name, timezone=timestamps.tz)
+    df = _ensure_datetime_index(df_raw, datetime_column_name, timezone=timestamps.tz)   # EINHEITLICHES Datetime-Handling über _ensure_datetime_index (inkl. TZ/DST/Dupe)
 
-    # -------------------------------------------------------------------------
-    # 5) Mode erkennen: Standardprofil vs. Anlagen-CSV
-    # -------------------------------------------------------------------------
+    # 4) Mode erkennen: Standardprofil vs. Anlagen-CSV
     loc = (location_pv_site or "").strip()
     tilt = tilt_angle_solar_module
 
     mode = "plant"
     chosen_col = None
 
-    # Standardprofil wählen, wenn Format passt ODER location+tilt gegeben ist
+    # 5) Standardprofil wählen, wenn Format passt ODER location+tilt gegeben ist
     if is_standardprofile_format or (loc != "" and tilt is not None):
         mode = "standardprofile"
 
@@ -713,9 +669,7 @@ def read_generation_profile_from_csv(
                     f"Datetime-Indexing nicht mehr. CSV: {csv_path}"
                 )
 
-    # -------------------------------------------------------------------------
     # 6) Werte lesen + in kWh/step überführen
-    # -------------------------------------------------------------------------
     pv_system_size_kwp = float(pv_system_size_kwp)
     if pv_system_size_kwp < 0.0:
         raise ValueError("pv_system_size_kwp muss >= 0 sein.")
@@ -796,15 +750,13 @@ def read_generation_profile_from_csv(
 @dataclass
 class SampledSession:
     """
-    Repräsentiert eine zufällig erzeugte (gesampelte) Ladesession innerhalb der Simulation.
-
-    Eine Session beschreibt das Verhalten eines Fahrzeugs am Standort:
-    - wann es ankommt und wieder abfährt (Zeitstempel),
+    Repräsentiert eine zufällig erzeugte Ladesession innerhalb der Simulation.
+    - Ankunft und Abfahrt,
     - welche Zeitschritt-Indizes diese Zeiten im Simulationsraster haben,
-    - wie lange es parkt,
-    - mit welchem Ladezustand (SoC) es ankommt,
-    - welches Fahrzeugmodell und welche Fahrzeugklasse betroffen sind,
-    - sowie den Tagtyp (z.B. Werktag/Samstag/Sonn- bzw. Feiertag), der für die Sampling-Logik genutzt wird.
+    - Standdauer,
+    - Ladezustand bei Ankunft(SoC),
+    - Fahrzeugmodell und Fahrzeugklasse,
+    - Tagtyp (z.B. Werktag/Samstag/Sonn- bzw. Feiertag)
     """
     session_id: str
     arrival_time: datetime
@@ -825,61 +777,6 @@ def _sample_uniform_from_range(value_or_range, random_generator: np.random.Gener
     if isinstance(value_or_range, list) and len(value_or_range) == 2:
         return float(random_generator.uniform(float(value_or_range[0]), float(value_or_range[1])))
     return float(value_or_range)
-
-
-def _sample_from_distribution_component(component: dict, random_generator: np.random.Generator) -> float:
-    """
-    Zieht einen Sample-Wert aus einer einzelnen Verteilungs-Komponente (normal/beta/lognormal).
-    """
-    distribution_name = str(component.get("distribution", "")).strip().lower()
-
-    if distribution_name == "normal":
-        mean_value = _sample_uniform_from_range(component.get("mu"), random_generator)  # YAML nutzt "mu"
-        standard_deviation = _sample_uniform_from_range(component.get("sigma"), random_generator)  # YAML nutzt "sigma"
-        standard_deviation = max(float(standard_deviation), 1e-9)
-        return float(random_generator.normal(loc=float(mean_value), scale=float(standard_deviation)))
-
-    if distribution_name == "beta":
-        alpha_value = _sample_uniform_from_range(component.get("alpha"), random_generator)
-        beta_value = _sample_uniform_from_range(component.get("beta"), random_generator)
-        alpha_value = max(float(alpha_value), 1e-9)
-        beta_value = max(float(beta_value), 1e-9)
-        return float(random_generator.beta(a=alpha_value, b=beta_value))
-
-    if distribution_name == "lognormal":
-        mean_value = _sample_uniform_from_range(component.get("mu"), random_generator)  # YAML nutzt "mu"
-        standard_deviation = _sample_uniform_from_range(component.get("sigma"), random_generator)  # YAML nutzt "sigma"
-        standard_deviation = max(float(standard_deviation), 1e-9)
-        return float(random_generator.lognormal(mean=float(mean_value), sigma=float(standard_deviation)))
-
-    raise ValueError(f"Unbekannte distribution in Component: '{distribution_name}'")
-
-
-def sample_from_distribution_specification(distribution_specification: dict, random_generator: np.random.Generator) -> float:
-    """
-    Zieht einen Sample-Wert aus einer Mixture-Spezifikation oder direkt aus einer einzelnen Komponente.
-    Erwartet:
-      { type: mixture, components: [ {distribution:..., weight:...}, ... ] }
-    oder direkt eine einzelne Komponente (normal/beta/lognormal).
-    """
-    specification_type = str(distribution_specification.get("type", "")).strip().lower()
-    if specification_type == "mixture":
-        components = distribution_specification.get("components", [])
-        if not isinstance(components, list) or len(components) == 0:
-            raise ValueError("mixture benötigt eine nicht-leere Liste 'components'")
-
-        component_weights = np.array([float(component.get("weight", 1.0)) for component in components], dtype=float)
-        component_weights = np.maximum(component_weights, 0.0)
-        weight_sum = float(np.sum(component_weights))
-        if weight_sum <= 0.0:
-            raise ValueError("mixture: Gewichtssumme ist 0")
-        component_weights = component_weights / weight_sum
-
-        chosen_component_index = int(random_generator.choice(len(components), p=component_weights))
-        chosen_component = components[chosen_component_index]
-        return _sample_from_distribution_component(chosen_component, random_generator)
-
-    return _sample_from_distribution_component(distribution_specification, random_generator)
 
 
 def _get_day_type(simulation_day_start: datetime, holiday_dates: List[datetime]) -> str:
@@ -941,6 +838,72 @@ def _sample_vehicle_by_class(
     return chosen_vehicle_name, chosen_class
 
 
+def sample_value_from_distribution(spec: Any, random_generator: np.random.Generator) -> float:
+    """
+    Zieht genau einen Sample-Wert aus einer Verteilungsspezifikation.
+    Unterstützte Eingaben
+    1) Einzelkomponente (dict):
+       {"distribution": "normal|beta|lognormal", ...}
+    2) Mixture-Spezifikation (dict):
+       {"type": "mixture", "components": [ {distribution:..., weight:...}, ... ]}
+    3) Kurzform (list):
+       [ {distribution:..., weight:...}, ... ]
+       -> wird automatisch als Mixture interpretiert.
+
+    Diese Funktion ist der einzige Einstiegspunkt für Sampling im Modell und soll überall
+    genutzt werden, sobald Werte aus einer Verteilung bestimmt werden.
+    """
+    # Kurzform: Liste == mixture components
+    if isinstance(spec, list):
+        spec = {"type": "mixture", "components": spec}
+
+    if not isinstance(spec, dict):
+        raise ValueError(f"Distribution spec muss dict oder list sein, bekommen: {type(spec)}")
+
+    spec_type = str(spec.get("type", "")).strip().lower()
+
+    # Mixture
+    if spec_type == "mixture":
+        components = spec.get("components") or []
+        if not isinstance(components, list) or len(components) == 0:
+            raise ValueError("mixture benötigt eine nicht-leere Liste 'components'")
+
+        weights = np.array([float(c.get("weight", 1.0)) for c in components], dtype=float)
+        weights = np.maximum(weights, 0.0)
+        wsum = float(np.sum(weights))
+        if wsum <= 0.0:
+            weights = np.ones(len(components), dtype=float) / float(len(components))
+        else:
+            weights = weights / wsum
+
+        chosen_idx = int(random_generator.choice(len(components), p=weights))
+        return sample_value_from_distribution(components[chosen_idx], random_generator)
+
+    # Einzelkomponente
+    distribution_name = str(spec.get("distribution", "")).strip().lower()
+
+    if distribution_name == "normal":
+        mean_value = _sample_uniform_from_range(spec.get("mu"), random_generator)
+        standard_deviation = _sample_uniform_from_range(spec.get("sigma"), random_generator)
+        standard_deviation = max(float(standard_deviation), 1e-9)
+        return float(random_generator.normal(loc=float(mean_value), scale=float(standard_deviation)))
+
+    if distribution_name == "beta":
+        alpha_value = _sample_uniform_from_range(spec.get("alpha"), random_generator)
+        beta_value = _sample_uniform_from_range(spec.get("beta"), random_generator)
+        alpha_value = max(float(alpha_value), 1e-9)
+        beta_value = max(float(beta_value), 1e-9)
+        return float(random_generator.beta(a=float(alpha_value), b=float(beta_value)))
+
+    if distribution_name == "lognormal":
+        mean_value = _sample_uniform_from_range(spec.get("mu"), random_generator)
+        standard_deviation = _sample_uniform_from_range(spec.get("sigma"), random_generator)
+        standard_deviation = max(float(standard_deviation), 1e-9)
+        return float(random_generator.lognormal(mean=float(mean_value), sigma=float(standard_deviation)))
+
+    raise ValueError(f"Unbekannte distribution in spec: '{distribution_name}'")
+
+
 def sample_sessions_for_simulation_day(
     scenario: dict,
     simulation_day_start: datetime,
@@ -968,16 +931,14 @@ def sample_sessions_for_simulation_day(
     number_chargers = int(site_configuration["number_chargers"])
 
     expected_sessions_range = site_configuration.get("expected_sessions_per_charger_per_day", [1.0, 1.0])
-    expected_sessions_per_charger = float(
-        random_generator.uniform(float(expected_sessions_range[0]), float(expected_sessions_range[1]))
-    )
+    expected_sessions_per_charger = _sample_uniform_from_range(expected_sessions_range, random_generator)
     expected_sessions_per_charger = max(expected_sessions_per_charger, 0.0)
 
     day_type = _get_day_type(simulation_day_start, holiday_dates)
 
     arrival_time_distribution = scenario.get("arrival_time_distribution", {}) or {}
     weekday_weight_spec = (arrival_time_distribution.get("weekday_weight", {}) or {}).get(day_type, [1.0, 1.0])
-    weekday_weight = float(random_generator.uniform(float(weekday_weight_spec[0]), float(weekday_weight_spec[1])))
+    weekday_weight = _sample_uniform_from_range(weekday_weight_spec, random_generator)
     weekday_weight = max(weekday_weight, 0.0)
 
     expected_total_sessions = expected_sessions_per_charger * float(number_chargers) * weekday_weight
@@ -1005,12 +966,13 @@ def sample_sessions_for_simulation_day(
 
     sampled_sessions: List[SampledSession] = []
 
-    arrival_component_specification = {"type": "mixture", "components": arrival_components}
-    parking_component_specification = {"type": "mixture", "components": parking_duration_components}
-    soc_component_specification = {"type": "mixture", "components": state_of_charge_components}
+    arrival_spec = arrival_components
+    parking_spec = parking_duration_components
+    soc_spec = state_of_charge_components
+
 
     for session_number in range(number_sessions):
-        arrival_hours = sample_from_distribution_specification(arrival_component_specification, random_generator)
+        arrival_hours = sample_value_from_distribution(arrival_spec, random_generator)
 
         arrival_minutes = float(arrival_hours) * 60.0
         arrival_minutes = float(np.clip(arrival_minutes, 0.0, 24.0 * 60.0 - 1e-9))
@@ -1020,12 +982,12 @@ def sample_sessions_for_simulation_day(
         arrival_abs_step = day_start_abs_step + int(arrival_step)
         arrival_time = pd.to_datetime(timestamps[arrival_abs_step]).to_pydatetime()
 
-        duration_minutes = sample_from_distribution_specification(parking_component_specification, random_generator)
-
+        duration_minutes = sample_value_from_distribution(parking_spec, random_generator)
         duration_minutes = float(np.clip(duration_minutes, min_duration_minutes, max_duration_minutes))
 
         departure_time = arrival_time + timedelta(minutes=float(duration_minutes))
-        departure_minutes_from_midnight = (departure_time - simulation_day_start).total_seconds() / 60.0
+        day_start_dt = pd.to_datetime(day_start).to_pydatetime()
+        departure_minutes_from_midnight = (departure_time - day_start_dt).total_seconds() / 60.0
         departure_step = int(np.ceil(departure_minutes_from_midnight / float(time_resolution_min)))
         departure_step = int(np.clip(departure_step, arrival_step + 1, steps_per_day))
 
@@ -1041,10 +1003,8 @@ def sample_sessions_for_simulation_day(
             # end boundary outside horizon: set to last timestamp + one step
             departure_time = (pd.to_datetime(timestamps[-1]) + pd.Timedelta(minutes=time_resolution_min)).to_pydatetime()
 
-        sampled_state_of_charge = sample_from_distribution_specification(soc_component_specification, random_generator)
-
+        sampled_state_of_charge = sample_value_from_distribution(soc_spec, random_generator)
         state_of_charge_at_arrival = float(np.clip(sampled_state_of_charge, 0.0, max_state_of_charge))
-
         vehicle_name, vehicle_class = _sample_vehicle_by_class(
             vehicle_curves_by_name=vehicle_curves_by_name,
             fleet_mix=fleet_mix,
@@ -1266,10 +1226,8 @@ def _track_pv_share_for_slot(
 def _get_charging_step_order_immediate(session_arrival_step: int, session_departure_step: int) -> np.ndarray:
     """
     Gibt die Zeitschritt-Reihenfolge für die Strategie „immediate“ zurück.
-
     Es wird strikt chronologisch geladen: vom Ankunftsschritt bis zum Abfahrtsschritt
-    (Abfahrtsschritt ist exklusiv). Dadurch wird die Energie so früh wie möglich in der
-    Standzeit eingeplant.
+    Dadurch wird die Energie so früh wie möglich in der Standzeit eingeplant.
     """
     return np.arange(int(session_arrival_step), int(session_departure_step), dtype=int)
 
@@ -1281,11 +1239,10 @@ def _get_charging_step_order_market(
 ) -> np.ndarray:
     """
     Gibt die Zeitschritt-Reihenfolge für die Strategie „market“ zurück.
-
-    Grundidee:
+    Prinzip:
     - Innerhalb der Standzeit werden alle möglichen Zeitschritte betrachtet.
-    - Wenn ein Marktpreissignal vorhanden ist, werden diese Zeitschritte nach Preis sortiert
-      (günstigste zuerst), damit die Reservierungslogik bevorzugt in billigen Slots lädt.
+    - Wenn ein Marktpreissignal vorhanden ist, werden diese Zeitschritte aufsteigend nach 
+      Preis sortiert, damit die Reservierungslogik bevorzugt in billigen Slots lädt.
     - Wenn kein Preissignal vorhanden ist, wird als Fallback chronologisch geladen.
 
     Hinweis:
@@ -1314,22 +1271,15 @@ def _compute_state_of_charge_for_step_from_allocations(
 ) -> float:
     """
     Berechnet den Ladezustand (SoC) zu Beginn eines bestimmten Zeitschritts.
-
-    Idee:
     Für den SoC in einem Slot ist entscheidend, wie viel Energie das Fahrzeug in allen
     vorherigen Slots bereits bekommen hat. Deshalb wird hier die bereits zugewiesene
     Energie aus `allocated_site_kwh_by_absolute_step` für alle Schritte < `absolute_step_index`
     aufsummiert und auf die Batteriekapazität umgerechnet.
-
-    Warum ist das wichtig?
     - Bei der Market-Strategie werden Slots nach Preis sortiert geplant (nicht chronologisch).
       Trotzdem muss der SoC für jeden Slot so berechnet werden, als würde die Zeit normal
       voranschreiten – sonst könnten zu hohe Ladeleistungen bei eigentlich hohem SoC entstehen.
     - Beim Generation-Ansatz mit Grid-Fallback wird erst PV geplant und danach Netz.
       Der Netz-Plan muss dabei den SoC berücksichtigen, der durch die PV-Zuteilung schon erreicht wurde.
-
-    Ergebnis:
-    Ein SoC-Wert zwischen 0.0 und 1.0 (geclippt).
     """
     battery_capacity_kwh = max(float(curve.battery_capacity_kwh), 1e-9)
     charger_efficiency = _charger_efficiency(scenario)
@@ -1362,10 +1312,6 @@ def _reserve_session_energy_generic(
     Universeller Reservierungs-Planner:
     - plant kWh/step in reserved_total_ev_energy_kwh_per_step
     - trackt optional PV-Anteil in reserved_pv_ev_energy_kwh_per_step
-    - SoC-Limit ist physikalisch korrekt (siehe _compute_state_of_charge_for_step_from_allocations)
-
-    Rückgabe:
-      plan_site_kwh_per_step, remaining_site_energy_kwh, allocations_dict(absolute_step->allocated_site_kwh)
     """
     number_steps = int(session_departure_step) - int(session_arrival_step)
     plan_site_kwh_per_step = np.zeros(number_steps, dtype=float)
@@ -1509,13 +1455,6 @@ def plan_charging_market_price_optimized(
 ) -> Tuple[np.ndarray, float]:
     """
     Plant die Ladung einer Session nach der Strategie „market“ (preisoptimiert).
-
-    Vorgehen:
-    - Innerhalb der Standzeit werden alle möglichen Zeitschritte betrachtet.
-    - Wenn ein Marktpreissignal vorhanden ist, werden diese Zeitschritte nach Preis sortiert
-      (günstigste zuerst). Das heißt: Energie wird bevorzugt in billige Zeitfenster gelegt.
-    - Wenn kein Preissignal vorhanden ist, wird als Fallback chronologisch geplant.
-
     Restriktionen / Physik:
     - Es wird immer die insgesamt verfügbare Standortenergie genutzt: PV + Netz,
       abzüglich Grundlast und bereits reservierter EV-Energie.
@@ -1525,10 +1464,6 @@ def plan_charging_market_price_optimized(
     - Trotz der Preis-Sortierung bleibt die SoC-Logik korrekt, weil der generische
       Reservierungs-Planner den SoC für jeden Slot aus allen bereits geplanten früheren
       Slots berechnet (zeitlich konsistent).
-
-    Rückgabe:
-    - `plan`: Array mit kWh pro Session-Zeitschritt (relativ zur Session), also die geplante Energiemenge je Slot.
-    - `remaining`: Restenergie (kWh), die innerhalb der Standzeit nicht mehr eingeplant werden konnte.
     """
     ordered_steps = _get_charging_step_order_market(session_arrival_step, session_departure_step, market_price_eur_per_kwh)
 
@@ -1583,7 +1518,7 @@ def plan_charging_market_price_optimized_grid_only(
     Grid-only Market-Fallback (für generation):
     - nutzt NUR Netz (keine PV-Reservierung in dieser Teilplanung)
     - wählt günstigste Slots zuerst (market)
-    - SoC-Kopplung: berücksichtigt initial_allocations_site_kwh_by_absolute_step (z.B. aus PV-Plan)
+    - SoC-Kopplung: berücksichtigt initial_allocations_site_kwh_by_absolute_step
     """
     ordered_steps = _get_charging_step_order_market(session_arrival_step, session_departure_step, market_price_eur_per_kwh)
 
@@ -1637,19 +1572,12 @@ def plan_charging_pv_first_fair_share(
 ) -> Tuple[np.ndarray, float, Dict[int, float]]:
     """
     Plant die Ladeenergie einer einzelnen Session nach der Strategie „PV-first fair share“.
-
-    Idee:
+    Restriktionen / Physik:
     - Es wird nur PV-Energie verwendet, die nach Abzug der Grundlast noch übrig ist
-      (und die nicht bereits als PV→EV für andere Sessions reserviert wurde).
+        nicht die bereits als PV→EV für andere Sessions reserviert wurde.
     - Diese verfügbare PV wird zunächst „fair“ über alle PV-Zeitschritte innerhalb der Standzeit verteilt.
     - Falls danach noch Energiebedarf übrig ist, wird zusätzlich in den PV-stärksten Zeitschritten nachgeladen.
-    - Netzbezug wird hier NICHT genutzt (der kommt ggf. später über einen separaten Grid-only-Fallback).
-
-    Ergebnis:
-    - Ein Ladeplan (kWh pro Schritt innerhalb des Session-Fensters),
-    - die verbleibende nicht geplante Energie,
-    - sowie ein Dict der bereits geplanten Allokationen je absolutem Schritt
-      (wichtig für SoC-Kopplung in nachgelagerten Planern).
+    - Netzbezug wird hier NICHT genutzt (sondern ggf. später über einen separaten Grid-only-Fallback).
     """
     number_steps = int(session_departure_step) - int(session_arrival_step)
     plan_total = np.zeros(number_steps, dtype=float)
@@ -1913,13 +1841,11 @@ def plan_ev_charging_session(
 @dataclass
 class ChargerTraceRow:
     """
-    Einzelner Trace-Datensatz für einen Ladepunkt zu einem konkreten Zeitstempel.
-
-    Die Klasse wird typischerweise als „Log-Zeile“ verwendet, um pro Zeitschritt festzuhalten:
+    Einzelner Trace-Datensatz für einen Ladepunkt zu einem konkreten Zeitstempel (pro Zeitschritt):
     - welcher Charger gerade welcher Session bzw. welchem Fahrzeug zugeordnet ist,
     - welche Leistung am Standort anliegt (gesamt) und welcher Anteil davon aus PV stammt,
     - in welchem Betriebsmodus die Leistung zustande kommt (z.B. PV-first, market, grid-only),
-    - und wie hoch der Ladezustand (SoC) des Fahrzeugs zu diesem Zeitpunkt ist.
+    - wie hoch der Ladezustand (SoC) des Fahrzeugs zu diesem Zeitpunkt ist.
     """
     timestamp: datetime
     charger_id: int
@@ -2025,7 +1951,6 @@ def simulate_charging_sessions_fcfs(
     def _session_sort_key(session: SampledSession) -> pd.Timestamp:
         """
         Liefert einen sortierbaren, tz-kompatiblen Key für FCFS.
-
         - Wenn arrival_time fehlt oder nicht parsebar ist, wird ein kompatibler Fallback-Zeitstempel verwendet,
         damit das Sortieren nicht an tz-aware/tz-naiv Konflikten scheitert.
         """
