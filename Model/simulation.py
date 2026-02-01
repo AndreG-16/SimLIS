@@ -27,6 +27,38 @@ from pathlib import Path
 # =============================================================================
 # 0) Hilfsfunktionen: Zeit / Einheiten
 # =============================================================================
+def _require_keys(container: dict, keys: list[str], context: str) -> None:
+    """
+    Prüft, ob alle keys im container vorhanden sind, sonst ValueError mit Kontext.
+    """
+    missing = [k for k in keys if k not in container]
+    if missing:
+        raise ValueError(f"Pflichtfeld fehlt in {context}: {missing}")
+    
+
+def _get_value_column_name(
+    columns,
+    value_column_one_based: int,
+    param_name: str,
+    csv_path: str,
+) -> str:
+    """
+    Hilfsfunktion: mappt 1-basierte Spaltennummer (inkl. Zeitspalte) auf echten Spaltennamen.
+    Gibt verständliche Fehlermeldungen, falls außerhalb des Bereichs.
+    """
+    original_columns = list(columns)
+    value_col_zero = int(value_column_one_based) - 1
+
+    if value_col_zero < 0 or value_col_zero >= len(original_columns):
+        preview = original_columns[:12]
+        raise ValueError(
+            f"{param_name}={value_column_one_based} ist außerhalb der CSV-Spaltenanzahl "
+            f"({len(original_columns)}) in Datei: {csv_path}\n"
+            f"Spalten-Preview: {preview}"
+        )
+
+    return str(original_columns[value_col_zero])
+
 
 def read_scenario_from_yaml(scenario_path: str) -> dict:
     """
@@ -38,30 +70,28 @@ def read_scenario_from_yaml(scenario_path: str) -> dict:
     if not isinstance(scenario, dict):
         raise ValueError("YAML konnte nicht als dict gelesen werden.")
 
-    required_top_level_keys = [
-        "time_resolution_min",
-        "simulation_horizon_days",
-        "start_datetime",
-        "site",
-        "vehicles",
-    ]
-    for key in required_top_level_keys:
-        if key not in scenario:
-            raise ValueError(f"Pflichtfeld fehlt in YAML: '{key}'")
+    _require_keys(
+        scenario,
+        ["time_resolution_min", "simulation_horizon_days", "start_datetime", "site", "vehicles"],
+        "YAML (top-level)",
+    )
+    _require_keys(
+        scenario["site"],
+        ["number_chargers", "rated_power_kw", "grid_limit_p_avb_kw"],
+        "YAML.site",
+    )
 
-    required_site_keys = [
-        "number_chargers",
-        "rated_power_kw",
-        "grid_limit_p_avb_kw",
-    ]
-    for key in required_site_keys:
-        if key not in scenario["site"]:
-            raise ValueError(f"Pflichtfeld fehlt in YAML.site: '{key}'")
-    inferred_tz = None
+    # Optional: Charger-Effizienz (Default 1.0)
+    charger_efficiency = float(scenario["site"].get("charger_efficiency", 1.0))
+    if not (0.0 < charger_efficiency <= 1.0):
+        raise ValueError("site.charger_efficiency muss im Bereich (0, 1] liegen.")
+    scenario["site"]["charger_efficiency"] = charger_efficiency
+
+    # Timezone ableiten, falls nicht gesetzt
     if "timezone" not in scenario or scenario["timezone"] in (None, "", "null"):
         inferred_tz = infer_timezone_from_holidays(scenario)
-    if inferred_tz is not None:
-        scenario["timezone"] = inferred_tz
+        if inferred_tz is not None:
+            scenario["timezone"] = inferred_tz
 
     return scenario
 
@@ -157,23 +187,21 @@ def _ensure_datetime_index(
 
     datetime_text = dataframe[datetime_column_name].astype(str).str.strip()
 
-    parsed = pd.to_datetime(datetime_text, errors="coerce", format="%Y-%m-%d %H:%M:%S")
+    formats = [
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M:%S",
+        "%d.%m.%Y %H:%M",
+        "%d.%m.%y %H:%M",
+    ]
 
-    mask = parsed.isna()
-    if mask.any():
-        parsed.loc[mask] = pd.to_datetime(datetime_text[mask], errors="coerce", format="%Y-%m-%d %H:%M")
+    parsed = pd.to_datetime(datetime_text, errors="coerce", format=formats[0])
+    for fmt in formats[1:]:
+        mask = parsed.isna()
+        if not mask.any():
+            break
+        parsed.loc[mask] = pd.to_datetime(datetime_text[mask], errors="coerce", format=fmt)
 
-    mask = parsed.isna()
-    if mask.any():
-        parsed.loc[mask] = pd.to_datetime(datetime_text[mask], errors="coerce", format="%Y-%m-%dT%H:%M:%S")
-
-    mask = parsed.isna()
-    if mask.any():
-        parsed.loc[mask] = pd.to_datetime(datetime_text[mask], errors="coerce", format="%d.%m.%Y %H:%M")
-
-    mask = parsed.isna()
-    if mask.any():
-        parsed.loc[mask] = pd.to_datetime(datetime_text[mask], errors="coerce", format="%d.%m.%y %H:%M")
 
     dataframe[datetime_column_name] = parsed
     dataframe = dataframe.dropna(subset=[datetime_column_name])
@@ -357,14 +385,12 @@ def read_local_load_profile_from_csv(
     datetime_column_name = "DateTime" if "DateTime" in dataframe.columns else str(dataframe.columns[0])
 
     # 1) Wertspalte bestimmen, bevor der Index gesetzt wird (Original-Spalten der CSV)
-    original_columns = list(dataframe.columns)
-    value_column_zero_based = int(value_column_one_based) - 1
-    if value_column_zero_based < 0 or value_column_zero_based >= len(original_columns):
-        raise ValueError(
-            f"base_load_value_col={value_column_one_based} ist außerhalb der CSV-Spaltenanzahl "
-            f"({len(original_columns)})."
-        )
-    value_column_name = original_columns[value_column_zero_based]
+    value_column_name = _get_value_column_name(
+        columns=list(dataframe.columns),
+        value_column_one_based=value_column_one_based,
+        param_name="base_load_value_col",
+        csv_path=csv_path,
+    )
 
     # 2) DatetimeIndex setzen (Zeitzone von den Simulations-Timestamps übernehmen, falls vorhanden)
     timezone = timestamps.tz
@@ -442,14 +468,12 @@ def read_market_profile_from_csv(
     datetime_column_name = "Datum von" if "Datum von" in dataframe.columns else str(dataframe.columns[0])
 
     # 1) Spaltenname anhand originaler CSV-Spalten bestimmen 
-    original_columns = list(dataframe.columns)
-    value_column_zero_based = int(value_column_one_based) - 1
-    if value_column_zero_based < 0 or value_column_zero_based >= len(original_columns):
-        raise ValueError(
-            f"market_strategy_value_col={value_column_one_based} ist außerhalb der CSV-Spaltenanzahl "
-            f"({len(original_columns)})."
-        )
-    value_column_name = original_columns[value_column_zero_based]
+    value_column_name = _get_value_column_name(
+        columns=list(dataframe.columns),
+        value_column_one_based=value_column_one_based,
+        param_name="market_strategy_value_col",
+        csv_path=csv_path,
+    )
 
     # 2) DatetimeIndex setzen
     timezone = timestamps.tz
@@ -568,58 +592,201 @@ def read_generation_profile_from_csv(
     csv_path: str,
     value_column_one_based: int,
     value_unit: str,
-    pv_profile_reference_kwp: float,
     pv_system_size_kwp: float,
     time_resolution_min: int,
     timestamps: pd.DatetimeIndex,
+    location_pv_site: Optional[str] = None,
+    tilt_angle_solar_module: Optional[float] = None,
 ) -> pd.Series:
     """
-    Liest ein pv-Erzeugungsprofil aus CSV ein, konvertiert es nach kWh/step und skaliert es auf pv_system_size_kwp.
-    value_column_one_based bezieht sich auf die Original-CSV-Spalten (inkl. Zeitspalte).
+    Liest ein PV-Erzeugungsprofil aus einer CSV-Datei ein und gibt es als Zeitreihe in **kWh pro Simulationsschritt**
+    (kWh/step) zurück, reindiziert auf das Simulations-Zeitgitter `timestamps`.
+
+    Die Funktion unterstützt zwei Eingabeformate und wählt das passende Verhalten automatisch:
+    1) Standardprofil-CSV (typisch: normierte PV-Profile)
+       - Erkennbar z.B. an Spalten wie "Datum von" und "Datum bis" (Format kann variieren).
+       - Die Wertespalte enthält i.d.R. eine normierte Leistung in **kW/kWp** (bezogen auf 1 kWp).
+       - Auswahl der Wertespalte:
+         a) bevorzugt über `location_pv_site` + `tilt_angle_solar_module`
+            (tolerant gegenüber "Ort, 10" vs "Ort,10"),
+         b) sonst über `value_column_one_based` (1-basiert, inkl. Zeitspalte).
+       - Umrechnung:
+            P_pv[kW] = P_spez[kW/kWp] * pv_system_size_kwp
+            E[kWh/step] = P_pv * step_hours
+
+    2) Anlagen-CSV (Messwerte einer konkreten PV-Anlage)
+       - Zeitstempelspalte wird heuristisch erkannt (z.B. "Datum von", "timestamp", ...; sonst erste Spalte).
+       - Wertespalte wird über `value_column_one_based` gewählt (1-basiert, inkl. Zeitspalte).
+       - Unterstützte Einheiten:
+         - "kW": Werte gelten als Leistung pro CSV-Zeitpunkt → direkt zu kWh/step über step_hours.
+         - "kWh": Werte gelten als Energie pro CSV-Zeitschritt → CSV-Auflösung wird aus dem Index
+           (Median der Zeitdifferenzen) inferiert, dann über mittlere Leistung auf kWh/step gemappt.
     """
-    dataframe = _read_table_flex(csv_path, prefer_decimal_comma=True)
+    df_raw = _read_table_flex(csv_path, prefer_decimal_comma=True)
 
-    datetime_column_name = _infer_datetime_column_name_for_signal(dataframe)
+    # -------------------------------------------------------------------------
+    # 1) Datetime-Spalte bestimmen
+    # -------------------------------------------------------------------------
+    datetime_column_name = None
+    for cand in ["Datum von", "datum von", "timestamp", "Timestamp", "datetime", "Datetime", "date", "Date"]:
+        if cand in df_raw.columns:
+            datetime_column_name = cand
+            break
+    if datetime_column_name is None:
+        datetime_column_name = _infer_datetime_column_name_for_signal(df_raw)
 
-    # 1) Spaltenname anhand originaler CSV-Spalten bestimmen
-    original_columns = list(dataframe.columns)
-    value_column_zero_based = int(value_column_one_based) - 1
+    # -------------------------------------------------------------------------
+    # 2) Standardprofil-Format VOR Index-Set erkennen
+    # -------------------------------------------------------------------------
+    def _norm(s: str) -> str:
+        return str(s).strip().lower().replace(" ", "")
 
-    if value_column_zero_based < 0 or value_column_zero_based >= len(original_columns):
+    cols_norm_raw = {_norm(c): c for c in df_raw.columns}
+    is_standardprofile_format = ("datumvon" in cols_norm_raw) and ("datumbis" in cols_norm_raw)
+
+    # -------------------------------------------------------------------------
+    # 3) Fallback-Wertespalte (1-based inkl. Zeitspalte)
+    # -------------------------------------------------------------------------
+    fallback_value_col = _get_value_column_name(
+        columns=list(df_raw.columns),
+        value_column_one_based=value_column_one_based,
+        param_name="generation_strategy_value_col",
+        csv_path=csv_path,
+    )
+    # Wenn der User aus Versehen auf die Zeitspalte zeigt -> verständlicher Fehler
+    if str(fallback_value_col) == str(datetime_column_name):
         raise ValueError(
-            f"generation_strategy_value_col={value_column_one_based} ist außerhalb der CSV-Spaltenanzahl "
-            f"({len(original_columns)})."
+            f"generation_strategy_value_col={value_column_one_based} zeigt auf die Datetime-Spalte "
+            f"('{datetime_column_name}'). Bitte eine Wertespalte wählen (meist >=2)."
         )
 
-    value_column_name = original_columns[value_column_zero_based]
+    # -------------------------------------------------------------------------
+    # 4) EINHEITLICHES Datetime-Handling über _ensure_datetime_index (inkl. TZ/DST/Dupe)
+    # -------------------------------------------------------------------------
+    df = _ensure_datetime_index(df_raw, datetime_column_name, timezone=timestamps.tz)
 
-    # 2) Jetzt DatetimeIndex setzen
-    timezone = timestamps.tz
-    dataframe = _ensure_datetime_index(dataframe, datetime_column_name, timezone=timezone)
+    # -------------------------------------------------------------------------
+    # 5) Mode erkennen: Standardprofil vs. Anlagen-CSV
+    # -------------------------------------------------------------------------
+    loc = (location_pv_site or "").strip()
+    tilt = tilt_angle_solar_module
 
-    # 3) Werte aus der gewählten Spalte ziehen (Spalte existiert weiterhin)
-    raw_values = pd.to_numeric(dataframe[value_column_name], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    mode = "plant"
+    chosen_col = None
 
-    generation_kwh_per_step_reference = _convert_energy_series_to_kwh_per_step(
-        values=raw_values,
-        unit=value_unit,
-        time_resolution_min=time_resolution_min,
-    )
+    # Standardprofil wählen, wenn Format passt ODER location+tilt gegeben ist
+    if is_standardprofile_format or (loc != "" and tilt is not None):
+        mode = "standardprofile"
 
-    pv_profile_reference_kwp = float(pv_profile_reference_kwp)
+        cols_norm = {_norm(c): c for c in df.columns}
+
+        # 5a) bevorzugt Spalte über location+tilt
+        if loc != "" and tilt is not None:
+            try:
+                tilt_int = int(round(float(tilt)))
+            except Exception:
+                tilt_int = None
+
+            if tilt_int is not None:
+                candidates = [f"{loc}, {tilt_int}", f"{loc},{tilt_int}"]
+                for cand in candidates:
+                    key = _norm(cand)
+                    if key in cols_norm:
+                        chosen_col = cols_norm[key]
+                        break
+
+            if chosen_col is None:
+                preview = [c for c in df.columns if _norm(loc) in _norm(c)]
+                raise ValueError(
+                    "PV-Standardprofil: Spalte für location_pv_site + tilt_angle_solar_module nicht gefunden.\n"
+                    f"location_pv_site='{loc}', tilt_angle_solar_module='{tilt}'\n"
+                    f"Erwartet z. B.: '{loc}, 10' oder '{loc},10'\n"
+                    f"Spalten mit Ortsbezug (Preview): {preview[:12]}"
+                )
+
+        # 5b) fallback: über value_column_one_based (bereits vorab ermittelt)
+        if chosen_col is None:
+            chosen_col = fallback_value_col
+            if chosen_col not in df.columns:
+                raise ValueError(
+                    f"Ausgewählte Spalte '{chosen_col}' (via generation_strategy_value_col) existiert nach "
+                    f"Datetime-Indexing nicht mehr. CSV: {csv_path}"
+                )
+
+    # -------------------------------------------------------------------------
+    # 6) Werte lesen + in kWh/step überführen
+    # -------------------------------------------------------------------------
     pv_system_size_kwp = float(pv_system_size_kwp)
-
-    if pv_profile_reference_kwp <= 0.0:
-        raise ValueError("pv_profile_reference_kwp muss > 0 sein.")
     if pv_system_size_kwp < 0.0:
         raise ValueError("pv_system_size_kwp muss >= 0 sein.")
 
-    scaling_factor = pv_system_size_kwp / pv_profile_reference_kwp
-    pv_generation_kwh_per_step = generation_kwh_per_step_reference * scaling_factor
+    step_hours = max(_step_hours(time_resolution_min), 0.0)
+    unit = (value_unit or "").strip().lower().replace(" ", "")
 
-    series = pd.Series(pv_generation_kwh_per_step, index=dataframe.index, name="pv_generation_kwh_per_step")
-    series = _reindex_to_simulation_timestamps(series, timestamps, method="nearest")
-    return series
+    if mode == "standardprofile":
+        # Werte sind kW/kWp (normiert auf 1 kWp)
+        raw = pd.to_numeric(df[chosen_col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        p_spez_kw_per_kwp = np.maximum(raw, 0.0)  # clamp (Nachtartefakte)
+        pv_power_kw = p_spez_kw_per_kwp * pv_system_size_kwp
+        pv_kwh_per_step = pv_power_kw * step_hours
+
+        series = pd.Series(pv_kwh_per_step, index=df.index, name="pv_generation_kwh_per_step")
+        series = _reindex_to_simulation_timestamps(series, timestamps, method="nearest")
+
+        series.attrs["pv_mode"] = "standardprofile"
+        series.attrs["pv_column"] = str(chosen_col)
+        series.attrs["pv_location"] = str(loc) if loc else None
+        series.attrs["pv_tilt_deg"] = float(tilt) if tilt is not None else None
+        series.attrs["pv_system_size_kwp"] = float(pv_system_size_kwp)
+        series.attrs["pv_input_unit"] = "kW/kWp"
+
+        return series
+
+    # ---------------------- Anlagen-CSV ----------------------
+    value_col_name = fallback_value_col
+    if value_col_name not in df.columns:
+        raise ValueError(f"Wertespalte '{value_col_name}' nicht in CSV gefunden. CSV: {csv_path}")
+
+    raw_series = pd.to_numeric(df[value_col_name], errors="coerce").fillna(0.0).astype(float).clip(lower=0.0)
+
+    # Fall 1: Einheit kW -> direkt in kWh/step
+    if unit in ["kw"]:
+        power_kw = _reindex_to_simulation_timestamps(raw_series, timestamps, method="nearest")
+        pv_kwh_per_step = power_kw.to_numpy(dtype=float) * step_hours
+
+        series = pd.Series(pv_kwh_per_step, index=timestamps, name="pv_generation_kwh_per_step")
+        series.attrs["pv_mode"] = "plant"
+        series.attrs["pv_column"] = str(value_col_name)
+        series.attrs["pv_system_size_kwp"] = float(pv_system_size_kwp)
+        series.attrs["pv_input_unit"] = str(value_unit)
+        return series
+
+    # Fall 2: Einheit kWh -> interpretieren als Energie pro CSV-Schritt
+    if unit in ["kwh"]:
+        if len(raw_series.index) >= 2:
+            diffs = raw_series.index.to_series().diff().dropna()
+            csv_step_seconds = float(diffs.median().total_seconds()) if len(diffs) else 900.0
+        else:
+            csv_step_seconds = 900.0
+
+        csv_step_hours = max(csv_step_seconds / 3600.0, 1e-9)
+
+        power_kw = raw_series / csv_step_hours
+        power_kw = _reindex_to_simulation_timestamps(power_kw, timestamps, method="nearest")
+        pv_kwh_per_step = power_kw.to_numpy(dtype=float) * step_hours
+
+        series = pd.Series(pv_kwh_per_step, index=timestamps, name="pv_generation_kwh_per_step")
+        series.attrs["pv_mode"] = "plant"
+        series.attrs["pv_column"] = str(value_col_name)
+        series.attrs["pv_system_size_kwp"] = float(pv_system_size_kwp)
+        series.attrs["pv_input_unit"] = str(value_unit)
+        series.attrs["pv_csv_step_hours_inferred"] = float(csv_step_hours)
+        return series
+
+    raise ValueError(
+        f"Unbekannte generation_strategy_unit='{value_unit}'. Erlaubt für Anlagen-CSV: 'kW' oder 'kWh'. "
+        "Für Standardprofile: setze location_pv_site + tilt_angle_solar_module (unit empfohlen: 'kW/kWp')."
+    )
 
 
 # =============================================================================
@@ -905,10 +1072,21 @@ def sample_sessions_for_simulation_day(
     return sampled_sessions
 
 
-
 # =============================================================================
 # 3) Strategie: Reservierungsbasierte Session-Planung (immediate / market / generation)
 # =============================================================================
+
+def _charger_efficiency(scenario: dict) -> float:
+    """
+    Liefert die Ladepunkt-Effizienz η aus dem Szenario.
+    η = (Energie, die im Fahrzeug/Batterie ankommt) / (Energie, die der Ladepunkt abgibt)
+    Der Wert muss im Bereich (0, 1] liegen. Ist er nicht vorhanden, wird 1.0 verwendet.
+    """
+    charger_efficiency = float((scenario.get("site") or {}).get("charger_efficiency", 1.0))
+    if not (0.0 < charger_efficiency <= 1.0):
+        raise ValueError("site.charger_efficiency muss im Bereich (0, 1] liegen.")
+    return charger_efficiency
+
 
 def _charger_limit_site_kwh_per_step(scenario: dict) -> float:
     """
@@ -931,19 +1109,24 @@ def _vehicle_site_limit_kwh_per_step_from_curve(
     scenario: dict,
 ) -> float:
     """
-    Gibt die maximal zulässige Energiemenge [kWh] für genau einen Simulationsschritt zurück,
-    so dass die Master-Ladekurve auch dann nicht überschritten wird, wenn der SoC innerhalb
-    des Schritts ansteigt.
-
-    Idee:
-    - Ein Simulationsschritt (z.B. 15 min) wird intern in kleine Teilschritte zerlegt
-      (standardmäßig 1 Minute).
-    - In jedem Teilschritt wird die erlaubte Leistung aus der Masterkurve am aktuellen SoC
-      bestimmt und daraus die maximal zulässige Energie berechnet.
-    - So entsteht automatisch ein „Tapering“ innerhalb des Schritts.
+    Gibt die maximal zulässige **Site-Energie** [kWh] für genau einen Simulationsschritt zurück,
+    sodass die Master-Ladekurve (fahrzeugseitige Aufnahmeleistung) auch dann nicht überschritten
+    wird, wenn der SoC innerhalb des Schritts ansteigt (Tapering innerhalb des Schritts).
+    `curve.power_kw` =  **maximale Fahrzeugaufnahmeleistung auf Batterieseite** 
+    charger_efficiency = (Batterieenergie) / (Ladepunktenergie)
+    Damit gilt:
+        Batterieenergie = Ladepunktenergie * charger_efficiency
+    - Ein Simulationsschritt (z.B. 15 min) wird intern in Teilschritte zerlegt (1 Minute).
+    - In jedem Teilschritt wird am aktuellen SoC die erlaubte Batterieleistung aus der Masterkurve bestimmt.
+    - Daraus wird die maximal zulässige Site-Energie berechnet (unter Berücksichtigung der Effizienz)
+      und zusätzlich so begrenzt, dass der Akku nicht über 100% SoC „überfüllt“ wird.
     """
     time_resolution_min = int(scenario["time_resolution_min"])
     step_hours = _step_hours(time_resolution_min)
+
+    charger_efficiency = float((scenario.get("site") or {}).get("charger_efficiency", 1.0))
+    if not (0.0 < charger_efficiency <= 1.0):
+        raise ValueError("site.charger_efficiency muss im Bereich (0, 1] liegen.")
 
     battery_capacity_kwh = max(float(curve.battery_capacity_kwh), 1e-9)
     soc = float(np.clip(state_of_charge_fraction, 0.0, 1.0))
@@ -952,30 +1135,36 @@ def _vehicle_site_limit_kwh_per_step_from_curve(
     n_substeps = max(1, min(int(time_resolution_min), 60))
     dt_hours = float(step_hours) / float(n_substeps)
 
-    energy_kwh_total = 0.0
+    site_energy_kwh_total = 0.0
 
     for _ in range(n_substeps):
-        power_kw_allowed = float(
-            np.interp(soc, curve.state_of_charge_fraction, curve.power_kw)
-        )
-        power_kw_allowed = max(power_kw_allowed, 0.0)
+        # Masterkurve: Batterieseitige Aufnahmeleistung (kW in die Batterie)
+        battery_power_kw_allowed = float(np.interp(soc, curve.state_of_charge_fraction, curve.power_kw))
+        battery_power_kw_allowed = max(battery_power_kw_allowed, 0.0)
 
-        # Maximal mögliche Energie in diesem Substep
-        energy_kwh = power_kw_allowed * dt_hours
+        # Umrechnung auf Site-Seite: Ladepunkt muss mehr abgeben, damit Batterie die erlaubte Leistung bekommt
+        site_power_kw_allowed = battery_power_kw_allowed / max(charger_efficiency, 1e-12)
 
-        # Nicht "überfüllen"
-        remaining_to_full_kwh = max(0.0, (1.0 - soc) * battery_capacity_kwh)
-        if energy_kwh > remaining_to_full_kwh:
-            energy_kwh = remaining_to_full_kwh
+        # Maximal mögliche Site-Energie in diesem Substep
+        site_energy_kwh = site_power_kw_allowed * dt_hours
 
-        energy_kwh_total += energy_kwh
-        soc = min(1.0, soc + energy_kwh / battery_capacity_kwh)
+        # Nicht "überfüllen" (in BatteriekWh gedacht -> auf SitekWh umrechnen)
+        remaining_to_full_battery_kwh = max(0.0, (1.0 - soc) * battery_capacity_kwh)
+        max_site_energy_due_to_remaining = remaining_to_full_battery_kwh / max(charger_efficiency, 1e-12)
+
+        if site_energy_kwh > max_site_energy_due_to_remaining:
+            site_energy_kwh = max_site_energy_due_to_remaining
+
+        # Batterieseitige Energie, die dadurch tatsächlich ankommt
+        battery_energy_kwh = site_energy_kwh * charger_efficiency
+
+        site_energy_kwh_total += site_energy_kwh
+        soc = min(1.0, soc + battery_energy_kwh / battery_capacity_kwh)
 
         if soc >= 1.0 - 1e-12:
             break
 
-    return float(max(energy_kwh_total, 0.0))
-
+    return float(max(site_energy_kwh_total, 0.0))
 
 
 def _required_battery_energy_kwh(
@@ -1143,13 +1332,14 @@ def _compute_state_of_charge_for_step_from_allocations(
     Ein SoC-Wert zwischen 0.0 und 1.0 (geclippt).
     """
     battery_capacity_kwh = max(float(curve.battery_capacity_kwh), 1e-9)
+    charger_efficiency = _charger_efficiency(scenario)
 
     delivered_site_kwh_before = 0.0
     for step_key, site_kwh in allocated_site_kwh_by_absolute_step.items():
         if int(step_key) < int(absolute_step_index):
             delivered_site_kwh_before += float(site_kwh)
 
-    delivered_battery_kwh_before = delivered_site_kwh_before
+    delivered_battery_kwh_before = delivered_site_kwh_before * charger_efficiency
     state_of_charge = float(state_of_charge_at_arrival) + delivered_battery_kwh_before / battery_capacity_kwh
     return float(np.clip(state_of_charge, 0.0, 1.0))
 
@@ -1611,8 +1801,9 @@ def plan_ev_charging_session(
     charging_strategy = str(scenario["site"].get("charging_strategy", "immediate")).strip().lower()
 
     state_of_charge_target = float(scenario["vehicles"]["soc_target"])
+    charger_efficiency = _charger_efficiency(scenario)
     required_battery_kwh = _required_battery_energy_kwh(curve, session.state_of_charge_at_arrival, state_of_charge_target)
-    required_site_kwh = required_battery_kwh
+    required_site_kwh = required_battery_kwh / max(charger_efficiency, 1e-12)
     remaining_site_kwh = float(required_site_kwh)
 
     plan_immediate: Optional[np.ndarray] = None
@@ -1709,6 +1900,9 @@ def plan_ev_charging_session(
         "plan_pv_site_kwh_per_step": (plan_pv if plan_pv is not None else np.zeros_like(total_plan)),
         "plan_market_site_kwh_per_step": (plan_market if plan_market is not None else np.zeros_like(total_plan)),
         "plan_immediate_site_kwh_per_step": (plan_immediate if plan_immediate is not None else np.zeros_like(total_plan)),
+        "charged_battery_kwh": float(np.sum(total_plan) * charger_efficiency),
+        "remaining_battery_kwh": float(max(0.0, required_battery_kwh - np.sum(total_plan) * charger_efficiency)),
+        "charger_efficiency": float(charger_efficiency),
     }
 
 
@@ -1935,7 +2129,8 @@ def simulate_charging_sessions_fcfs(
         )
 
         charged_site_kwh = float(plan_result["charged_site_kwh"])
-        charged_battery_kwh = charged_site_kwh
+        charger_efficiency = _charger_efficiency(scenario)
+        charged_battery_kwh = charged_site_kwh * charger_efficiency
 
         state_of_charge_end = float(
             np.clip(
@@ -1981,7 +2176,8 @@ def simulate_charging_sessions_fcfs(
 
             charging_strategy = str(scenario["site"].get("charging_strategy", "immediate")).strip().lower()
 
-            battery_added_cumulative_kwh = np.cumsum(plan_site_kwh_per_step)
+            charger_efficiency = _charger_efficiency(scenario)
+            battery_added_cumulative_kwh = np.cumsum(plan_site_kwh_per_step) * charger_efficiency
             state_of_charge_trace = float(session.state_of_charge_at_arrival) + battery_added_cumulative_kwh / max(
                 float(curve.battery_capacity_kwh),
                 1e-9,
@@ -2200,24 +2396,27 @@ def build_strategy_signal_series(
     """
     charging_strategy = str(charging_strategy).strip().lower()
     time_resolution_min = int(scenario["time_resolution_min"])
+    site_configuration = scenario["site"]
 
     if charging_strategy == "generation":
+        # Neue PV-Standardprofile: Spalte wird über location_pv_site + tilt_angle_solar_module ausgewählt.
+        # pv_profile_reference_kwp entfällt (ggf. alte Szenarien haben es noch -> default).
         site_configuration = scenario["site"]
         series = read_generation_profile_from_csv(
             csv_path=str(site_configuration["generation_strategy_csv"]),
-            value_column_one_based=int(site_configuration["generation_strategy_value_col"]),
-            value_unit=str(site_configuration["generation_strategy_unit"]),
-            pv_profile_reference_kwp=float(site_configuration["pv_profile_reference_kwp"]),
+            value_column_one_based=int(site_configuration.get("generation_strategy_value_col", 2)),
+            value_unit=str(site_configuration.get("generation_strategy_unit", "kW/kWp")),
             pv_system_size_kwp=float(site_configuration["pv_system_size_kwp"]),
             time_resolution_min=time_resolution_min,
             timestamps=timestamps,
+            location_pv_site=site_configuration.get("location_pv_site"),
+            tilt_angle_solar_module=site_configuration.get("tilt_angle_solar_module"),
         )
         if normalize_to_internal:
             return series, "PV [kWh/step]"
         return series / max(_step_hours(time_resolution_min), 1e-9), "PV [kW]"
 
     if charging_strategy == "market":
-        site_configuration = scenario["site"]
         series = read_market_profile_from_csv(
             csv_path=str(site_configuration["market_strategy_csv"]),
             value_column_one_based=int(site_configuration["market_strategy_value_col"]),

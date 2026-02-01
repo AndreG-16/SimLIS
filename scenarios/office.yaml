@@ -21,21 +21,23 @@ site:
   # =============================================================================
   # Lademanagementstrategie des Standorts
   # =============================================================================
-  # Daten für generation / market: https://www.smard.de/home/downloadcenter/download-marktdaten/
+  # Aktuelle Daten für market: https://www.smard.de/home/downloadcenter/download-marktdaten/
 
-  charging_strategy: "generation"                                         # Lademanagementstrategie: "immediate" (default), "market", "generation"
+  charging_strategy: "generation"                             # Lademanagementstrategie: "immediate" (default), "market", "generation"
   
   # CSV-Datei: PV-Erzeugung (generation)
-  generation_strategy_csv: "../data/strategies/generation/latest.csv"     # Pfad bei vorhandenen Daten zur Stromgeneration: "../data/strategies//generation/latest.csv"
-  generation_strategy_value_col: 7                                        # Spalte, die entsprechende Werte ("MWh", "kWh", o.ä.) enthalten, woran sich die Lademanagementstrategie richtet (1-basierter Code: 1 = erste Spalte)
-  generation_strategy_unit: "MWh"                                         # Einheit, die für den Wert im Lademanagement verwendet wird ("MWh", "kWh", "kW", "€/MWh")
-  pv_profile_reference_kwp: 108500000                                     # gesamte installierte Leistung in DE Stand 31.12.2025 = 99,3 GWp, Stand 31.12.2025 = 117 GWp"
-  pv_system_size_kwp: 150                                                 # Größe der untersuchten Anlage in kWp
+  # Beim Einlesen einer anlagenspezifischen Datei "tilt_angle_solar_module" und "location_pv_site" leer lassen und "generation_strategy_value_col" anpassen
+  generation_strategy_csv: "../data/strategies/generation/PV_Erzeugung_Standardprofile_DE.csv"      # Pfad bei vorhandenen Daten zur Stromgeneration: "../data/strategies//generation/PV_Erzeugung_Standardprofile_DE.csv"
+  generation_strategy_value_col: 7                                                                  # Spalte, die entsprechende Werte ("MWh", "kWh", o.ä.) enthalten, woran sich die Lademanagementstrategie richtet (1-basierter Code: 1 = erste Spalte)
+  generation_strategy_unit: "kW"                                                                    # Einheit, die für den Wert im Lademanagement verwendet wird ("MWh", "kWh", "kW", "€/MWh")
+  pv_system_size_kwp: 150                                                                           # Größe der untersuchten Anlage in kWp
+  tilt_angle_solar_module: 10                                                                       # Neigungswinkel des Solarmoduls in Grad ("10", "15", "20", "25", "30")
+  location_pv_site: Augsburg                                                                        # Standort der Anlage bzw. vergleichbar laut Globalstrahlung in DE ("Augsburg", "Cottbus", "Hamburg", "Hannover", "Ingolstadt", "Leipzig", "Magdeburg", "Nürnberg", "Regensburg", "Schwerin")
 
   # CSV-Datei: Marktpreise (market)
-  market_strategy_csv: "../data/strategies/market/latest.csv"             # Pfad bei vorhandenen Daten zu Strompreisen: "../data/strategies//market/latest.csv"
-  market_strategy_value_col: 3                                            # Spalte, die entsprechende Werte ("€/MWh", "€/kWh", o.ä.) enthalten, woran sich die Lademanagementstrategie richtet (1-basierter Code: 1 = erste Spalte)
-  market_strategy_unit: "€/MWh"                                           # Einheit, die für den Wert im Lademanagement verwendet wird (€/kWh", "€/MWh")
+  market_strategy_csv: "../data/strategies/market/Marktdaten_Grosshandelspreise_DE_2025.csv"        # Pfad bei vorhandenen Daten zu Strompreisen: "../data/strategies//market/Marktdaten_Grosshandelspreise_DE_2025.csv"
+  market_strategy_value_col: 3                                                                      # Spalte, die entsprechende Werte ("€/MWh", "€/kWh", o.ä.) enthalten, woran sich die Lademanagementstrategie richtet (1-basierter Code: 1 = erste Spalte)
+  market_strategy_unit: "€/MWh"                                                                     # Einheit, die für den Wert im Lademanagement verwendet wird (€/kWh", "€/MWh")
 
   # =============================================================================
   # Grundlast des Standorts - Gebäudeprofil
