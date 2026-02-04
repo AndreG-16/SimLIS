@@ -1,68 +1,35 @@
-site_type: office                     # Standort des Ladepunkts
+site_type: office                                             # Standort des Ladepunkts
+time_resolution_min: 15                                       # Zeitschritt, in der die Simulation berechnet wird
+simulation_horizon_days: 1                                    # gewünschter Analysehorizont in Tagen
 
-time_resolution_min: 15               # Zeitschritt, in der die Simulation berechnet wird
-simulation_horizon_days: 10           # gewünschter Analysehorizont in Tagen
+start_datetime: "2025-03-04 00:00"                            # Zeitpunkt, ab dem die Simulation beginnen soll
 
-start_datetime: "2025-03-04 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen soll
+charging_strategy: "market"                                   # "immediate" | "market" | "pv"
+localload_pv_market_csv: "../data/localload_pv_market.csv"    # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
+  
+
 holidays:
   country: "DE"
-  subdivision: "BY"                   # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
-  dates: []                           # zusätzliche bekannte betriebsfreie Tage manuell eingeben, getrennt durch neue Zeile (- "2026-01-01")
+  subdivision: "BY"                                           # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
+  dates: []                                                   # zusätzliche bekannte betriebsfreie Tage manuell eingeben, getrennt durch neue Zeile (- "2026-01-01")
      
-
 site:
   number_chargers: 5                                          # Anzahl der Ladepunkte am Standort
-  rated_power_kw: 12                                          # Verfügbare Leistung pro Ladepunkt
-  grid_limit_p_avb_kw: 100                                    # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  rated_power_kw: 22                                          # Verfügbare Leistung pro Ladepunkt
+  grid_limit_p_avb_kw: 30                                     # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
   expected_sessions_per_charger_per_day: [2.0, 3.0]           # erwartete Ladevorgänge pro LP und Tag
   charger_efficiency: 0.95                                    # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
   allow_cross_day_charging: false                             # Ermöglicht keine Ladungen über Mitternacht hinaus
   
   # =============================================================================
-  # Lademanagementstrategie des Standorts
+  # Angaben zur lokalen PV-Anlage
   # =============================================================================
-  # Aktuelle Daten für market: https://www.smard.de/home/downloadcenter/download-marktdaten/
-
-  charging_strategy: "generation"                             # Lademanagementstrategie: "immediate" (default), "market", "generation"
+  pv_system_size_kwp: 30                                      # Größe der untersuchten Anlage in kWp
   
-  # CSV-Datei: PV-Erzeugung (generation)
-  # Beim Einlesen einer anlagenspezifischen Datei "tilt_angle_solar_module" und "location_pv_site" leer lassen und "generation_strategy_value_col" anpassen
-  generation_strategy_csv: "../data/strategies/generation/PV_Erzeugung_Standardprofile_DE.csv"      # Pfad bei vorhandenen Daten zur Stromgeneration: "../data/strategies//generation/PV_Erzeugung_Standardprofile_DE.csv"
-  generation_strategy_value_col: 7                                                                  # Spalte, die entsprechende Werte ("MWh", "kWh", o.ä.) enthalten, woran sich die Lademanagementstrategie richtet (1-basierter Code: 1 = erste Spalte)
-  generation_strategy_unit: "kW"                                                                    # Einheit, die für den Wert im Lademanagement verwendet wird ("MWh", "kWh", "kW", "€/MWh")
-  pv_system_size_kwp: 300                                                                           # Größe der untersuchten Anlage in kWp
-  tilt_angle_solar_module: 10                                                                       # Neigungswinkel des Solarmoduls in Grad ("10", "15", "20", "25", "30")
-  location_pv_site: Augsburg                                                                        # Standort der Anlage bzw. vergleichbar laut Globalstrahlung in DE ("Augsburg", "Cottbus", "Hamburg", "Hannover", "Ingolstadt", "Leipzig", "Magdeburg", "Nürnberg", "Regensburg", "Schwerin")
-
-  # CSV-Datei: Marktpreise (market)
-  market_strategy_csv: "../data/strategies/market/Marktdaten_Grosshandelspreise_DE_2025.csv"        # Pfad bei vorhandenen Daten zu Strompreisen: "../data/strategies//market/Marktdaten_Grosshandelspreise_DE_2025.csv"
-  market_strategy_value_col: 3                                                                      # Spalte, die entsprechende Werte ("€/MWh", "€/kWh", o.ä.) enthalten, woran sich die Lademanagementstrategie richtet (1-basierter Code: 1 = erste Spalte)
-  market_strategy_unit: "€/MWh"                                                                     # Einheit, die für den Wert im Lademanagement verwendet wird (€/kWh", "€/MWh")
-
   # =============================================================================
   # Grundlast des Standorts - Gebäudeprofil
   # =============================================================================
-  # Die Grundlast beschreibt den zeitlich aufgelösten Stromverbrauch des Gebäudes im 15-Minuten-Raster 
-  #
-  # Wird eine CSV angegeben, wird deren Profil als zeitlicher Verlauf ("Shape") verwendet und auf den 
-  # angegebenen Standort skaliert:
-  # - base_load_unit = "kWh":
-  #     CSV-Werte sind Energie pro Zeitschritt (z. B. HTW-Profile, auf 1000 kWh/Jahr normiert).
-  #     Die Werte werden auf base_load_annual skaliert und anschließend in kW umgerechnet.
-  # - base_load_unit = "kW":
-  #     CSV-Werte sind mittlere Leistung je Zeitschritt.
-  #     Das Profil wird so skaliert, dass seine mittlere Leistung base_load_annual entspricht.
-  #
-  # Ist keine CSV angegeben, wird eine konstante Grundlast verwendet.
-
-  # Option A: konstante Grundlast (kW)
-  base_load_kw: 50
-
-  # Option B: Grundlast aus CSV-Datei (hat Vorrang gegenüber Option A)
-  base_load_csv: "../data/building_loads/office_tub_2018.csv"     # Pfad zu den Gebäudeprofilen: "../data/building_loads/office_tub_2018.csv" 
-  base_load_value_col: 2                                          # Spalte mit dem Profilwert (1-basiert, z. B. Mean_Value)
-  base_load_unit: "kWh"                                           # "kWh" oder "kW"
-  base_load_annual: 500000                                        # jährlicher standortspezifischer Verbrauch (kWh oder kW, passend zur Einheit)
+  base_load_annual_kwh: 50000                                 # jährlicher standortspezifischer Verbrauch
 
 
 # =============================================================================
@@ -70,9 +37,9 @@ site:
 # =============================================================================
 
 vehicles:
-  soc_target: 0.95                                                # Gewünschter Ladezustand am Ende des Ladeprozesses
-  vehicle_curve_csv: "../data/Ladekurven_Master.csv"              # Batteriekapazität und Ladekurve nach SOC
-  fleet_mix:                                                      # Gewichtung der Fahrzeugtypen - PKW & Transporter
+  soc_target: 0.95                                             # Gewünschter Ladezustand am Ende des Ladeprozesses
+  vehicle_curve_csv: "../data/Ladekurven_Master.csv"           # Batteriekapazität und Ladekurve nach SOC
+  fleet_mix:                                                   # Gewichtung der Fahrzeugtypen - PKW & Transporter
     PKW: 0.98
     Transporter: 0.02
 
@@ -83,7 +50,7 @@ vehicles:
 # Ankunftszeiten an den Ladepunkten
 arrival_time_distribution:
   type: mixture
-  time_unit: minutes
+  time_unit: hours
 
   # Skalierung der Ladevorgänge je nach Tagtyp
   weekday_weight:
@@ -131,21 +98,21 @@ parking_duration_distribution:
   # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
     - name: long_stay                     # Vollzeitmitarbeiter
       distribution: normal
-      weight: 0.7
+      weight: 1.0
       mu: [360, 540]                      # typische Parkdauer in Minuten
-      sigma: [60, 90]                     # Streuung in Minuten
+      sigma: [30, 60]                     # Streuung in Minuten
 
-    - name: medium_stay                   # Teilzeitmitarbeiter / längere Meetings 
-      distribution: normal
-      weight: 0.2
-      mu: [120, 240]             
-      sigma: [30, 60]
+    # - name: medium_stay                   # Teilzeitmitarbeiter / längere Meetings 
+    #   distribution: normal
+    #   weight: 0.2
+    #   mu: [120, 240]             
+    #   sigma: [30, 60]
 
-    - name: short_stay                    # Besucher / kurze Termine
-      distribution: normal
-      weight: 0.1
-      mu: [30, 90]               
-      sigma: [10, 20]
+    # - name: short_stay                    # Besucher / kurze Termine
+    #   distribution: normal
+    #   weight: 0.1
+    #   mu: [30, 90]               
+    #   sigma: [10, 20]
 
 # Batteriezustand bei Ankunft; Verteilung ist eine Mischung aus gezieltem Laden und opportunistischem Laden
 # Office: Mischung aus Pendlern (mittlerer SoC) und Mitarbeitern, die „wenn möglich“ laden (höherer SoC)
