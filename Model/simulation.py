@@ -2800,7 +2800,7 @@ def build_master_curve_and_actual_points_for_vehicle(
     *,
     charger_traces_dataframe: pd.DataFrame,
     scenario: dict,
-    curve: VehicleChargingCurve,              # <-- Variante 2
+    curve: VehicleChargingCurve,           
     start: Optional[pd.Timestamp] = None,
     end: Optional[pd.Timestamp] = None,
     power_tolerance_kw: float = 1e-6,

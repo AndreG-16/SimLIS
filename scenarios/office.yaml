@@ -1,6 +1,6 @@
 site_type: office                                             # Standort des Ladepunkts
 time_resolution_min: 15                                       # Zeitschritt, in der die Simulation berechnet wird
-simulation_horizon_days: 5                                    # gewünschter Analysehorizont in Tagen
+simulation_horizon_days: 3                                    # gewünschter Analysehorizont in Tagen
 
 start_datetime: "2025-03-29 00:00"                            # Zeitpunkt, ab dem die Simulation beginnen soll
 
