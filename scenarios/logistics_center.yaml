@@ -1,14 +1,17 @@
-site_type: logistics_center            # Standort des Ladepunkts
+site_type: logistics_center                                   # Standort des Ladepunkts
+time_resolution_min: 15                                       # Zeitschritt, in der die Simulation berechnet wird
+simulation_horizon_days: 3                                    # gewünschter Analysehorizont in Tagen
 
-time_resolution_min: 15               # Zeitschritt, in der die Simulation abgebildet wird
-simulation_horizon_days: 8            # gewünschter Analysehorizont in Tagen
+start_datetime: "2025-03-29 00:00"                            # Zeitpunkt, ab dem die Simulation beginnen soll
 
-start_datetime: "2025-01-01 00:00"    # Zeitpunkt, ab dem der Lastgang anfangen soll
+charging_strategy: "generation"                                   # "immediate" | "market" | "pv"
+localload_pv_market_csv: "../data/localload_pv_market.csv"    # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
+  
+timezone: "Europe/Berlin"                                     # Zeitzone, in der sich die Anlage befindet
 holidays:
   country: "DE"
-  subdivision: "BY"                   # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
-  dates: []                           # zusätzliche bekannte betriebsfreie Tage manuell eingeben, getrennt durch neue Zeile (- "2026-01-01")
-
+  subdivision: "BY"                                           # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
+  dates: []                                                   # zusätzliche bekannte betriebsfreie Tage manuell eingeben, getrennt durch neue Zeile (- "2026-01-01")
 
 site:
   number_chargers: 20                                          # Anzahl der Ladepunkte am Standort

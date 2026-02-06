@@ -1337,6 +1337,7 @@ def charging_strategy_immediate(
     return {
         "plan_site_kwh_per_step": plan_site_kwh_per_step,
         "plan_pv_site_kwh_per_step": plan_pv_site_kwh_per_step,
+        "plan_market_kwh_per_step": np.zeros_like(plan_site_kwh_per_step),  # <-- NEU
         "charged_site_kwh": float(charged_site_kwh),
         "charged_pv_site_kwh": float(charged_pv_site_kwh),
         "remaining_site_kwh": float(max(remaining_site_kwh, 0.0)),
@@ -1872,6 +1873,10 @@ def plan_charging_for_day(
         res["arrival_step"] = int(s.arrival_step)
         res["departure_step"] = int(s.departure_step)
         res["required_site_kwh"] = float(required_site_energy_kwh)
+        res["arrival_time"] = s.arrival_time
+        res["departure_time"] = s.departure_time
+        res["parking_duration_min"] = float(s.duration_minutes)
+        res["state_of_charge_at_arrival"] = float(s.state_of_charge_at_arrival)
 
         results.append(res)
 
@@ -2026,12 +2031,19 @@ def simulate_site_fcfs_with_planning(
                     "vehicle_class": s.vehicle_class,
                     "arrival_step": a,
                     "departure_step": d,
+                    "arrival_time": s.arrival_time,             
+                    "departure_time": s.departure_time,         
+                    "parking_duration_min": float(s.duration_minutes),  
+                    "state_of_charge_at_arrival": float(s.state_of_charge_at_arrival), 
                     "status": "drive_off",
                     "charger_id": None,
                     "charged_site_kwh": 0.0,
                     "charged_pv_site_kwh": 0.0,
                     "remaining_site_kwh": np.nan,
                     "final_soc": float(np.clip(s.state_of_charge_at_arrival, 0.0, 1.0)),
+                    "plan_site_kwh_per_step": np.zeros(0, dtype=float),
+                    "plan_pv_site_kwh_per_step": np.zeros(0, dtype=float),
+                    "plan_market_kwh_per_step": np.zeros(0, dtype=float),
                 }
             )
             continue
@@ -2086,89 +2098,52 @@ def simulate_site_fcfs_with_planning(
 # 5) Analyse / Validierung / Notebook-Helper
 # =============================================================================
 
-
-# -----------------------------------------------------------------------------
-# A) Scenario / Time helpers
-# -----------------------------------------------------------------------------
-
 def get_time_resolution_min_from_scenario(scenario: dict) -> int:
-    """Liest time_resolution_min robust aus dem Szenario."""
     return int(scenario.get("time_resolution_min", 15))
 
 
 def get_charging_strategy_from_scenario(scenario: dict) -> str:
-    """
-    Normalisiert scenario["charging_strategy"] auf:
-    - "immediate"
-    - "market"
-    - "pv"
-    """
     raw = str(scenario.get("charging_strategy", "immediate")).strip().lower()
-    if raw in {"generation", "pv", "pv_generation", "pv_first", "pv-first"}:
-        return "pv"
-    if raw in {"market"}:
-        return "market"
-    return "immediate"
+    return "pv" if raw in {"generation", "pv", "pv_generation", "pv_first", "pv-first"} else raw
 
 
 def get_holiday_dates_from_scenario(scenario: dict, timestamps: pd.DatetimeIndex) -> set[date]:
-    """
-    Liefert Feiertage als set[date]. Minimalistisch:
-
-    Unterstützt:
-    - scenario["holidays"]["dates"] = ["2026-01-01", ...]
-    - scenario["holidays"]["country"] (optional) über python 'holidays' falls installiert
-    """
-    holidays_cfg = scenario.get("holidays") or {}
-    out: set[date] = set()
-
-    explicit = holidays_cfg.get("dates")
+    cfg = scenario.get("holidays") or {}
+    explicit = cfg.get("dates")
     if isinstance(explicit, list) and explicit:
+        out: set[date] = set()
         for x in explicit:
             try:
                 out.add(pd.to_datetime(x).date())
             except Exception:
-                continue
+                pass
         return out
 
-    country = str(holidays_cfg.get("country", "")).strip()
+    country = str(cfg.get("country", "")).strip()
     if not country:
-        return out
+        return set()
 
     try:
         import holidays as _holidays  # type: ignore
     except Exception:
-        warnings.warn(
-            "python-package 'holidays' nicht installiert -> holiday_dates bleibt leer.",
-            UserWarning,
-        )
-        return out
+        warnings.warn("python-package 'holidays' nicht installiert -> holiday_dates bleibt leer.", UserWarning)
+        return set()
 
     years = sorted({pd.Timestamp(t).year for t in timestamps})
-    subdiv = holidays_cfg.get("subdivision") or holidays_cfg.get("state") or None
-
+    subdiv = cfg.get("subdivision") or cfg.get("state") or None
     try:
         cal = _holidays.country_holidays(country, subdiv=subdiv, years=years)
-        out = {d for d in cal.keys()}
+        return set(cal.keys())
     except Exception:
         return set()
 
-    return out
 
-
-def get_daytype_calendar(
-    *,
-    start_datetime: pd.Timestamp,
-    horizon_days: int,
-    holiday_dates: set[date],
-) -> dict[str, list[date]]:
-    """Gibt einen Kalender {day_type: [dates]} über den Horizont zurück."""
+def get_daytype_calendar(*, start_datetime: pd.Timestamp, horizon_days: int, holiday_dates: set[date]) -> dict[str, list[date]]:
     out = {"working_day": [], "saturday": [], "sunday_holiday": []}
-    start_date = pd.Timestamp(start_datetime).date()
-
+    d0 = pd.Timestamp(start_datetime).date()
     for i in range(int(horizon_days)):
-        d = (pd.Timestamp(start_date) + pd.Timedelta(days=i)).date()
-        wd = int(pd.Timestamp(d).weekday())  # 0=Mo..6=So
+        d = (pd.Timestamp(d0) + pd.Timedelta(days=i)).date()
+        wd = int(pd.Timestamp(d).weekday())
         if d in holiday_dates or wd == 6:
             out["sunday_holiday"].append(d)
         elif wd == 5:
@@ -2179,116 +2154,55 @@ def get_daytype_calendar(
 
 
 def decorate_title_with_status(title: str, charging_strategy: str, strategy_status: str | None = None) -> str:
-    """Kleiner Helper für Plot-Titel."""
-    cs = str(charging_strategy)
-    ss = str(strategy_status) if strategy_status is not None else ""
-    if ss and ss != cs:
-        return f"{title} — {cs} ({ss})"
-    return f"{title} — {cs}"
+    if strategy_status and str(strategy_status) != str(charging_strategy):
+        return f"{title} — {charging_strategy} ({strategy_status})"
+    return f"{title} — {charging_strategy}"
 
 
-def initialize_time_window(
-    *,
-    timestamps: pd.DatetimeIndex,
-    scenario: dict,
-    days: int = 1,
-) -> tuple[pd.Timestamp, pd.Timestamp]:
-    """
-    Liefert (window_start, window_end) für Zoom-Plots.
-
-    Konvention:
-    - window_start = erster Timestamp
-    - window_end   = letzter Timestamp innerhalb der ersten `days` Tage (inklusive)
-    """
+def initialize_time_window(*, timestamps: pd.DatetimeIndex, scenario: dict, days: int = 1) -> tuple[pd.Timestamp, pd.Timestamp]:
     if len(timestamps) == 0:
         t = pd.Timestamp("1970-01-01")
         return t, t
-
-    time_resolution_min = get_time_resolution_min_from_scenario(scenario)
-    steps_per_day = int(round(24 * 60 / time_resolution_min))
-    n = int(min(len(timestamps), max(1, int(days)) * steps_per_day))
-
-    start = pd.Timestamp(timestamps[0])
-    end = pd.Timestamp(timestamps[n - 1])
-    return start, end
+    step_min = get_time_resolution_min_from_scenario(scenario)
+    steps = int(max(1, int(days)) * round(24 * 60 / step_min))
+    end_i = int(min(len(timestamps) - 1, steps - 1))
+    return pd.Timestamp(timestamps[0]), pd.Timestamp(timestamps[end_i])
 
 
-# -----------------------------------------------------------------------------
-# B) Sessions: Grouping / KPI / Preview
-# -----------------------------------------------------------------------------
-
-def group_sessions_by_day(
-    sessions_out: list[dict[str, Any]],
-    *,
-    only_plugged: bool = False,
-) -> dict[date, list[dict[str, Any]]]:
-    """
-    Gruppiert sessions_out nach Kalendertag.
-
-    Bevorzugt arrival_time (falls vorhanden), sonst None-Day.
-    """
+def group_sessions_by_day(sessions_out: list[dict[str, Any]], *, only_plugged: bool = False) -> dict[date, list[dict[str, Any]]]:
     out: dict[date, list[dict[str, Any]]] = {}
-
     for s in sessions_out:
         if only_plugged and str(s.get("status")) != "plugged":
             continue
-
-        arrival_time = s.get("arrival_time")
-        if arrival_time is None:
-            # fallback: pack into a synthetic bucket
-            key = date(1970, 1, 1)
-        else:
-            key = pd.to_datetime(arrival_time).date()
-
+        at = s.get("arrival_time")
+        key = pd.to_datetime(at).date() if at is not None else date(1970, 1, 1)
         out.setdefault(key, []).append(s)
-
     return out
 
 
 def summarize_sessions(sessions_out: list[dict[str, Any]], *, tol_kwh: float = 1e-9) -> dict[str, Any]:
-    """
-    KPI-Summary im Stil deines Notebooks.
-
-    Erwartet in sessions_out möglichst:
-    - status ("plugged" / "drive_off")
-    - remaining_site_kwh
-    - final_soc (oder state_of_charge_end)
-    - charger_id, arrival_time, departure_time
-    """
-    total = int(len(sessions_out))
+    total = len(sessions_out)
     plugged = [s for s in sessions_out if str(s.get("status")) == "plugged"]
     rejected = [s for s in sessions_out if str(s.get("status")) == "drive_off"]
 
     not_reached_rows: list[dict[str, Any]] = []
     for s in plugged:
-        remaining = float(s.get("remaining_site_kwh", 0.0) if s.get("remaining_site_kwh") is not None else 0.0)
-        if remaining > tol_kwh:
-            arrival_time = s.get("arrival_time")
-            departure_time = s.get("departure_time")
-            parking_min = s.get("parking_duration_min")
-
-            if parking_min is None and arrival_time is not None and departure_time is not None:
-                try:
-                    parking_min = float(
-                        (pd.to_datetime(departure_time) - pd.to_datetime(arrival_time)).total_seconds() / 60.0
-                    )
-                except Exception:
-                    parking_min = np.nan
-
+        rem = float(s.get("remaining_site_kwh", 0.0) or 0.0)
+        if rem > tol_kwh:
             not_reached_rows.append(
                 {
                     "session_id": s.get("session_id"),
                     "charger_id": s.get("charger_id"),
-                    "arrival_time": arrival_time,
-                    "parking_duration_min": parking_min,
-                    "soc_arrival": s.get("state_of_charge_at_arrival", s.get("soc_arrival")),
-                    "soc_end": s.get("final_soc", s.get("state_of_charge_end")),
-                    "remaining_energy_kwh": remaining,  # notebook-kompatibel
+                    "arrival_time": s.get("arrival_time"),
+                    "parking_duration_min": s.get("parking_duration_min"),
+                    "soc_arrival": s.get("state_of_charge_at_arrival"),
+                    "soc_end": s.get("final_soc"),
+                    "remaining_energy_kwh": rem,
                 }
             )
 
     return {
-        "num_sessions_total": total,
+        "num_sessions_total": int(total),
         "num_sessions_plugged": int(len(plugged)),
         "num_sessions_rejected": int(len(rejected)),
         "not_reached_rows": not_reached_rows,
@@ -2296,7 +2210,6 @@ def summarize_sessions(sessions_out: list[dict[str, Any]], *, tol_kwh: float = 1
 
 
 def build_plugged_sessions_preview_table(sessions_out: list[dict[str, Any]], *, n: int = 10) -> pd.DataFrame:
-    """Kleine Preview-Tabelle (nur plugged Sessions)."""
     rows = []
     for s in sessions_out:
         if str(s.get("status")) != "plugged":
@@ -2308,8 +2221,8 @@ def build_plugged_sessions_preview_table(sessions_out: list[dict[str, Any]], *, 
                 "arrival_time": s.get("arrival_time"),
                 "departure_time": s.get("departure_time"),
                 "parking_duration_min": s.get("parking_duration_min"),
-                "soc_arrival": s.get("state_of_charge_at_arrival", s.get("soc_arrival")),
-                "soc_end": s.get("final_soc", s.get("state_of_charge_end")),
+                "soc_arrival": s.get("state_of_charge_at_arrival"),
+                "soc_end": s.get("final_soc"),
                 "charged_site_kwh": s.get("charged_site_kwh"),
                 "charged_pv_site_kwh": s.get("charged_pv_site_kwh"),
                 "remaining_site_kwh": s.get("remaining_site_kwh"),
@@ -2319,13 +2232,8 @@ def build_plugged_sessions_preview_table(sessions_out: list[dict[str, Any]], *, 
     df = pd.DataFrame(rows)
     if len(df) == 0:
         return df
-    df = df.sort_values(["arrival_time", "session_id"], na_position="last").reset_index(drop=True)
-    return df.head(int(max(0, n)))
+    return df.sort_values(["arrival_time", "session_id"], na_position="last").head(int(n)).reset_index(drop=True)
 
-
-# -----------------------------------------------------------------------------
-# C) Timeseries DataFrames
-# -----------------------------------------------------------------------------
 
 def build_timeseries_dataframe(
     *,
@@ -2337,196 +2245,75 @@ def build_timeseries_dataframe(
     market_price_eur_per_mwh: Optional[np.ndarray] = None,
     debug_df: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
-    """
-    Baut timeseries_dataframe für Notebook-Plots.
-
-    Garantierte Spalten:
-    - timestamp
-    - base_load_kw
-    - pv_generation_kw
-    - ev_load_kw
-    - market_price_eur_per_mwh (falls vorhanden)
-    Zusätzlich (falls debug_df vorhanden): pv_to_ev_kwh_per_step, grid_to_ev_kwh_per_step etc.
-    """
-    time_resolution_min = get_time_resolution_min_from_scenario(scenario)
-    step_hours = float(time_resolution_min) / 60.0
-
-    base_kw = np.asarray(base_load_kwh_per_step, dtype=float) / max(step_hours, 1e-12)
-    pv_kw = np.asarray(pv_generation_kwh_per_step, dtype=float) / max(step_hours, 1e-12)
-    ev_kw = np.asarray(ev_load_kw, dtype=float)
-
+    step_h = get_time_resolution_min_from_scenario(scenario) / 60.0
     df = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(timestamps),
-            "base_load_kw": base_kw,
-            "pv_generation_kw": pv_kw,
-            "ev_load_kw": ev_kw,
+            "base_load_kw": np.asarray(base_load_kwh_per_step, float) / max(step_h, 1e-12),
+            "pv_generation_kw": np.asarray(pv_generation_kwh_per_step, float) / max(step_h, 1e-12),
+            "ev_load_kw": np.asarray(ev_load_kw, float),
         }
     )
-
     if market_price_eur_per_mwh is not None:
-        df["market_price_eur_per_mwh"] = np.asarray(market_price_eur_per_mwh, dtype=float)
-
+        df["market_price_eur_per_mwh"] = np.asarray(market_price_eur_per_mwh, float)
     if debug_df is not None and len(debug_df) == len(df):
-        # merge by position (safe if built from same timestamps)
         for c in debug_df.columns:
-            if c == "timestamp":
-                continue
-            if c not in df.columns:
+            if c != "timestamp" and c not in df.columns:
                 df[c] = debug_df[c].to_numpy()
-
     return df
 
 
-def build_site_overview_plot_data(
-    *,
-    timeseries_dataframe: pd.DataFrame,
-    scenario: dict,
-    start: Optional[pd.Timestamp] = None,
-    end: Optional[pd.Timestamp] = None,
-) -> dict[str, Any]:
-    """
-    Liefert Plot-Daten für Standort-Übersicht:
-    - dataframe (gefiltert)
-    - total_load_kw
-    - pv_generation_kw
-    - grid_limit_kw
-    """
+def build_site_overview_plot_data(*, timeseries_dataframe: pd.DataFrame, scenario: dict, start=None, end=None) -> dict[str, Any]:
     df = timeseries_dataframe.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"])
-
     if start is not None:
         df = df[df["timestamp"] >= pd.Timestamp(start)]
     if end is not None:
         df = df[df["timestamp"] <= pd.Timestamp(end)]
 
-    base = df.get("base_load_kw", 0.0)
-    ev = df.get("ev_load_kw", 0.0)
-    total = base.astype(float).fillna(0.0) + ev.astype(float).fillna(0.0)
-
-    pv = df.get("pv_generation_kw")
-    pv_out = pv.astype(float).fillna(0.0) if pv is not None else None
-
-    grid_limit_kw = float(scenario["site"].get("grid_limit_p_avb_kw", 0.0))
+    total = df["base_load_kw"].astype(float).fillna(0.0) + df["ev_load_kw"].astype(float).fillna(0.0)
+    pv = df["pv_generation_kw"].astype(float).fillna(0.0) if "pv_generation_kw" in df.columns else None
 
     return {
         "dataframe": df.reset_index(drop=True),
-        "total_load_kw": total.to_numpy(dtype=float),
-        "pv_generation_kw": None if pv_out is None else pv_out.to_numpy(dtype=float),
-        "grid_limit_kw": grid_limit_kw,
+        "total_load_kw": total.to_numpy(),
+        "pv_generation_kw": None if pv is None else pv.to_numpy(),
+        "grid_limit_kw": float(scenario["site"].get("grid_limit_p_avb_kw", 0.0)),
     }
 
 
 def build_ev_power_by_source_timeseries(timeseries_dataframe: pd.DataFrame) -> pd.DataFrame:
-    """
-    EV-Leistung nach Quelle (PV vs Grid).
-    Erwartet idealerweise debug-Spalten (kWh/step) aus _compute_debug_balance:
-      - pv_to_ev_kwh_per_step, grid_to_ev_kwh_per_step
-    Fallback: nutzt pv_ev_tracked_kwh_per_step oder approximiert über ev_load_kw.
-    """
     df = timeseries_dataframe.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"])
+    step_h = (
+        float((df["timestamp"].iloc[1] - df["timestamp"].iloc[0]).total_seconds()) / 3600.0
+        if len(df) >= 2 else 0.25
+    )
+    step_h = max(step_h, 1e-12)
 
-    # step_hours aus Timestamp-Diff schätzen
-    if len(df) >= 2:
-        dt_h = float((df["timestamp"].iloc[1] - df["timestamp"].iloc[0]).total_seconds()) / 3600.0
-        step_hours = max(dt_h, 1e-12)
-    else:
-        step_hours = 0.25  # default 15min
-
-    ev_kw = df.get("ev_load_kw", pd.Series(0.0, index=df.index)).astype(float).fillna(0.0).to_numpy()
+    ev_kw = df["ev_load_kw"].astype(float).fillna(0.0).to_numpy()
 
     if "pv_to_ev_kwh_per_step" in df.columns:
-        pv_kw = df["pv_to_ev_kwh_per_step"].astype(float).fillna(0.0).to_numpy() / step_hours
-        grid_kw = df.get("grid_to_ev_kwh_per_step", 0.0)
+        pv_kw = df["pv_to_ev_kwh_per_step"].astype(float).fillna(0.0).to_numpy() / step_h
+        grid_kw = df.get("grid_to_ev_kwh_per_step")
         if isinstance(grid_kw, pd.Series):
-            grid_kw = grid_kw.astype(float).fillna(0.0).to_numpy() / step_hours
+            grid_kw = grid_kw.astype(float).fillna(0.0).to_numpy() / step_h
         else:
             grid_kw = np.maximum(ev_kw - pv_kw, 0.0)
     elif "pv_ev_tracked_kwh_per_step" in df.columns:
-        pv_kw = df["pv_ev_tracked_kwh_per_step"].astype(float).fillna(0.0).to_numpy() / step_hours
+        pv_kw = df["pv_ev_tracked_kwh_per_step"].astype(float).fillna(0.0).to_numpy() / step_h
         pv_kw = np.clip(pv_kw, 0.0, ev_kw)
         grid_kw = np.maximum(ev_kw - pv_kw, 0.0)
     else:
         pv_kw = np.zeros_like(ev_kw)
         grid_kw = ev_kw
 
-    return pd.DataFrame(
-        {
-            "timestamp": df["timestamp"],
-            "ev_from_pv_kw": pv_kw,
-            "ev_from_grid_kw": grid_kw,
-        }
-    )
+    return pd.DataFrame({"timestamp": df["timestamp"], "ev_from_pv_kw": pv_kw, "ev_from_grid_kw": grid_kw})
 
 
-# -----------------------------------------------------------------------------
-# D) Charger-Traces + per-charger plots + heatmap
-# -----------------------------------------------------------------------------
-
-def enrich_sessions_out_with_metadata(
-    *,
-    sessions_out: list[dict[str, Any]],
-    sampled_sessions: list[SampledSession],
-) -> list[dict[str, Any]]:
-    """
-    Fügt arrival_time/departure_time/duration + soc_arrival etc. aus sampled_sessions hinzu.
-    (Sehr hilfreich, damit dein Notebook-Histogramm etc. stabil laufen.)
-    """
-    by_id: dict[str, SampledSession] = {str(s.session_id): s for s in sampled_sessions}
-
-    out: list[dict[str, Any]] = []
-    for row in sessions_out:
-        r = dict(row)
-        sid = str(r.get("session_id"))
-        meta = by_id.get(sid)
-        if meta is not None:
-            r.setdefault("arrival_time", meta.arrival_time)
-            r.setdefault("departure_time", meta.departure_time)
-            r.setdefault("parking_duration_min", float(meta.duration_minutes))
-            r.setdefault("state_of_charge_at_arrival", float(meta.state_of_charge_at_arrival))
-        out.append(r)
-    return out
-
-
-def _get_plan_array(row: dict[str, Any], candidates: list[str], length: int) -> np.ndarray:
-    """Pick first existing plan array, then pad/clip to `length`."""
-    arr = None
-    for k in candidates:
-        if k in row:
-            arr = row.get(k)
-            break
-    a = np.asarray(arr if arr is not None else [], dtype=float).reshape(-1)
-    if len(a) == length:
-        return a
-    if len(a) > length:
-        return a[:length]
-    out = np.zeros(length, dtype=float)
-    out[: len(a)] = a
-    return out
-
-
-def build_charger_traces_dataframe(
-    *,
-    sessions_out: list[dict[str, Any]],
-    scenario: dict,
-    vehicle_curves_by_name: dict[str, VehicleChargingCurve],
-    timestamps: pd.DatetimeIndex,
-) -> pd.DataFrame:
-    """
-    Baut charger_traces_dataframe aus sessions_out + Plänen.
-
-    Enthält bewusst auch 0-kW Steps während 'plugged' (wie in deinem alten Code).
-    Spalten (Notebook-kompatibel):
-    - timestamp, charger_id, session_id, vehicle_name
-    - power_kw, pv_power_kw
-    - soc
-    - is_plugged, is_charging
-    """
-    time_resolution_min = get_time_resolution_min_from_scenario(scenario)
-    step_hours = float(time_resolution_min) / 60.0
+def build_charger_traces_dataframe(*, sessions_out: list[dict[str, Any]], scenario: dict, vehicle_curves_by_name: dict[str, VehicleChargingCurve], timestamps: pd.DatetimeIndex) -> pd.DataFrame:
+    step_h = get_time_resolution_min_from_scenario(scenario) / 60.0
     eff = float(scenario["site"].get("charger_efficiency", 1.0))
-
     rows: list[dict[str, Any]] = []
 
     for s in sessions_out:
@@ -2539,57 +2326,36 @@ def build_charger_traces_dataframe(
         d = int(np.clip(d, 0, len(timestamps)))
         if d <= a:
             continue
+        L = d - a
 
-        window_len = int(d - a)
+        plan_site = np.asarray(s.get("plan_site_kwh_per_step", np.zeros(0)), float).reshape(-1)[:L]
+        plan_pv = np.asarray(s.get("plan_pv_site_kwh_per_step", np.zeros(0)), float).reshape(-1)[:L]
+        if len(plan_site) < L:
+            tmp = np.zeros(L, float); tmp[:len(plan_site)] = plan_site; plan_site = tmp
+        if len(plan_pv) < L:
+            tmp = np.zeros(L, float); tmp[:len(plan_pv)] = plan_pv; plan_pv = tmp
 
-        plan_site = _get_plan_array(
-            s,
-            ["plan_site_kwh_per_step", "plan_site_kwh", "plan_site"],
-            window_len,
-        )
-        plan_pv = _get_plan_array(
-            s,
-            ["plan_pv_site_kwh_per_step", "plan_pv_kwh_per_step", "plan_pv"],
-            window_len,
-        )
+        soc0 = s.get("state_of_charge_at_arrival")
+        soc0 = float(np.clip(float(soc0), 0.0, 1.0)) if soc0 is not None else np.nan
 
-        charger_id = s.get("charger_id")
-        session_id = s.get("session_id")
-        vehicle_name = s.get("vehicle_name")
+        curve = vehicle_curves_by_name.get(str(s.get("vehicle_name", "")))
+        cap = float(max(getattr(curve, "battery_capacity_kwh", 1e-12), 1e-12))
 
-        soc0 = s.get("state_of_charge_at_arrival", s.get("soc_arrival"))
-        try:
-            soc0_f = float(np.clip(float(soc0), 0.0, 1.0))
-        except Exception:
-            soc0_f = np.nan
-
-        curve = vehicle_curves_by_name.get(str(vehicle_name)) if vehicle_name is not None else None
-        battery_cap = float(max(getattr(curve, "battery_capacity_kwh", 1e-12), 1e-12))
-
-        # soc trace: cum battery energy / cap
         batt_added = np.cumsum(plan_site) * eff
-        soc_trace = soc0_f + batt_added / battery_cap if np.isfinite(soc0_f) else np.full(window_len, np.nan)
-        soc_trace = np.clip(soc_trace, 0.0, 1.0)
+        soc_trace = np.clip(soc0 + batt_added / cap, 0.0, 1.0) if np.isfinite(soc0) else np.full(L, np.nan)
 
-        for i in range(window_len):
+        for i in range(L):
             abs_step = a + i
-            if abs_step < 0 or abs_step >= len(timestamps):
-                continue
-
             site_kwh = float(plan_site[i])
-            pv_kwh = float(np.clip(float(plan_pv[i]), 0.0, site_kwh))
-
-            power_kw = site_kwh / max(step_hours, 1e-12)
-            pv_power_kw = pv_kwh / max(step_hours, 1e-12)
-
+            pv_kwh = float(np.clip(plan_pv[i], 0.0, site_kwh))
             rows.append(
                 {
                     "timestamp": pd.Timestamp(timestamps[abs_step]),
-                    "charger_id": None if charger_id is None else int(charger_id),
-                    "session_id": session_id,
-                    "vehicle_name": vehicle_name,
-                    "power_kw": float(power_kw),
-                    "pv_power_kw": float(pv_power_kw),
+                    "charger_id": None if s.get("charger_id") is None else int(s["charger_id"]),
+                    "session_id": s.get("session_id"),
+                    "vehicle_name": s.get("vehicle_name"),
+                    "power_kw": site_kwh / max(step_h, 1e-12),
+                    "pv_power_kw": pv_kwh / max(step_h, 1e-12),
                     "soc": float(soc_trace[i]) if np.isfinite(soc_trace[i]) else np.nan,
                     "is_plugged": True,
                     "is_charging": bool(site_kwh > 1e-12),
@@ -2599,14 +2365,7 @@ def build_charger_traces_dataframe(
     return pd.DataFrame(rows)
 
 
-def build_power_per_charger_timeseries(
-    charger_traces_dataframe: pd.DataFrame,
-    *,
-    charger_id: int,
-    start: Optional[pd.Timestamp] = None,
-    end: Optional[pd.Timestamp] = None,
-) -> pd.DataFrame:
-    """Timeseries power_kw für einen Charger (Zoom)."""
+def build_power_per_charger_timeseries(charger_traces_dataframe: pd.DataFrame, *, charger_id: int, start=None, end=None) -> pd.DataFrame:
     df = charger_traces_dataframe.copy()
     if len(df) == 0:
         return df
@@ -2619,45 +2378,23 @@ def build_power_per_charger_timeseries(
     return df.sort_values("timestamp").reset_index(drop=True)
 
 
-def build_soc_timeseries_by_charger(
-    *,
-    charger_traces_dataframe: pd.DataFrame,
-    charger_ids: list[int],
-    start: Optional[pd.Timestamp] = None,
-    end: Optional[pd.Timestamp] = None,
-) -> dict[int, pd.DataFrame]:
-    """SoC-Timeseries je Charger (Zoom)."""
+def build_soc_timeseries_by_charger(*, charger_traces_dataframe: pd.DataFrame, charger_ids: list[int], start=None, end=None) -> dict[int, pd.DataFrame]:
     out: dict[int, pd.DataFrame] = {}
+    df0 = charger_traces_dataframe.copy()
+    if len(df0) == 0:
+        return {int(cid): pd.DataFrame() for cid in charger_ids}
+    df0["timestamp"] = pd.to_datetime(df0["timestamp"])
+    if start is not None:
+        df0 = df0[df0["timestamp"] >= pd.Timestamp(start)]
+    if end is not None:
+        df0 = df0[df0["timestamp"] <= pd.Timestamp(end)]
     for cid in charger_ids:
-        df = charger_traces_dataframe.copy()
-        if len(df) == 0:
-            out[int(cid)] = pd.DataFrame()
-            continue
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
-        df = df[df["charger_id"] == int(cid)]
-        if start is not None:
-            df = df[df["timestamp"] >= pd.Timestamp(start)]
-        if end is not None:
-            df = df[df["timestamp"] <= pd.Timestamp(end)]
-        out[int(cid)] = df.sort_values("timestamp").reset_index(drop=True)[
-            [c for c in ["timestamp", "soc", "session_id"] if c in df.columns]
-        ]
+        df = df0[df0["charger_id"] == int(cid)].sort_values("timestamp")
+        out[int(cid)] = df[[c for c in ["timestamp", "soc", "session_id"] if c in df.columns]].reset_index(drop=True)
     return out
 
 
-def build_charger_power_heatmap_matrix(
-    charger_traces_dataframe: pd.DataFrame,
-    *,
-    start: Optional[pd.Timestamp] = None,
-    end: Optional[pd.Timestamp] = None,
-) -> dict[str, Any]:
-    """
-    Baut eine Heatmap-Matrix (charger x time).
-    Return:
-      - matrix: np.ndarray
-      - timestamps: list[pd.Timestamp]
-      - charger_ids: list[int]
-    """
+def build_charger_power_heatmap_matrix(charger_traces_dataframe: pd.DataFrame, *, start=None, end=None) -> dict[str, Any]:
     df = charger_traces_dataframe.copy()
     if len(df) == 0:
         return {"matrix": np.zeros((0, 0)), "timestamps": [], "charger_ids": []}
@@ -2667,226 +2404,173 @@ def build_charger_power_heatmap_matrix(
         df = df[df["timestamp"] >= pd.Timestamp(start)]
     if end is not None:
         df = df[df["timestamp"] <= pd.Timestamp(end)]
-
     if len(df) == 0:
         return {"matrix": np.zeros((0, 0)), "timestamps": [], "charger_ids": []}
 
     charger_ids = sorted({int(x) for x in df["charger_id"].dropna().unique().tolist()})
-    df_pivot = df.pivot_table(index="timestamp", columns="charger_id", values="power_kw", aggfunc="sum").fillna(0.0)
+    pivot = df.pivot_table(index="timestamp", columns="charger_id", values="power_kw", aggfunc="sum").fillna(0.0)
 
-    # full time grid (best effort)
-    ts = df_pivot.index.sort_values()
+    ts = pivot.index.sort_values()
     if len(ts) >= 2:
         freq = ts[1] - ts[0]
-        full_ts = pd.date_range(start=ts[0], end=ts[-1], freq=freq)
-        df_pivot = df_pivot.reindex(full_ts).fillna(0.0)
-        timestamps_out = list(full_ts)
+        full_ts = pd.date_range(ts[0], ts[-1], freq=freq)
+        pivot = pivot.reindex(full_ts).fillna(0.0)
+        ts_out = list(full_ts)
     else:
-        timestamps_out = list(ts)
+        ts_out = list(ts)
 
-    # ensure charger columns exist in order
     for cid in charger_ids:
-        if cid not in df_pivot.columns:
-            df_pivot[cid] = 0.0
-    df_pivot = df_pivot[charger_ids]
+        if cid not in pivot.columns:
+            pivot[cid] = 0.0
+    pivot = pivot[charger_ids]
 
-    matrix = df_pivot.to_numpy(dtype=float).T  # charger x time
-    return {"matrix": matrix, "timestamps": timestamps_out, "charger_ids": charger_ids}
+    return {"matrix": pivot.to_numpy(float).T, "timestamps": ts_out, "charger_ids": charger_ids}
 
 
-# -----------------------------------------------------------------------------
-# E) EV-Leistung nach Modus (Generation/Market/Immediate)
-# -----------------------------------------------------------------------------
-
-def build_ev_power_by_mode_timeseries_dataframe(
-    *,
-    timeseries_dataframe: pd.DataFrame,
-    sessions_out: list[dict[str, Any]],
-    scenario: dict,
-) -> pd.DataFrame:
-    """
-    Baut eine Timeseries mit:
-      - ev_generation_kw
-      - ev_market_kw
-      - ev_immediate_kw
-
-    Logik:
-    - immediate-strategy: alles -> immediate
-    - market-strategy: alles -> market
-    - pv/generation-strategy: PV-Anteil -> generation, Grid-Fallback (plan_market_*) -> market
-    """
+def build_ev_power_by_mode_timeseries_dataframe(*, timeseries_dataframe: pd.DataFrame, sessions_out: list[dict[str, Any]], scenario: dict) -> pd.DataFrame:
     df = timeseries_dataframe.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     n = len(df)
 
-    time_resolution_min = get_time_resolution_min_from_scenario(scenario)
-    step_hours = float(time_resolution_min) / 60.0
-
-    ev_gen_kwh = np.zeros(n, dtype=float)
-    ev_market_kwh = np.zeros(n, dtype=float)
-    ev_imm_kwh = np.zeros(n, dtype=float)
-
+    step_h = get_time_resolution_min_from_scenario(scenario) / 60.0
     strategy = get_charging_strategy_from_scenario(scenario)
+
+    ev_gen = np.zeros(n, float)
+    ev_market = np.zeros(n, float)
+    ev_imm = np.zeros(n, float)
 
     for s in sessions_out:
         if str(s.get("status")) != "plugged":
             continue
-
-        a = int(s.get("arrival_step", 0))
-        d = int(s.get("departure_step", a))
-        a = int(np.clip(a, 0, n))
-        d = int(np.clip(d, 0, n))
+        a = int(np.clip(int(s.get("arrival_step", 0)), 0, n))
+        d = int(np.clip(int(s.get("departure_step", a)), 0, n))
         if d <= a:
             continue
+        L = d - a
 
-        L = int(d - a)
+        site = np.asarray(s.get("plan_site_kwh_per_step", np.zeros(0)), float).reshape(-1)[:L]
+        pv = np.asarray(s.get("plan_pv_site_kwh_per_step", np.zeros(0)), float).reshape(-1)[:L]
+        mkt = np.asarray(s.get("plan_market_kwh_per_step", np.zeros(0)), float).reshape(-1)[:L]
 
-        plan_site = _get_plan_array(s, ["plan_site_kwh_per_step"], L)
-        plan_pv = _get_plan_array(s, ["plan_pv_site_kwh_per_step", "plan_pv_kwh_per_step"], L)
-        plan_market = _get_plan_array(s, ["plan_market_kwh_per_step", "plan_market_site_kwh_per_step"], L)
+        # pad falls nötig
+        if len(site) < L:
+            tmp = np.zeros(L, float); tmp[:len(site)] = site; site = tmp
+        if len(pv) < L:
+            tmp = np.zeros(L, float); tmp[:len(pv)] = pv; pv = tmp
+        if len(mkt) < L:
+            tmp = np.zeros(L, float); tmp[:len(mkt)] = mkt; mkt = tmp
 
         if strategy == "immediate":
-            ev_imm_kwh[a:d] += plan_site
+            ev_imm[a:d] += site
         elif strategy == "market":
-            # market plan == site plan
-            ev_market_kwh[a:d] += plan_site if np.sum(plan_market) <= 1e-12 else plan_market
+            ev_market[a:d] += site  # market == site
         else:
-            # pv strategy
-            ev_gen_kwh[a:d] += np.clip(plan_pv, 0.0, plan_site)
-            # grid fallback
-            if np.sum(plan_market) > 1e-12:
-                ev_market_kwh[a:d] += plan_market
-            else:
-                # fallback: everything not PV is market
-                ev_market_kwh[a:d] += np.maximum(plan_site - np.clip(plan_pv, 0.0, plan_site), 0.0)
+            pv = np.clip(pv, 0.0, site)
+            ev_gen[a:d] += pv
+            # grid-fallback ist plan_market; wenn du in pv-strategy nur Grid dort schreibst, passt das.
+            ev_market[a:d] += mkt if np.sum(mkt) > 1e-12 else np.maximum(site - pv, 0.0)
 
     return pd.DataFrame(
         {
             "timestamp": df["timestamp"],
-            "ev_generation_kw": ev_gen_kwh / max(step_hours, 1e-12),
-            "ev_market_kw": ev_market_kwh / max(step_hours, 1e-12),
-            "ev_immediate_kw": ev_imm_kwh / max(step_hours, 1e-12),
+            "ev_generation_kw": ev_gen / max(step_h, 1e-12),
+            "ev_market_kw": ev_market / max(step_h, 1e-12),
+            "ev_immediate_kw": ev_imm / max(step_h, 1e-12),
         }
     )
 
-
-# -----------------------------------------------------------------------------
-# F) Curve Validation Helpers
-# -----------------------------------------------------------------------------
+from collections import Counter
+import numpy as np
+import pandas as pd
 
 def get_most_used_vehicle_name(
     *,
-    sessions_out: list[dict[str, Any]],
+    sessions_out: list[dict[str, object]],
     charger_traces_dataframe: pd.DataFrame,
     only_plugged_sessions: bool = True,
 ) -> str:
-    """Wählt das am häufigsten geladene Fahrzeug."""
-    if charger_traces_dataframe is not None and len(charger_traces_dataframe) > 0:
-        df = charger_traces_dataframe
-        if only_plugged_sessions:
-            # traces sind ohnehin nur plugged
-            pass
-        counts = df["vehicle_name"].value_counts(dropna=True)
-        if len(counts) > 0:
-            return str(counts.index[0])
+    """Gibt den am häufigsten geladenen vehicle_name zurück (primär aus traces)."""
+    if charger_traces_dataframe is not None and len(charger_traces_dataframe) > 0 and "vehicle_name" in charger_traces_dataframe.columns:
+        vc = charger_traces_dataframe["vehicle_name"].dropna().astype(str).value_counts()
+        if len(vc) > 0:
+            return str(vc.index[0])
 
-    # fallback: sessions_out
-    rows = [s for s in sessions_out if (not only_plugged_sessions) or str(s.get("status")) == "plugged"]
-    counts = Counter([str(s.get("vehicle_name")) for s in rows if s.get("vehicle_name") is not None])
-    return counts.most_common(1)[0][0] if counts else ""
+    rows = sessions_out
+    if only_plugged_sessions:
+        rows = [s for s in sessions_out if str(s.get("status")) == "plugged"]
+
+    c = Counter(str(s.get("vehicle_name")) for s in rows if s.get("vehicle_name") is not None)
+    return c.most_common(1)[0][0] if c else ""
 
 
 def build_master_curve_and_actual_points_for_vehicle(
     *,
     charger_traces_dataframe: pd.DataFrame,
     scenario: dict,
-    curve: VehicleChargingCurve,           
-    start: Optional[pd.Timestamp] = None,
-    end: Optional[pd.Timestamp] = None,
+    curve,  # VehicleChargingCurve
+    start: pd.Timestamp | None = None,
+    end: pd.Timestamp | None = None,
     power_tolerance_kw: float = 1e-6,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """
-    Vergleich Master-Ladekurve (Batterieseite) vs. Ist-Punkte (Batterieseite).
-
-    Erwartet in charger_traces_dataframe:
-    - vehicle_name
-    - timestamp
-    - soc
-    - power_kw   (Standortseite)
-
-    Returns (Notebook-kompatibel):
-    - vehicle_name
-    - master_soc
-    - master_power_battery_kw
-    - actual_soc
-    - actual_power_batt_kw
-    - violation_mask
-    - number_violations
+    Master-Ladekurve (Batterieseite) vs Ist-Punkte (Batterieseite).
+    Erwartet in charger_traces_dataframe: vehicle_name, timestamp, soc, power_kw (Standortseite).
     """
-    df = charger_traces_dataframe.copy()
-    if len(df) == 0:
+    master_soc = np.asarray(curve.state_of_charge_fraction, dtype=float).reshape(-1)
+    master_power_batt_kw = np.asarray(curve.power_kw, dtype=float).reshape(-1)
+
+    if charger_traces_dataframe is None or len(charger_traces_dataframe) == 0:
         return {
             "vehicle_name": curve.vehicle_name,
-            "master_soc": np.asarray(curve.state_of_charge_fraction, dtype=float),
-            "master_power_battery_kw": np.asarray(curve.power_kw, dtype=float),
+            "master_soc": master_soc,
+            "master_power_battery_kw": master_power_batt_kw,
             "actual_soc": np.array([]),
             "actual_power_batt_kw": np.array([]),
             "violation_mask": np.array([], dtype=bool),
             "number_violations": 0,
         }
 
-    # Filter: Fahrzeug + optional Zeitfenster
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df = df[df.get("vehicle_name", "").astype(str) == str(curve.vehicle_name)]
+    df = charger_traces_dataframe.copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df = df[df.get("vehicle_name").astype(str) == str(curve.vehicle_name)]
 
     if start is not None:
         df = df[df["timestamp"] >= pd.Timestamp(start)]
     if end is not None:
         df = df[df["timestamp"] <= pd.Timestamp(end)]
 
-    # Ist-Punkte
     actual_soc = pd.to_numeric(df.get("soc"), errors="coerce").to_numpy(dtype=float)
     actual_power_site_kw = pd.to_numeric(df.get("power_kw"), errors="coerce").to_numpy(dtype=float)
 
-    # Batterie-Seite
-    eff = float(scenario["site"].get("charger_efficiency", 1.0))
-    eff = float(np.clip(eff, 1e-12, 1.0))
-    actual_power_batt_kw = actual_power_site_kw * eff
+    eff = float(np.clip(float(scenario["site"].get("charger_efficiency", 1.0)), 1e-12, 1.0))
+    actual_power_batt_kw = np.maximum(actual_power_site_kw * eff, 0.0)
 
-    # Master-Kurve (Batterieseite)
-    master_soc = np.asarray(curve.state_of_charge_fraction, dtype=float).reshape(-1)
-    master_power_batt_kw = np.asarray(curve.power_kw, dtype=float).reshape(-1)
-
-    # Aufräumen / Clipping
+    # clean
     actual_soc = np.clip(actual_soc, 0.0, 1.0)
-    actual_power_batt_kw = np.maximum(actual_power_batt_kw, 0.0)
+    valid = np.isfinite(actual_soc) & np.isfinite(actual_power_batt_kw)
+    actual_soc = actual_soc[valid]
+    actual_power_batt_kw = actual_power_batt_kw[valid]
 
-    valid_mask = np.isfinite(actual_soc) & np.isfinite(actual_power_batt_kw)
-    actual_soc_v = actual_soc[valid_mask]
-    actual_p_v = actual_power_batt_kw[valid_mask]
-
-    if actual_soc_v.size == 0 or master_soc.size < 2:
+    if actual_soc.size == 0 or master_soc.size < 2:
         return {
             "vehicle_name": curve.vehicle_name,
             "master_soc": master_soc,
             "master_power_battery_kw": master_power_batt_kw,
-            "actual_soc": actual_soc_v,
-            "actual_power_batt_kw": actual_p_v,
+            "actual_soc": actual_soc,
+            "actual_power_batt_kw": actual_power_batt_kw,
             "violation_mask": np.array([], dtype=bool),
             "number_violations": 0,
         }
 
-    # erlaubte Leistung aus Masterkurve interpolieren
-    allowed_kw = np.interp(actual_soc_v, master_soc, master_power_batt_kw)
-    violation_mask = actual_p_v > (allowed_kw + float(power_tolerance_kw))
-    number_violations = int(np.count_nonzero(violation_mask))
+    allowed_kw = np.interp(actual_soc, master_soc, master_power_batt_kw)
+    violation_mask = actual_power_batt_kw > (allowed_kw + float(power_tolerance_kw))
 
     return {
         "vehicle_name": curve.vehicle_name,
         "master_soc": master_soc,
         "master_power_battery_kw": master_power_batt_kw,
-        "actual_soc": actual_soc_v,
-        "actual_power_batt_kw": actual_p_v,
+        "actual_soc": actual_soc,
+        "actual_power_batt_kw": actual_power_batt_kw,
         "violation_mask": violation_mask,
-        "number_violations": number_violations,
+        "number_violations": int(np.count_nonzero(violation_mask)),
     }
