@@ -32,7 +32,7 @@ from collections import Counter
 def build_simulation_timestamps(scenario: dict) -> pd.DatetimeIndex:
     """Erzeugt den tz-aware Simulationszeitindex (DST-robust).
 
-    Die Simulation arbeitet konsequent tz-aware (z. B. "Europe/Berlin").
+    Die Simulation arbeitet konsequent tz-aware ("Europe/Berlin").
     `simulation_horizon_days` wird als Kalendertage interpretiert, damit DST-Tage
     automatisch 23h bzw. 25h haben.
 
@@ -156,7 +156,7 @@ class VehicleChargingCurve:
 
 def read_scenario_from_yaml(scenario_path: str) -> Dict[str, Any]:
     """
-    Liest eine YAML-Szenario-Datei ein, validiert Pflichtfelder und ergänzt Defaults.
+    Liest eine YAML-Szenario-Datei ein und validiert Pflichtfelder.
 
     Erwartete Struktur (Auszug)
     ---------------------------
@@ -282,7 +282,6 @@ def resolve_paths_relative_to_yaml(scenario: dict, scenario_path: str) -> dict:
         """Wandelt einen Pfad in einen absoluten Pfad um.
         
             Relative Pfade werden relativ zum YAML-Verzeichnis aufgelöst.
-        
         """
         path_text = str(path_value).strip()
         if not path_text:
@@ -309,7 +308,8 @@ def read_local_load_pv_market_from_csv(
     decimal: str = ",",
     timezone: Optional[str] = None,
 ) -> Tuple[pd.Series, pd.Series, pd.Series]:
-    """Liest Grundlast-, PV- und Marktpreis-Zeitreihen aus CSV und richtet sie am Simulationsraster aus.
+    """
+    Liest Grundlast-, PV- und Marktpreis-Zeitreihen aus CSV und richtet sie am Simulationsraster aus.
 
     Annahmen (tz-aware Simulation)
     ------------------------------
@@ -407,7 +407,6 @@ def read_local_load_pv_market_from_csv(
     price_col = dataframe.columns[3]
 
     # Datums-/Zeitspalte parsen und als Index setzen.
-    # Hinweis: CSV-Zeit ist tz-naive Wandzeit -> wird danach lokalisiert.
     parsed_dt = pd.to_datetime(
         dataframe[dt_col].astype(str).str.strip(),
         format=datetime_format,
@@ -497,7 +496,8 @@ def read_local_load_pv_market_from_csv(
 def read_vehicle_load_profiles_from_csv(
     vehicle_curve_csv_path: str,
 ) -> Dict[str, VehicleChargingCurve]:
-    """Liest fahrzeugspezifische Ladekurven aus einer Wide-Format-CSV (ein Fahrzeug je Spalte).
+    """
+    Liest fahrzeugspezifische Ladekurven aus einer CSV (ein Fahrzeug je Spalte).
     
         Erwartetes CSV-Format
         ---------------------
@@ -509,11 +509,6 @@ def read_vehicle_load_profiles_from_csv(
     
         Ab Zeile 4 folgt die SoC-Stützstellen-Spalte (0..100 in 0,5er Schritten oder 0..1),
         und in den Fahrzeugspalten die maximale Ladeleistung in kW (Batterieseite) je SoC.
-    
-        Hinweise
-        --------
-        Manche CSV-Exporte enthalten ein UTF-8-BOM. Das wird durch `encoding="utf-8-sig"`
-        sowie zusätzliches defensives Strippen abgefangen.
     
         Parameter
         ---------
@@ -529,7 +524,6 @@ def read_vehicle_load_profiles_from_csv(
         ---------
         ValueError
             Wenn das CSV-Format nicht passt oder ungültige Werte enthält.
-    
     """
     vehicle_curve_table = pd.read_csv(
         vehicle_curve_csv_path,
@@ -537,7 +531,7 @@ def read_vehicle_load_profiles_from_csv(
         engine="python",
         header=None,
         dtype=str,
-        encoding="utf-8-sig",  # <-- NEW: removes UTF-8 BOM if present
+        encoding="utf-8-sig",
     )
 
     if vehicle_curve_table.shape[0] < 6 or vehicle_curve_table.shape[1] < 2:
@@ -549,7 +543,6 @@ def read_vehicle_load_profiles_from_csv(
     expected_labels = ["Hersteller", "Modell", "Fahrzeugklasse", "max. Kapazität"]
 
     def _clean_label(x: object) -> str:
-        # <-- NEW: defensive BOM stripping (in case encoding wasn't applied)
         """Bereinigt ein Label aus der CSV (Whitespace/BOM entfernen).
         """
         return str(x).strip().lstrip("\ufeff")
@@ -960,7 +953,6 @@ def sample_sessions_for_simulation_day(
     -------------------------------------------------
     - `timestamps` ist tz-aware (z. B. Europe/Berlin).
     - `simulation_day_start` ist ebenfalls tz-aware und in derselben Zeitzone wie `timestamps`.
-      (Diese Funktion konvertiert NICHT und lokalisiert NICHT.)
 
     Hinweise
     --------
@@ -968,7 +960,6 @@ def sample_sessions_for_simulation_day(
     - `departure_step` ist Ende-exklusiv.
     - Ankunft wird auf den nächstgelegenen Simulationszeitpunkt gerastert (nearest).
     - Abfahrt wird als `arrival_wall + parkdauer` berechnet und dann per **ceil** gerastert
-      (d. h. der erste Rasterpunkt >= Abfahrt-Zeit; dadurch wird die Parkdauer nicht verkürzt).
     - Wenn `allow_cross_day_charging=False`, wird die Session am Tagesende abgeschnitten.
 
     Rückgabe
@@ -978,17 +969,9 @@ def sample_sessions_for_simulation_day(
     """
     simulation_time_index = pd.DatetimeIndex(timestamps)
 
-    # Du wolltest den tz-aware Check außerhalb machen. Optionaler Guard (sehr empfehlenswert):
-    # if ts_index.tz is None:
-    #     raise ValueError("timestamps muss tz-aware sein.")
-
     time_resolution_min = int(scenario["time_resolution_min"])
     step_minutes = float(time_resolution_min)
-
-    # -------------------------------------------------------------------------
-    # Tagesfenster im Simulationsraster bestimmen (TZ-sicher über normalize()).
-    # Wichtig: simulation_day_start muss bereits in Simulations-TZ sein.
-    # -------------------------------------------------------------------------
+                                     
     day_start_ts = pd.Timestamp(simulation_day_start)
     day_key = day_start_ts.normalize()
 
@@ -1357,7 +1340,7 @@ def charging_strategy_immediate(
     return {
         "plan_site_kwh_per_step": plan_site_kwh_per_step,
         "plan_pv_site_kwh_per_step": plan_pv_site_kwh_per_step,
-        "plan_market_kwh_per_step": np.zeros_like(plan_site_kwh_per_step),  # <-- NEU
+        "plan_market_kwh_per_step": np.zeros_like(plan_site_kwh_per_step),
         "charged_site_kwh": float(charged_site_kwh),
         "charged_pv_site_kwh": float(charged_pv_site_kwh),
         "remaining_site_kwh": float(max(remaining_site_kwh, 0.0)),
@@ -1381,7 +1364,7 @@ def charging_strategy_market(
     scenario: dict,
 ) -> Dict[str, Any]:
     """
-    Vergibt Energie an eine Session nach der Market-Strategie (nur günstige Slots nutzen).
+    Vergibt Energie an eine Session nach der Market-Strategie (günstige Slots nutzen).
 
     Vorgehen
     --------
@@ -1393,8 +1376,8 @@ def charging_strategy_market(
     4) Die tatsächliche Zuweisung erfolgt chronologisch und ausschließlich in den zugelassenen
        Schritten über ``available_energy_for_session_step(...)``.
 
-    Wenn die Session innerhalb ihrer Standzeit nicht genug Energie bekommt (weil z. B. keine
-    Standortenergie verfügbar ist), bleibt Restbedarf übrig. Es gibt keinen "must-charge".
+    Wenn die Session innerhalb ihrer Standzeit nicht genug Energie bekommt (weil keine
+    Standortenergie verfügbar ist), bleibt Restbedarf übrig.
 
     Rückgabe
     -------
@@ -1541,31 +1524,43 @@ def charging_strategy_pv(
     state_of_charge_at_arrival: float,
 ) -> Dict[str, Any]:
     """
-    Vergibt Energie an eine Session nach der PV-First-Strategie.
+    Plant und allokiert Ladeenergie nach dem Prinzip „PV zuerst, Netz nur als günstiger Fallback“.
 
-    Ablauf
-    ------
-    1) Innerhalb des Session-Fensters wird pro Schritt zuerst PV-only allokiert
-       (``supply_mode="pv_only"``).
-    2) Reicht PV über das Session-Fenster voraussichtlich nicht aus, werden zusätzliche
-       Grid-Fallback-Slots über Marktpreis-Ranking ausgewählt.
-    3) In den ausgewählten Schritten wird nach der PV-Allokation optional zusätzlich
-       Grid-only allokiert (``supply_mode="grid_only"``), begrenzt durch Charger-Headroom,
-       Site-Headroom, Ladekurve und Restenergiebedarf.
+    Grundidee
+    ---------
+    - Solange innerhalb der Standzeit PV-Überschuss (nach Grundlast) verfügbar ist, wird damit geladen.
+    - Reicht PV voraussichtlich nicht aus, wird zusätzlich Netzstrom in den günstigsten Preis-Zeitschritten
+    (Marktpreis) zugelassen.
 
-    Hinweis
-    -------
-    - Es gibt **kein must-charge**: Wenn die Session in ihren Slots keine Energie bekommt,
-      bleibt Restenergie übrig.
-    - Die Simulation läuft **chronologisch**, damit SoC und Ladekurvenlimit zeitkonsistent bleiben.
+
+    1) PV-Ladung (pv_only):
+    Es wird versucht, ausschließlich mit PV-Überschuss zu laden.
+    Dabei werden berücksichtigt:
+    - PV nach Abzug der Grundlast,
+    - bereits reservierte PV-EV-Anteile,
+    - Ladepunktlimit,
+    - Fahrzeug-Ladekurve (SoC-abhängige Leistung),
+    - verbleibender Energiebedarf.
+
+    2) Netz-Fallback (grid_only) nur in ausgewählten Schritten:
+    Wenn vorher geschätzt wurde, dass PV insgesamt nicht reicht, werden einige Zeitschritte als
+    „Netz erlaubt“ markiert. Diese Schritte sind die günstigsten (niedrigster Marktpreis) innerhalb
+    der Standzeit, bis die geschätzte fehlende Energie gedeckt wäre.
+    In genau diesen Schritten wird nach der PV-Ladung optional zusätzlich aus dem Netz geladen
+    (ebenfalls begrenzt durch Netzlimit, Reservierungen, Ladepunktlimit, Ladekurve und Restbedarf).
+
+    Wichtige Eigenschaften
+    ----------------------
+    - Chronologisch: Obwohl Netz-Slots nach Preis ausgewählt werden, wird die tatsächliche Ladung
+    immer in Zeitreihen-Reihenfolge durchgeführt, damit SoC und Ladekurve konsistent bleiben.
 
     Rückgabe
-    -------
-    Dict[str, Any]
-        Enthält session-relevante Ergebnisse:
-        - plan_site_kwh_per_step, plan_pv_site_kwh_per_step, plan_market_kwh_per_step
-        - charged_site_kwh, charged_pv_site_kwh, charged_market_kwh
-        - remaining_site_kwh, final_soc
+    --------
+    Gibt Zeitreihen (pro Session-Fenster) und Summen zurück:
+    - plan_site_kwh_per_step: gesamte zugewiesene Energie (PV + Netz) je Schritt
+    - plan_pv_site_kwh_per_step: PV-Anteil je Schritt
+    - plan_market_kwh_per_step: Netz-Anteil je Schritt (Fallback)
+    sowie charged_* Summen, remaining_site_kwh und final_soc.
     """
     n_total = int(len(reserved_total_ev_energy_kwh_per_step))
 
@@ -1774,12 +1769,32 @@ def required_site_energy_for_session(
     soc_at_arrival: float,
 ) -> float:
     """
-    Berechnet die benötigte Energie auf Standortseite (kWh) bis zum Ziel-SoC.
+    Berechnet die benötigte Ladeenergie auf Standortseite bis zum Ziel-SoC.
+
+    Die Zielgröße ist die Energie, die der Standort (über den Ladepunkt) liefern muss,
+    damit die Fahrzeugbatterie von ``soc_at_arrival`` auf ``scenario["vehicles"]["soc_target"]``
+    geladen werden kann. Dabei wird der Ladepunktwirkungsgrad berücksichtigt.
 
     Formel
     ------
-    needed_battery_kwh = max(0, (soc_target - soc0) * battery_capacity_kwh)
+    needed_battery_kwh = max(0, (soc_target - soc_at_arrival) * battery_capacity_kwh)
     needed_site_kwh    = needed_battery_kwh / charger_efficiency
+
+    Parameter
+    ---------
+    scenario:
+        Szenario-Konfiguration. Verwendet:
+        - ``scenario["vehicles"]["soc_target"]`` als Ziel-SoC (0..1),
+        - ``scenario["site"]["charger_efficiency"]`` als Wirkungsgrad (0..1].
+    curve:
+        Fahrzeugspezifische Ladekurve mit ``battery_capacity_kwh`` (Batteriekapazität).
+    soc_at_arrival:
+        Ladezustand bei Ankunft als Anteil (0..1).
+
+    Rückgabe
+    --------
+    float
+        Benötigte Energie auf Standortseite in kWh (>= 0).
     """
     vehicles_cfg = scenario["vehicles"]
     site_cfg = scenario["site"]
@@ -1807,18 +1822,60 @@ def plan_charging_for_day(
     market_price_eur_per_mwh: np.ndarray | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Plant alle Sessions eines Tages abhängig von scenario["charging_strategy"].
+    Plant für einen Kalendertag die Ladeenergie-Zuweisung für alle Ladesessions.
 
-    Reihenfolge:
-    - immediate: FCFS
-    - market/pv/generation: shortest parking duration first
+    Die Funktion wählt die Reihenfolge der Planung abhängig von
+    ``scenario["charging_strategy"]`` und ruft anschließend pro Session die
+    passende Strategie-Funktion auf:
 
-    Gibt pro Session ein Ergebnisdict zurück (z. B. Pläne, geladene Energiemengen, final_soc).
+    - ``"immediate"``: Ladeplanung nach First-Come-First-Served (Ankunft zuerst)
+    - ``"market"``: Nutzung preisgünstiger Zeitschritte (Marktpreis-geführt)
+    - ``"pv"`` / ``"generation"``: PV zuerst, Netz als preisgünstiger Fallback
+
+    Die Strategie-Funktionen schreiben ihre Zuweisungen in die globalen
+    Reservierungs-Arrays (``reserved_*``), sodass nachfolgende Sessions die bereits
+    belegte Standortkapazität berücksichtigen.
+
+    Parameter
+    ----------
+    sessions:
+        Liste der Sessions, die an diesem Tag geplant werden sollen.
+    scenario:
+        Szenario-Konfiguration. Verwendet u. a. ``scenario["charging_strategy"]``
+        sowie Parameter unter ``scenario["site"]`` und ``scenario["vehicles"]``.
+    vehicle_curves_by_name:
+        Zuordnung von ``vehicle_name`` zu ``VehicleChargingCurve``.
+    pv_generation_kwh_per_step:
+        PV-Erzeugung pro Simulationsschritt [kWh/Schritt].
+    base_load_kwh_per_step:
+        Grundlast pro Simulationsschritt [kWh/Schritt].
+    reserved_total_ev_energy_kwh_per_step:
+        Bereits reservierte EV-Ladeenergie (gesamt) pro Schritt [kWh/Schritt].
+        Wird in-place um die geplanten Zuweisungen dieser Funktion erhöht.
+    reserved_pv_ev_energy_kwh_per_step:
+        Bereits reservierter PV-Anteil der EV-Ladeenergie pro Schritt [kWh/Schritt].
+        Wird in-place um die geplanten PV-Zuweisungen dieser Funktion erhöht.
+    market_price_eur_per_mwh:
+        Marktpreis-Zeitreihe [€/MWh]. Erforderlich für ``"market"`` sowie als
+        Fallback-Ranking für ``"pv"`` / ``"generation"``.
+
+    Rückgabe
+    -------
+    list[dict[str, Any]]
+        Liste von Ergebnis-Dictionaries, je Session ein Eintrag. Enthält u. a.
+        Plan-Zeitreihen (z. B. ``plan_site_kwh_per_step``) sowie Summenwerte
+        (z. B. ``charged_site_kwh``, ``remaining_site_kwh``) und Metadaten
+        (z. B. ``session_id``, ``arrival_time``).
+
+    Ausnahme
+    ------
+    ValueError
+        Wenn für eine Session keine Ladekurve vorhanden ist, eine unbekannte
+        Strategie konfiguriert ist oder ``market_price_eur_per_mwh`` für eine
+        preisbasierte Strategie fehlt.
     """
     strategy = str(scenario["charging_strategy"]).strip().lower()
     ordered = order_sessions_for_planning(sessions, strategy)
-
-    charger_efficiency = float(scenario["site"].get("charger_efficiency", 1.0))
 
     results: list[dict[str, Any]] = []
 
@@ -1888,7 +1945,7 @@ def plan_charging_for_day(
         else:
             raise ValueError(f"Unbekannte charging_strategy='{strategy}'")
 
-        # Meta-Infos ergänzen (praktisch fürs Logging/Export)
+        # Meta-Infos ergänzen (fürs Notebook)
         session_result["session_id"] = session.session_id
         session_result["vehicle_name"] = session.vehicle_name
         session_result["vehicle_class"] = session.vehicle_class
@@ -1914,9 +1971,21 @@ def find_free_charger_fcfs(
     arrival_step: int,
 ) -> int | None:
     """
-    Gibt die erste freie Charger-ID nach FCFS zurück (kleinste ID zuerst).
+    Ermittelt nach dem First-Come-First-Served-Prinzip (FCFS) den ersten freien Ladepunkt.
 
-    Ein Charger gilt als frei, wenn sein Eintrag in ``charger_occupied_until_step`` <= arrival_step ist.
+    Parameter
+    ---------
+    charger_occupied_until_step:
+        Liste mit Länge = Anzahl der Ladepunkte. Jeder Eintrag enthält den Simulationsschritt,
+        bis zu dem der jeweilige Ladepunkt belegt ist (Ende-exklusiv oder inklusiv – entscheidend
+        ist die verwendete Vergleichslogik ``<= arrival_step``).
+    arrival_step:
+        Simulationsschritt der Ankunft der neuen Session.
+
+    Rückgabe
+    --------
+    int | None
+        ID des ersten freien Ladepunkts (0-basiert). Falls kein Ladepunkt frei ist, ``None``.
     """
     for charger_id, occupied_until in enumerate(charger_occupied_until_step):
         if int(occupied_until) <= int(arrival_step):
@@ -1928,7 +1997,31 @@ def _group_sessions_by_arrival_day(
     sessions: list[SampledSession],
     timestamps: pd.DatetimeIndex,
 ) -> dict[pd.Timestamp, list[SampledSession]]:
-    """Gruppiert Sessions nach Kalendertag des arrival_step (TZ-sicher über timestamps)."""
+    """
+    Gruppiert Sessions nach dem Kalendertag ihrer Ankunft.
+
+    Diese Gruppierung ist für die Simulation notwendig, weil die Ladeplanung in
+    ``simulate_site_fcfs_with_planning(...)`` tageweise erfolgt: Für jeden Ankunftstag
+    werden alle an diesem Tag „plugged“ Sessions gemeinsam an ``plan_charging_for_day(...)``
+    übergeben (inkl. Sortierung gemäß Strategie und gemeinsamer Nutzung der Reservierungen).
+
+    Der Kalendertag wird aus dem Simulationszeitstempel am ``arrival_step`` abgeleitet und
+    mit ``normalize()`` auf 00:00 Uhr des jeweiligen Tages gesetzt. Dadurch ist die
+    Gruppierung zeitzonenrobust, solange ``timestamps`` tz-aware ist.
+
+    Parameter
+    ---------
+    sessions:
+        Liste von Sessions, die gruppiert werden sollen.
+    timestamps:
+        Simulations-Zeitindex. Der Eintrag an Position ``arrival_step`` bestimmt den
+        zugehörigen Kalendertag der Session.
+
+    Rückgabe
+    --------
+    dict[pd.Timestamp, list[SampledSession]]
+        Dictionary mit Tages-Schlüssel (Timestamp auf Tagesstart) und den zugehörigen Sessions.
+    """
     by_day: dict[pd.Timestamp, list[SampledSession]] = {}
     for session in sessions:
         day_key = pd.Timestamp(timestamps[int(session.arrival_step)]).normalize()
@@ -1946,7 +2039,43 @@ def _compute_debug_balance(
     reserved_pv_ev_energy_kwh_per_step: np.ndarray,
 ) -> pd.DataFrame:
     """
-    Baut eine einfache, konsistente Energiebilanz (PV->Base, PV->EV, Grid->Base, Grid->EV) als DataFrame.
+    Erstellt eine Debug-Energiebilanz pro Simulationsschritt als DataFrame.
+
+    Die Bilanz zerlegt PV-Erzeugung und Netzbezug in nachvollziehbare Flüsse:
+
+    - PV → Grundlast: PV deckt zuerst die Grundlast bis zur Höhe der Grundlast.
+    - PV → EV: verbleibender PV-Überschuss wird den EV-Ladevorgängen zugeordnet
+    (begrenzt durch den in ``reserved_pv_ev_energy_kwh_per_step`` getrackten PV-Anteil).
+    - Netz → Grundlast: Rest-Grundlast wird aus dem Netz gedeckt (begrenzt durch das Netzlimit).
+    - Netz → EV: verbleibender Netz-Spielraum nach Grundlast wird den EV-Ladevorgängen zugeordnet.
+
+    Diese Funktion dient ausschließlich der Plausibilisierung/Analyse (Debugging) und hat
+    keinen Einfluss auf die eigentliche Ladeplanung.
+
+    Parameter
+    ---------
+    timestamps:
+        Simulations-Zeitindex (Länge = Anzahl Simulationsschritte).
+    scenario:
+        Szenario-Konfiguration. Verwendet:
+        - ``scenario["time_resolution_min"]`` zur Umrechnung kW↔kWh,
+        - ``scenario["site"]["grid_limit_p_avb_kw"]`` als Netzanschlussgrenze [kW].
+    pv_generation_kwh_per_step:
+        PV-Erzeugung pro Schritt [kWh/Schritt].
+    base_load_kwh_per_step:
+        Grundlast pro Schritt [kWh/Schritt].
+    reserved_total_ev_energy_kwh_per_step:
+        Gesamte EV-Ladeenergie pro Schritt (PV + Netz) [kWh/Schritt].
+    reserved_pv_ev_energy_kwh_per_step:
+        Getrackter PV-Anteil der EV-Ladeenergie pro Schritt [kWh/Schritt].
+
+    Rückgabe
+    --------
+    pd.DataFrame
+        DataFrame mit Zeitstempel und Bilanzspalten (alle in kWh/Schritt), u. a.:
+        - ``pv_to_base_kwh_per_step``, ``pv_to_ev_kwh_per_step``
+        - ``grid_to_base_kwh_per_step``, ``grid_to_ev_kwh_per_step``
+        - ``grid_limit_kwh_per_step`` (konstant pro Schritt)
     """
     time_resolution_min = int(scenario["time_resolution_min"])
     step_hours = float(time_resolution_min) / 60.0
@@ -2121,58 +2250,40 @@ def simulate_site_fcfs_with_planning(
 # =============================================================================
 
 def get_time_resolution_min_from_scenario(scenario: dict) -> int:
-    """Gibt die Zeitauflösung der Simulation in Minuten zurück.
+    """
+    Gibt die Zeitauflösung der Simulation in Minuten zurück.
     
-        Parameter
-        ---------
-        scenario:
-            Szenario-Dictionary.
+    Parameter
+    ---------
+    scenario:
+        Szenario-Dictionary.
     
-        Rückgabe
-        --------
-        int
-            Zeitauflösung in Minuten (Default: 15).
-    
+    Rückgabe
+    --------
+    int
+        Zeitauflösung in Minuten (Default: 15).
     """
     return int(scenario.get("time_resolution_min", 15))
 
 
-def get_charging_strategy_from_scenario(scenario: dict) -> str:
-    """Liest die Ladestrategie aus dem Szenario und normalisiert Alias-Namen.
-    
-        Parameter
-        ---------
-        scenario:
-            Szenario-Dictionary.
-    
-        Rückgabe
-        --------
-        str
-            Normalisierte Strategie, z. B. "immediate", "market" oder "pv".
-    
-    """
-    raw = str(scenario.get("charging_strategy", "immediate")).strip().lower()
-    return "pv" if raw in {"generation", "pv", "pv_generation", "pv_first", "pv-first"} else raw
-
-
 def get_holiday_dates_from_scenario(scenario: dict, timestamps: pd.DatetimeIndex) -> set[date]:
-    """Ermittelt Feiertage für den Simulationszeitraum.
+    """
+    Ermittelt Feiertage für den Simulationszeitraum.
     
-        Es werden entweder explizit konfigurierte Datumswerte aus `scenario["holidays"]["dates"]`
-        verwendet oder – falls vorhanden – das Paket `holidays` zur Berechnung genutzt.
+    Es werden entweder explizit konfigurierte Datumswerte aus `scenario["holidays"]["dates"]`
+    verwendet oder – falls vorhanden – das Paket `holidays` zur Berechnung genutzt.
     
-        Parameter
-        ---------
-        scenario:
-            Szenario-Dictionary (Schlüssel: holidays).
-        timestamps:
-            Simulationszeitindex zur Ableitung der relevanten Jahre.
+    Parameter
+    ---------
+    scenario:
+        Szenario-Dictionary (Schlüssel: holidays).
+    timestamps:
+        Simulationszeitindex zur Ableitung der relevanten Jahre.
     
-        Rückgabe
-        --------
-        set[date]
-            Menge der Feiertage als `datetime.date`.
-    
+    Rückgabe
+    --------
+    set[date]
+        Menge der Feiertage als `datetime.date`.
     """
     configuration = scenario.get("holidays") or {}
     explicit = configuration.get("dates")
@@ -2190,7 +2301,7 @@ def get_holiday_dates_from_scenario(scenario: dict, timestamps: pd.DatetimeIndex
         return set()
 
     try:
-        import holidays as _holidays  # type: ignore
+        import holidays as _holidays
     except Exception:
         warnings.warn("python-package 'holidays' nicht installiert -> holiday_dates bleibt leer.", UserWarning)
         return set()
@@ -2205,22 +2316,22 @@ def get_holiday_dates_from_scenario(scenario: dict, timestamps: pd.DatetimeIndex
 
 
 def get_daytype_calendar(*, start_datetime: pd.Timestamp, horizon_days: int, holiday_dates: set[date]) -> dict[str, list[date]]:
-    """Erstellt einen Kalender der Tagtypen im Simulationshorizont.
+    """
+    Erstellt einen Kalender der Tagtypen im Simulationshorizont.
     
-        Parameter
-        ---------
-        start_datetime:
-            Startdatum der Simulation (Datumsteil wird verwendet).
-        horizon_days:
-            Anzahl Kalendertage im Horizont.
-        holiday_dates:
-            Feiertage als Menge von `date`.
+    Parameter
+    ---------
+    start_datetime:
+        Startdatum der Simulation (Datumsteil wird verwendet).
+    horizon_days:
+        Anzahl Kalendertage im Horizont.
+    holiday_dates:
+        Feiertage als Menge von `date`.
     
-        Rückgabe
-        --------
-        dict[str, list[date]]
-            Zuordnung mit Schlüsseln "working_day", "saturday", "sunday_holiday".
-    
+    Rückgabe
+    --------
+    dict[str, list[date]]
+        Zuordnung mit Schlüsseln "working_day", "saturday", "sunday_holiday".
     """
     output = {"working_day": [], "saturday": [], "sunday_holiday": []}
     start_date = pd.Timestamp(start_datetime).date()
@@ -2237,22 +2348,23 @@ def get_daytype_calendar(*, start_datetime: pd.Timestamp, horizon_days: int, hol
 
 
 def decorate_title_with_status(title: str, charging_strategy: str, strategy_status: str | None = None) -> str:
-    """Erweitert einen Plot-Titel um Strategieinformationen.
+    """
+    Erweitert einen Plot-Titel um Strategieinformationen.
     
-        Parameter
-        ---------
-        title:
-            Basistitel.
-        charging_strategy:
-            Gewählte Strategie (z. B. "pv").
-        strategy_status:
-            Optionaler Status/alias, der zusätzlich angezeigt wird.
+    Parameter
+    ---------
+    title:
+        Basistitel.
+    charging_strategy:
+        Gewählte Strategie (z. B. "pv").
+    strategy_status:
+        Optionaler Status/alias, der zusätzlich angezeigt wird.
     
-        Rückgabe
-        --------
-        str
-            Formatierter Titelstring.
-    
+    Rückgabe
+    --------
+    str
+        Formatierter Titelstring.
+
     """
     if strategy_status and str(strategy_status) != str(charging_strategy):
         return f"{title} — {charging_strategy} ({strategy_status})"
@@ -2260,22 +2372,22 @@ def decorate_title_with_status(title: str, charging_strategy: str, strategy_stat
 
 
 def initialize_time_window(*, timestamps: pd.DatetimeIndex, scenario: dict, days: int = 1) -> tuple[pd.Timestamp, pd.Timestamp]:
-    """Erzeugt ein Zoom-Zeitfenster ab Simulationsstart.
+    """
+    Erzeugt ein Zoom-Zeitfenster ab Simulationsstart.
     
-        Parameter
-        ---------
-        timestamps:
-            Simulationszeitindex.
-        scenario:
-            Szenario-Dictionary (enthält Zeitauflösung).
-        days:
-            Länge des Fensters in Tagen (Default: 1).
+    Parameter
+    ---------
+    timestamps:
+        Simulationszeitindex.
+    scenario:
+        Szenario-Dictionary (enthält Zeitauflösung).
+    days:
+        Länge des Fensters in Tagen (Default: 1).
     
-        Rückgabe
-        --------
-        tuple[pd.Timestamp, pd.Timestamp]
-            (Start, Ende) des Fensters.
-    
+    Rückgabe
+    --------
+    tuple[pd.Timestamp, pd.Timestamp]
+        (Start, Ende) des Fensters.
     """
     if len(timestamps) == 0:
         t = pd.Timestamp("1970-01-01")
@@ -2287,20 +2399,20 @@ def initialize_time_window(*, timestamps: pd.DatetimeIndex, scenario: dict, days
 
 
 def group_sessions_by_day(sessions_out: list[dict[str, Any]], *, only_plugged: bool = False) -> dict[date, list[dict[str, Any]]]:
-    """Gruppiert Sessions nach Ankunftsdatum.
+    """
+    Gruppiert Sessions nach Ankunftsdatum.
     
-        Parameter
-        ---------
-        sessions_out:
-            Session-Ergebnisliste aus der Simulation.
-        only_plugged:
-            Wenn True, werden nur Sessions mit Status "plugged" berücksichtigt.
+    Parameter
+    ---------
+    sessions_out:
+        Session-Ergebnisliste aus der Simulation.
+    only_plugged:
+        Wenn True, werden nur Sessions mit Status "plugged" berücksichtigt.
     
-        Rückgabe
-        --------
-        dict[date, list[dict[str, Any]]]
-            Zuordnung von Datum auf Sessions.
-    
+    Rückgabe
+    --------
+    dict[date, list[dict[str, Any]]]
+        Zuordnung von Datum auf Sessions.
     """
     output: dict[date, list[dict[str, Any]]] = {}
     for session in sessions_out:
@@ -2313,21 +2425,21 @@ def group_sessions_by_day(sessions_out: list[dict[str, Any]], *, only_plugged: b
 
 
 def summarize_sessions(sessions_out: list[dict[str, Any]], *, tol_kwh: float = 1e-9) -> dict[str, Any]:
-    """Berechnet eine kompakte KPI-Zusammenfassung über alle Sessions.
+    """
+    Berechnet eine kompakte KPI-Zusammenfassung über alle Sessions.
+
+    Parameter
+    ---------
+    sessions_out:
+        Session-Ergebnisliste aus der Simulation.
+    tol_kwh:
+        Toleranz für Restenergie zur Bewertung "Ziel-SoC erreicht".
     
-        Parameter
-        ---------
-        sessions_out:
-            Session-Ergebnisliste aus der Simulation.
-        tol_kwh:
-            Toleranz für Restenergie zur Bewertung "Ziel-SoC erreicht".
-    
-        Rückgabe
-        --------
-        dict[str, Any]
-            Enthält u. a. Anzahl Sessions, rejected/plugged und eine Liste von Sessions,
-            die den Ziel-SoC nicht erreicht haben.
-    
+    Rückgabe
+    --------
+    dict[str, Any]
+        Enthält u. a. Anzahl Sessions, rejected/plugged und eine Liste von Sessions,
+        die den Ziel-SoC nicht erreicht haben. 
     """
     total = len(sessions_out)
     plugged = [session for session in sessions_out if str(session.get("status")) == "plugged"]
@@ -2358,20 +2470,20 @@ def summarize_sessions(sessions_out: list[dict[str, Any]], *, tol_kwh: float = 1
 
 
 def build_plugged_sessions_preview_table(sessions_out: list[dict[str, Any]], *, n: int = 10) -> pd.DataFrame:
-    """Erzeugt eine Vorschau-Tabelle für die ersten n erfolgreichen Ladesessions.
+    """
+    Erzeugt eine Vorschau-Tabelle für die ersten n erfolgreichen Ladesessions.
     
-        Parameter
-        ---------
-        sessions_out:
-            Session-Ergebnisliste aus der Simulation.
-        n:
-            Maximale Anzahl Zeilen.
+    Parameter
+    ---------
+    sessions_out:
+        Session-Ergebnisliste aus der Simulation.
+    n:
+        Maximale Anzahl Zeilen.
     
-        Rückgabe
-        --------
-        pd.DataFrame
-            Vorschau mit wichtigen Session-Attributen.
-    
+    Rückgabe
+    --------
+    pd.DataFrame
+        Vorschau mit wichtigen Session-Attributen.
     """
     rows = []
     for session in sessions_out:
@@ -2408,14 +2520,15 @@ def build_timeseries_dataframe(
     market_price_eur_per_mwh: Optional[np.ndarray] = None,
     debug_df: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
-    """Baut eine Zeitreihen-Tabelle für Auswertung und Plots.
+    """
+    Baut eine Zeitreihen-Tabelle für Auswertung und Plots.
     
-        Parameter
-        ---------
-        timestamps:
-            Simulationszeitindex.
-        scenario:
-            Szenario-Dictionary (Zeitauflösung).
+    Parameter
+    ---------
+    timestamps:
+        Simulationszeitindex.
+    scenario:
+        Szenario-Dictionary (Zeitauflösung).
         base_load_kwh_per_step:
             Grundlast als Energie pro Schritt.
         pv_generation_kwh_per_step:
@@ -2427,11 +2540,10 @@ def build_timeseries_dataframe(
         debug_df:
             Optional: Debug-Bilanzdaten; Spalten werden übernommen, falls kompatibel.
     
-        Rückgabe
-        --------
-        pd.DataFrame
-            Einheitliche Tabelle (timestamp, base_load_kw, pv_generation_kw, ev_load_kw, ...).
-    
+    Rückgabe
+    --------
+    pd.DataFrame
+        Einheitliche Tabelle (timestamp, base_load_kw, pv_generation_kw, ev_load_kw, ...).
     """
     step_h = get_time_resolution_min_from_scenario(scenario) / 60.0
     dataframe = pd.DataFrame(
@@ -2452,22 +2564,22 @@ def build_timeseries_dataframe(
 
 
 def build_site_overview_plot_data(*, timeseries_dataframe: pd.DataFrame, scenario: dict, start=None, end=None) -> dict[str, Any]:
-    """Bereitet Daten für eine Standort-Übersichtsgrafik vor.
+    """
+    Bereitet Daten für eine Standort-Übersichtsgrafik vor.
     
-        Parameter
-        ---------
-        timeseries_dataframe:
-            Zeitreihen-DataFrame der Simulation.
-        scenario:
-            Szenario-Dictionary (für Grid-Limit).
-        start, end:
-            Optionales Zeitfenster (inklusive Grenzen).
+    Parameter
+    ---------
+    timeseries_dataframe:
+        Zeitreihen-DataFrame der Simulation.
+    scenario:
+        Szenario-Dictionary (für Grid-Limit).
+    start, end:
+        Optionales Zeitfenster (inklusive Grenzen).
     
-        Rückgabe
-        --------
-        dict[str, Any]
-            Enthält gefiltertes DataFrame, Gesamtlast, PV (optional) und Grid-Limit.
-    
+    Rückgabe
+    --------
+    dict[str, Any]
+        Enthält gefiltertes DataFrame, Gesamtlast, PV (optional) und Grid-Limit.
     """
     dataframe = timeseries_dataframe.copy()
     dataframe["timestamp"] = pd.to_datetime(dataframe["timestamp"])
@@ -2488,18 +2600,18 @@ def build_site_overview_plot_data(*, timeseries_dataframe: pd.DataFrame, scenari
 
 
 def build_ev_power_by_source_timeseries(timeseries_dataframe: pd.DataFrame) -> pd.DataFrame:
-    """Leitet EV-Leistung nach Quelle (PV vs Netz) als Zeitreihe ab.
+    """
+    Leitet EV-Leistung nach Quelle (PV vs Netz) als Zeitreihe ab.
     
-        Parameter
-        ---------
-        timeseries_dataframe:
-            Zeitreihen-DataFrame der Simulation (ggf. mit Debug-Spalten).
+    Parameter
+    ---------
+    timeseries_dataframe:
+        Zeitreihen-DataFrame der Simulation (ggf. mit Debug-Spalten).
     
-        Rückgabe
-        --------
-        pd.DataFrame
-            Spalten: timestamp, ev_from_pv_kw, ev_from_grid_kw
-    
+    Rückgabe
+    --------
+    pd.DataFrame
+        Spalten: timestamp, ev_from_pv_kw, ev_from_grid_kw
     """
     dataframe = timeseries_dataframe.copy()
     dataframe["timestamp"] = pd.to_datetime(dataframe["timestamp"])
@@ -2530,23 +2642,24 @@ def build_ev_power_by_source_timeseries(timeseries_dataframe: pd.DataFrame) -> p
 
 
 def build_charger_traces_dataframe(*, sessions_out: list[dict[str, Any]], scenario: dict, vehicle_curves_by_name: dict[str, VehicleChargingCurve], timestamps: pd.DatetimeIndex) -> pd.DataFrame:
-    """Erzeugt einen zeitaufgelösten Trace pro Ladepunkt und Session.
+    """
+    Erzeugt einen zeitaufgelösten Trace pro Ladepunkt und Session.
     
-        Parameter
-        ---------
-        sessions_out:
-            Session-Ergebnisse inkl. Plan-Arrays.
-        scenario:
-            Szenario-Dictionary (Zeitauflösung, Effizienz).
-        vehicle_curves_by_name:
-            Ladekurven inkl. Batteriekapazitäten.
-        timestamps:
-            Simulationszeitindex.
+    Parameter
+    ---------
+    sessions_out:
+        Session-Ergebnisse inkl. Plan-Arrays.
+    scenario:
+        Szenario-Dictionary (Zeitauflösung, Effizienz).
+    vehicle_curves_by_name:
+        Ladekurven inkl. Batteriekapazitäten.
+    timestamps:
+        Simulationszeitindex.
     
-        Rückgabe
-        --------
-        pd.DataFrame
-            Zeilen pro (Zeit, Ladepunkt) mit Leistung, PV-Anteil und SoC.
+    Rückgabe
+    --------
+    pd.DataFrame
+        Zeilen pro (Zeit, Ladepunkt) mit Leistung, PV-Anteil und SoC.
     
     """
     step_h = get_time_resolution_min_from_scenario(scenario) / 60.0
@@ -2578,9 +2691,12 @@ def build_charger_traces_dataframe(*, sessions_out: list[dict[str, Any]], scenar
         curve = vehicle_curves_by_name.get(str(session.get("vehicle_name", "")))
         cap = float(max(getattr(curve, "battery_capacity_kwh", 1e-12), 1e-12))
 
-        batt_added = np.cumsum(plan_site) * eff
-        soc_trace = np.clip(soc0 + batt_added / cap, 0.0, 1.0) if np.isfinite(soc0) else np.full(window_length_steps, np.nan)
-
+        batt_added_before = np.concatenate(([0.0], np.cumsum(plan_site[:-1]) * eff))
+        soc_trace = (
+            np.clip(soc0 + batt_added_before / cap, 0.0, 1.0)
+            if np.isfinite(soc0)
+            else np.full(window_length_steps, np.nan)
+        )
         for i in range(window_length_steps):
             abs_step = a + i
             site_kwh = float(plan_site[i])
@@ -2603,22 +2719,22 @@ def build_charger_traces_dataframe(*, sessions_out: list[dict[str, Any]], scenar
 
 
 def build_power_per_charger_timeseries(charger_traces_dataframe: pd.DataFrame, *, charger_id: int, start=None, end=None) -> pd.DataFrame:
-    """Filtert den Ladepunkt-Trace auf einen Ladepunkt und optionales Zeitfenster.
+    """
+    Filtert den Ladepunkt-Trace auf einen Ladepunkt und optionales Zeitfenster.
     
-        Parameter
-        ---------
-        charger_traces_dataframe:
-            Trace-DataFrame aus `build_charger_traces_dataframe`.
-        charger_id:
-            Ladepunkt-ID (0-basiert).
-        start, end:
-            Optionales Zeitfenster.
+    Parameter
+    ---------
+    charger_traces_dataframe:
+        Trace-DataFrame aus `build_charger_traces_dataframe`.
+    charger_id:
+        Ladepunkt-ID (0-basiert).
+    start, end:
+        Optionales Zeitfenster.
     
-        Rückgabe
-        --------
-        pd.DataFrame
-            Gefilterte Zeitreihe für den Ladepunkt.
-    
+    Rückgabe
+    --------
+    pd.DataFrame
+        Gefilterte Zeitreihe für den Ladepunkt.
     """
     dataframe = charger_traces_dataframe.copy()
     if len(dataframe) == 0:
@@ -2633,22 +2749,22 @@ def build_power_per_charger_timeseries(charger_traces_dataframe: pd.DataFrame, *
 
 
 def build_soc_timeseries_by_charger(*, charger_traces_dataframe: pd.DataFrame, charger_ids: list[int], start=None, end=None) -> dict[int, pd.DataFrame]:
-    """Erzeugt SoC-Zeitreihen je Ladepunkt.
+    """
+    Erzeugt SoC-Zeitreihen je Ladepunkt.
     
-        Parameter
-        ---------
-        charger_traces_dataframe:
-            Trace-DataFrame aus `build_charger_traces_dataframe`.
-        charger_ids:
-            Liste der gewünschten Ladepunkt-IDs.
-        start, end:
-            Optionales Zeitfenster.
+    Parameter
+    ---------
+    charger_traces_dataframe:
+        Trace-DataFrame aus `build_charger_traces_dataframe`.
+    charger_ids:
+        Liste der gewünschten Ladepunkt-IDs.
+    start, end:
+        Optionales Zeitfenster.
     
-        Rückgabe
-        --------
-        dict[int, pd.DataFrame]
-            Zuordnung charger_id -> DataFrame(timestamp, soc, session_id).
-    
+    Rückgabe
+    --------
+    dict[int, pd.DataFrame]
+        Zuordnung charger_id -> DataFrame(timestamp, soc, session_id).
     """
     output: dict[int, pd.DataFrame] = {}
     charger_traces_dataframe_copy = charger_traces_dataframe.copy()
@@ -2666,20 +2782,20 @@ def build_soc_timeseries_by_charger(*, charger_traces_dataframe: pd.DataFrame, c
 
 
 def build_charger_power_heatmap_matrix(charger_traces_dataframe: pd.DataFrame, *, start=None, end=None) -> dict[str, Any]:
-    """Bereitet eine Heatmap-Matrix (Ladepunkt x Zeit) der Ladeleistungen vor.
+    """
+    Bereitet eine Heatmap-Matrix (Ladepunkt x Zeit) der Ladeleistungen vor.
     
-        Parameter
-        ---------
-        charger_traces_dataframe:
-            Trace-DataFrame aus `build_charger_traces_dataframe`.
-        start, end:
-            Optionales Zeitfenster.
+    Parameter
+    ---------
+    charger_traces_dataframe:
+        Trace-DataFrame aus `build_charger_traces_dataframe`.
+    start, end:
+        Optionales Zeitfenster.
     
-        Rückgabe
-        --------
-        dict[str, Any]
-            Enthält Matrix (charger x time), timestamps und charger_ids.
-    
+    Rückgabe
+    --------
+    dict[str, Any]
+        Enthält Matrix (charger x time), timestamps und charger_ids.
     """
     dataframe = charger_traces_dataframe.copy()
     if len(dataframe) == 0:
@@ -2714,29 +2830,29 @@ def build_charger_power_heatmap_matrix(charger_traces_dataframe: pd.DataFrame, *
 
 
 def build_ev_power_by_mode_timeseries_dataframe(*, timeseries_dataframe: pd.DataFrame, sessions_out: list[dict[str, Any]], scenario: dict) -> pd.DataFrame:
-    """Aggregiert EV-Leistung nach Lademodus (z. B. PV/Market/Immediate).
+    """
+    Aggregiert EV-Leistung nach Lademodus (z. B. PV/Market/Immediate).
     
-        Parameter
-        ---------
-        timeseries_dataframe:
-            Zeitreihen-DataFrame der Simulation.
-        sessions_out:
-            Session-Ergebnisse inkl. Plan-Arrays.
-        scenario:
-            Szenario-Dictionary (Strategie und Zeitauflösung).
-    
-        Rückgabe
-        --------
-        pd.DataFrame
-            Spalten: timestamp, ev_generation_kw, ev_market_kw, ev_immediate_kw
-    
+    Parameter
+    ---------
+    timeseries_dataframe:
+        Zeitreihen-DataFrame der Simulation.
+    sessions_out:
+        Session-Ergebnisse inkl. Plan-Arrays.
+    scenario:
+        Szenario-Dictionary (Strategie und Zeitauflösung).
+
+    Rückgabe
+    --------
+    pd.DataFrame
+        Spalten: timestamp, ev_generation_kw, ev_market_kw, ev_immediate_kw
     """
     dataframe = timeseries_dataframe.copy()
     dataframe["timestamp"] = pd.to_datetime(dataframe["timestamp"])
     n = len(dataframe)
 
     step_h = get_time_resolution_min_from_scenario(scenario) / 60.0
-    strategy = get_charging_strategy_from_scenario(scenario)
+    strategy = str(scenario.get("charging_strategy", "immediate")).strip().lower()
 
     ev_gen = np.zeros(n, float)
     ev_market = np.zeros(n, float)
@@ -2782,9 +2898,6 @@ def build_ev_power_by_mode_timeseries_dataframe(*, timeseries_dataframe: pd.Data
         }
     )
 
-from collections import Counter
-import numpy as np
-import pandas as pd
 
 def get_most_used_vehicle_name(
     *,
@@ -2792,7 +2905,36 @@ def get_most_used_vehicle_name(
     charger_traces_dataframe: pd.DataFrame,
     only_plugged_sessions: bool = True,
 ) -> str:
-    """Gibt den am häufigsten geladenen vehicle_name zurück (primär aus traces)."""
+    """
+    Ermittelt den am häufigsten geladenen Fahrzeugnamen (vehicle_name).
+
+    Die Funktion nutzt primär ``charger_traces_dataframe`` (sofern vorhanden), da dieses
+    DataFrame die tatsächlich geplanten/geladenen Zeitschritte enthält und damit die
+    zuverlässigste Quelle für die Häufigkeit eines Fahrzeugtyps ist. Falls kein
+    Trace-DataFrame verfügbar ist oder die Spalte ``vehicle_name`` fehlt, wird als
+    Fallback ``sessions_out`` ausgewertet.
+
+    Parameter
+    ---------
+    sessions_out:
+        Liste von Session-Ergebnis-Dictionaries aus der Simulation (z. B. aus
+        ``simulate_site_fcfs_with_planning``). Erwartet u. a. Keys wie
+        ``"vehicle_name"`` und optional ``"status"``.
+    charger_traces_dataframe:
+        Zeitreihen-DataFrame mit Charger- und Session-Traces. Erwartet eine Spalte
+        ``"vehicle_name"``. Wenn das DataFrame nicht leer ist, wird diese Quelle
+        bevorzugt.
+    only_plugged_sessions:
+        Wenn ``True``, werden beim Fallback über ``sessions_out`` nur Sessions mit
+        ``status == "plugged"`` gezählt. Wenn ``False``, werden alle Sessions
+        berücksichtigt.
+
+    Rückgabe
+    --------
+    str
+        Der häufigste ``vehicle_name``. Wenn keine Fahrzeugnamen gefunden werden,
+        wird ein leerer String ``""`` zurückgegeben.
+    """
     if charger_traces_dataframe is not None and len(charger_traces_dataframe) > 0 and "vehicle_name" in charger_traces_dataframe.columns:
         vehicle_name_value_counts = charger_traces_dataframe["vehicle_name"].dropna().astype(str).value_counts()
         if len(vehicle_name_value_counts) > 0:
@@ -2811,44 +2953,89 @@ def build_master_curve_and_actual_points_for_vehicle(
     charger_traces_dataframe: pd.DataFrame,
     scenario: dict,
     curve,  # VehicleChargingCurve
-    start: pd.Timestamp | None = None,
-    end: pd.Timestamp | None = None,
     power_tolerance_kw: float = 1e-6,
 ) -> dict[str, object]:
     """
-    Master-Ladekurve (Batterieseite) vs Ist-Punkte (Batterieseite).
-    Erwartet in charger_traces_dataframe: vehicle_name, timestamp, soc, power_kw (Standortseite).
+    Bereitet Daten für den Vergleich von Master-Ladekurve und Ist-Ladepunkten auf.
+
+    Die Funktion extrahiert aus ``curve`` die fahrzeugspezifische Master-Ladekurve
+    (maximal zulässige Ladeleistung in Abhängigkeit vom SoC) und stellt dieser die
+    tatsächlich in der Simulation auftretenden Ladepunkte (SoC und Leistung) aus
+    ``charger_traces_dataframe`` gegenüber.
+
+    Wichtiger Hinweis zur Leistungsdefinition
+    -----------------------------------------
+    - Die Masterkurve ``curve.power_kw`` ist auf **Batterieseite** definiert.
+    - ``charger_traces_dataframe["power_kw"]`` ist die Leistung auf **Standort-/Ladepunktseite**.
+      Für den Vergleich wird daher mit der Ladepunkt-Effizienz
+      ``scenario["site"]["charger_efficiency"]`` auf Batterieseite umgerechnet:
+      ``power_batt_kw = power_site_kw * charger_efficiency``.
+
+    Parameter
+    ---------
+    charger_traces_dataframe:
+        DataFrame mit Zeitschritt-Traces der Simulation. Erwartete Spalten:
+        - ``"vehicle_name"`` (Fahrzeugname),
+        - ``"timestamp"`` (Zeitpunkt),
+        - ``"soc"`` (SoC als Anteil 0..1),
+        - ``"power_kw"`` (Leistung auf Standort-/Ladepunktseite in kW).
+    scenario:
+        Szenario-Dictionary. Verwendet wird insbesondere ``scenario["site"]["charger_efficiency"]``.
+    curve:
+        Fahrzeug-Ladekurve (z. B. ``VehicleChargingCurve``) mit Attributen
+        ``vehicle_name``, ``state_of_charge_fraction`` und ``power_kw``.
+    power_tolerance_kw:
+        Toleranz in kW für die Überschreitungsprüfung. Ein Ist-Punkt gilt als Überschreitung,
+        wenn ``actual_power_batt_kw > allowed_power_batt_kw + power_tolerance_kw``.
+
+    Rückgabe
+    --------
+    dict[str, object]
+        Dictionary mit folgenden Einträgen:
+        - ``"vehicle_name"``: Name des Fahrzeugs (String).
+        - ``"master_soc"``: SoC-Stützstellen der Masterkurve (np.ndarray, 0..1).
+        - ``"master_power_battery_kw"``: Master-Leistung auf Batterieseite (np.ndarray, kW).
+        - ``"actual_soc"``: Ist-SoC-Werte aus den Traces (np.ndarray, 0..1).
+        - ``"actual_power_batt_kw"``: Ist-Leistung auf Batterieseite (np.ndarray, kW).
+        - ``"violation_mask"``: Bool-Maske gleicher Länge wie ``actual_soc`` mit True bei Überschreitung.
+        - ``"number_violations"``: Anzahl der Überschreitungen (int).
+
+        Wenn keine Ist-Daten vorhanden sind (z. B. leerer DataFrame oder keine passenden Zeilen),
+        werden ``actual_*`` als leere Arrays zurückgegeben und ``number_violations`` ist 0.
     """
     master_soc = np.asarray(curve.state_of_charge_fraction, dtype=float).reshape(-1)
     master_power_batt_kw = np.asarray(curve.power_kw, dtype=float).reshape(-1)
 
+    empty_result = {
+        "vehicle_name": curve.vehicle_name,
+        "master_soc": master_soc,
+        "master_power_battery_kw": master_power_batt_kw,
+        "actual_soc": np.array([]),
+        "actual_power_batt_kw": np.array([]),
+        "violation_mask": np.array([], dtype=bool),
+        "number_violations": 0,
+    }
+
     if charger_traces_dataframe is None or len(charger_traces_dataframe) == 0:
-        return {
-            "vehicle_name": curve.vehicle_name,
-            "master_soc": master_soc,
-            "master_power_battery_kw": master_power_batt_kw,
-            "actual_soc": np.array([]),
-            "actual_power_batt_kw": np.array([]),
-            "violation_mask": np.array([], dtype=bool),
-            "number_violations": 0,
-        }
+        return empty_result
 
     dataframe = charger_traces_dataframe.copy()
+
+    # Spalten-Check (robuster als .get(...).astype(...))
+    required_cols = {"vehicle_name", "timestamp", "soc", "power_kw"}
+    if not required_cols.issubset(set(dataframe.columns)):
+        return empty_result
+
     dataframe["timestamp"] = pd.to_datetime(dataframe["timestamp"], errors="coerce")
-    dataframe = dataframe[dataframe.get("vehicle_name").astype(str) == str(curve.vehicle_name)]
+    dataframe = dataframe[dataframe["vehicle_name"].astype(str) == str(curve.vehicle_name)]
 
-    if start is not None:
-        dataframe = dataframe[dataframe["timestamp"] >= pd.Timestamp(start)]
-    if end is not None:
-        dataframe = dataframe[dataframe["timestamp"] <= pd.Timestamp(end)]
-
-    actual_soc = pd.to_numeric(dataframe.get("soc"), errors="coerce").to_numpy(dtype=float)
-    actual_power_site_kw = pd.to_numeric(dataframe.get("power_kw"), errors="coerce").to_numpy(dtype=float)
+    actual_soc = pd.to_numeric(dataframe["soc"], errors="coerce").to_numpy(dtype=float)
+    actual_power_site_kw = pd.to_numeric(dataframe["power_kw"], errors="coerce").to_numpy(dtype=float)
 
     eff = float(np.clip(float(scenario["site"].get("charger_efficiency", 1.0)), 1e-12, 1.0))
     actual_power_batt_kw = np.maximum(actual_power_site_kw * eff, 0.0)
 
-    # clean
+    # Clean
     actual_soc = np.clip(actual_soc, 0.0, 1.0)
     valid = np.isfinite(actual_soc) & np.isfinite(actual_power_batt_kw)
     actual_soc = actual_soc[valid]

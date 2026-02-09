@@ -1,72 +1,35 @@
-site_type: retail                                             # Standort des Ladepunkts
-time_resolution_min: 15                                       # Zeitschritt, in der die Simulation berechnet wird
-simulation_horizon_days: 3                                    # gewünschter Analysehorizont in Tagen
+site_type: retail                                                     # Standort des Ladepunkts
+time_resolution_min: 15                                               # Zeitschritt, in der die Simulation berechnet wird
+simulation_horizon_days: 5                                            # gewünschter Analysehorizont in Tagen
 
-start_datetime: "2025-03-29 00:00"                            # Zeitpunkt, ab dem die Simulation beginnen soll
+start_datetime: "2025-03-29 00:00"                                    # Zeitpunkt, ab dem die Simulation beginnen soll
 
-charging_strategy: "generation"                                   # "immediate" | "market" | "pv"
-localload_pv_market_csv: "../data/localload_pv_market.csv"    # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
+charging_strategy: "immediate"                                       # "immediate" | "market" | "pv"
+localload_pv_market_csv: "../data/localload_pv_market_retail.csv"     # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
   
-timezone: "Europe/Berlin"                                     # Zeitzone, in der sich die Anlage befindet
+timezone: "Europe/Berlin"                                             # Zeitzone, in der sich die Anlage befindet
 holidays:
   country: "DE"
-  subdivision: "BY"                                           # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
-  dates: []                                                   # zusätzliche bekannte betriebsfreie Tage manuell eingeben, getrennt durch neue Zeile (- "2026-01-01")
+  subdivision: "HH"                                                   # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
+  dates: []                                                           # zusätzliche bekannte betriebsfreie Tage manuell eingeben, getrennt durch neue Zeile (- "2026-01-01")
 
 site:
-  number_chargers: 1                                          # Anzahl der Ladepunkte am Standort
-  rated_power_kw: 14                                         # Verfügbare Leistung pro Ladepunkt
-  grid_limit_p_avb_kw: 600                                    # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  number_chargers: 2                                          # Anzahl der Ladepunkte am Standort
+  rated_power_kw: 50                                          # Verfügbare Leistung pro Ladepunkt
+  grid_limit_p_avb_kw: 200                                    # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
   expected_sessions_per_charger_per_day: [2.0, 6.0]           # erwartete Ladevorgänge pro LP und Tag
   charger_efficiency: 0.95                                    # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
   allow_cross_day_charging: false                             # Ermöglicht keine Ladungen über Mitternacht hinaus
 
   # =============================================================================
-  # Lademanagementstrategie des Standorts
+  # Angaben zur lokalen PV-Anlage
   # =============================================================================
-  # Daten für generation / market: https://www.smard.de/home/downloadcenter/download-marktdaten/
-
-  charging_strategy: "immediate"                              # Lademanagementstrategie: "immediate" (default), "market", "generation"
-
-  # CSV-Datei: PV-Erzeugung (generation)
-  # Beim Einlesen einer anlagenspezifischen Datei "tilt_angle_solar_module" und "location_pv_site" leer lassen und "generation_strategy_value_col" anpassen
-  generation_strategy_csv: "../data/strategies/generation/PV_Erzeugung_Standardprofile_DE.csv"      # Pfad bei vorhandenen Daten zur Stromgeneration: "../data/strategies//generation/PV_Erzeugung_Standardprofile_DE.csv"
-  generation_strategy_value_col: 7                                                                  # Spalte, die entsprechende Werte ("MWh", "kWh", o.ä.) enthalten, woran sich die Lademanagementstrategie richtet (1-basierter Code: 1 = erste Spalte)
-  generation_strategy_unit: "kW"                                                                    # Einheit, die für den Wert im Lademanagement verwendet wird ("MWh", "kWh", "kW", "€/MWh")
-  pv_system_size_kwp: 100                                                                          # Größe der untersuchten Anlage in kWp
-  tilt_angle_solar_module: 10                                                                       # Neigungswinkel des Solarmoduls in Grad ("10", "15", "20", "25", "30")
-  location_pv_site: Augsburg                                                                        # Standort der Anlage bzw. vergleichbar laut Globalstrahlung in DE ("Augsburg", "Cottbus", "Hamburg", "Hannover", "Ingolstadt", "Leipzig", "Magdeburg", "Nürnberg", "Regensburg", "Schwerin")
-
-  # CSV-Datei: Marktpreise (market)
-  market_strategy_csv: "../data/strategies/market/Marktdaten_Grosshandelspreise_DE_2025.csv"        # Pfad bei vorhandenen Daten zu Strompreisen: "../data/strategies//market/Marktdaten_Grosshandelspreise_DE_2025.csv"
-  market_strategy_value_col: 3                                                                      # Spalte, die entsprechende Werte ("€/MWh", "€/kWh", o.ä.) enthalten, woran sich die Lademanagementstrategie richtet (1-basierter Code: 1 = erste Spalte)
-  market_strategy_unit: "€/MWh"                                                                     # Einheit, die für den Wert im Lademanagement verwendet wird (€/kWh", "€/MWh")
-
-
+  pv_system_size_kwp: 100                                      # Größe der untersuchten Anlage in kWp
+  
   # =============================================================================
   # Grundlast des Standorts - Gebäudeprofil
   # =============================================================================
-  # Die Grundlast beschreibt den zeitlich aufgelösten Stromverbrauch des Gebäudes im 15-Minuten-Raster 
-  #
-  # Wird eine CSV angegeben, wird deren Profil als zeitlicher Verlauf ("Shape") verwendet und auf den 
-  # angegebenen Standort skaliert:
-  # - base_load_unit = "kWh":
-  #     CSV-Werte sind Energie pro Zeitschritt (z. B. HTW-Profile, auf 1000 kWh/Jahr normiert).
-  #     Die Werte werden auf base_load_annual skaliert und anschließend in kW umgerechnet.
-  # - base_load_unit = "kW":
-  #     CSV-Werte sind mittlere Leistung je Zeitschritt.
-  #     Das Profil wird so skaliert, dass seine mittlere Leistung base_load_annual entspricht.
-  #
-  # Ist keine CSV angegeben, wird eine konstante Grundlast verwendet.
-
-  # Option A: konstante Grundlast (kW)
-  base_load_kw: 10
-
-  # Option B: Grundlast aus CSV-Datei (hat Vorrang gegenüber Option A)
-  base_load_csv: ../data/building_loads/retail_tub_2018.csv         # Pfad zu den Gebäudeprofilen: "../data/building_loads/retail_tub_2018.csv" 
-  base_load_value_col: 2                                            # Spalte mit dem Profilwert (1-basiert, z. B. Mean_Value)
-  base_load_unit: "kWh"                                             # "kWh" oder "kW"
-  base_load_annual: 100000                                          # jährlicher standortspezifischer Verbrauch (kWh oder kW, passend zur Einheit)
+  base_load_annual_kwh: 500000                                 # jährlicher standortspezifischer Verbrauch
 
 # =============================================================================
 # Fuhrparkbeschreibung – Ladekurven + Kapazitäten kommen aus CSV
@@ -168,7 +131,7 @@ parking_duration_distribution:
 soc_at_arrival_distribution:
   type: mixture
   value_unit: fraction                      # 0.0 bis 1.0
-  max_soc: 0.8                              # maximales SoC bei Ankunft
+  max_soc: 0.7                              # maximales SoC bei Ankunft
 
   components:
   # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
