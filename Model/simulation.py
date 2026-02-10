@@ -354,17 +354,20 @@ def read_local_load_pv_market_from_csv(
     Spalte 2: PV-Profil
     Spalte 3: Marktpreis [€/MWh]
 
-    Interpretation und Skalierung
-    -----------------------------
+    Interpretation und Skalierung (jetzt in kW)
+    -------------------------------------------
     Wenn `profiles_are_normalized=True`:
-    - Grundlast (Spalte 1) ist ein normiertes Profil (gewichtete Anteile) und wird so skaliert,
-      dass die Summe über das Jahr `base_load_annual_kwh` entspricht.
+    - Grundlast (Spalte 1) ist ein normiertes Profil (Gewichte) und wird so skaliert,
+      dass die Summe über das Jahr `base_load_annual_kwh` entspricht. Danach Umrechnung in Leistung [kW].
     - PV (Spalte 2) ist ein Kapazitätsfaktor (0..1) und wird mit `pv_system_size_kwp`
-      in Leistung [kW] umgerechnet und dann auf Energie [kWh] je CSV-Zeitschritt.
+      direkt in Leistung [kW] umgerechnet.
+
+    Wenn `profiles_are_normalized=False`:
+    - Spalte 1 und 2 werden als bereits vorliegende Leistungen [kW] je CSV-Zeitschritt interpretiert.
 
     Rückgabe
     --------
-    - Grundlast und PV als *kWh pro Simulationsschritt*.
+    - Grundlast und PV als *kW pro Simulationsschritt* (mittlere Leistung je Schritt).
     - Marktpreis als *€/MWh* je Simulationsschritt.
 
     Resampling / Alignment
@@ -373,38 +376,10 @@ def read_local_load_pv_market_from_csv(
     - Wenn Simulation feiner als CSV (Upsampling): Forward-Fill der Leistung.
     - Wenn Simulation gröber als CSV (Downsampling): Resample der Leistung per Mittelwert.
 
-    Parameter
-    ---------
-    csv_path:
-        Pfad zur CSV-Datei.
-    timestamps:
-        Simulations-Zeitindex (tz-aware erforderlich).
-    base_load_annual_kwh:
-        Jährlicher Energieverbrauch des Standorts [kWh] (für Skalierung bei normalisiertem Profil).
-    pv_system_size_kwp:
-        PV-Anlagengröße [kWp] (für Skalierung bei normalisiertem Profil).
-    profiles_are_normalized:
-        True: Spalten 1/2 sind normierte Profile; False: bereits Energiemengen je CSV-Schritt.
-    input_time_resolution_min:
-        Zeitauflösung der CSV in Minuten.
-    datetime_format:
-        Parsformat für Spalte 0.
-    separator:
-        Trennzeichen der CSV.
-    decimal:
-        Dezimaltrennzeichen der CSV.
-    timezone:
-        Optionales Override für die Lokalisierung der CSV-Wandzeit (Standard: `timestamps.tz`).
-
-    Rückgabe
-    -------
-    Tuple[pd.Series, pd.Series, pd.Series]
-        (base_load_kwh_per_step, pv_generation_kwh_per_step, market_price_eur_per_mwh)
-
     Ausnahmen
-    ------
+    ---------
     ValueError
-        - wenn `timestamps` tz-naiv ist (harte Prüfung)
+        - wenn `timestamps` tz-naiv ist
         - wenn CSV < 4 Spalten hat
         - wenn Numerik-Parsen fehlschlägt
     """
@@ -456,65 +431,56 @@ def read_local_load_pv_market_from_csv(
 
     # Zeitschrittgrößen bestimmen.
     sim_step_min = int(round((simulation_time_index[1] - simulation_time_index[0]).total_seconds() / 60.0))
-    sim_step_hours = float(sim_step_min) / 60.0
     input_step_hours = float(input_time_resolution_min) / 60.0
 
-    # Profile interpretieren / skalieren (auf Input-Gitter).
+    # Profile interpretieren / skalieren (auf Input-Gitter), Ergebnis jeweils in kW.
     base_profile = dataframe[base_col]
     pv_profile = dataframe[pv_col]
     price_series = dataframe[price_col]
 
     if profiles_are_normalized:
-        # Grundlast: normierte Gewichte -> skaliere auf Jahresenergie.
+        # Grundlast: normierte Gewichte -> skaliere auf Jahresenergie -> dann in kW umrechnen.
         total_weight = float(base_profile.sum())
-        if base_load_annual_kwh <= 0.0 or total_weight <= 0.0:
-            base_kwh_input = base_profile * 0.0
+        if base_load_annual_kwh <= 0.0 or total_weight <= 0.0 or input_step_hours <= 0.0:
+            base_kw_input = base_profile * 0.0
         else:
             base_kwh_input = (base_profile / total_weight) * float(base_load_annual_kwh)
+            base_kw_input = base_kwh_input / input_step_hours
 
-        # PV: Kapazitätsfaktor -> kW -> kWh je Input-Schritt.
-        pv_power_kw = pv_profile * float(max(pv_system_size_kwp, 0.0))
-        pv_kwh_input = pv_power_kw * input_step_hours
+        # PV: Kapazitätsfaktor -> direkt kW.
+        pv_kw_input = pv_profile * float(max(pv_system_size_kwp, 0.0))
     else:
-        # Profile sind bereits Energiemengen je CSV-Schritt.
-        base_kwh_input = base_profile
-        pv_kwh_input = pv_profile
-
-    # Energie je Input-Schritt -> Leistung [kW] (für korrektes Resampling).
-    base_kw = base_kwh_input / input_step_hours
-    pv_kw = pv_kwh_input / input_step_hours
+        # Profile sind bereits Leistungen [kW] je CSV-Zeitschritt.
+        base_kw_input = base_profile
+        pv_kw_input = pv_profile
 
     # Leistung auf Simulationsraster ausrichten (resample/reindex).
     if sim_step_min == int(input_time_resolution_min):
         # Gleiche Auflösung: direkt auf Raster legen.
-        base_kw_aligned = base_kw.reindex(simulation_time_index)
-        pv_kw_aligned = pv_kw.reindex(simulation_time_index)
+        base_kw_aligned = base_kw_input.reindex(simulation_time_index)
+        pv_kw_aligned = pv_kw_input.reindex(simulation_time_index)
         price_aligned = price_series.reindex(simulation_time_index, method="ffill")
 
     elif sim_step_min < int(input_time_resolution_min):
         # Simulation feiner als CSV: stückweise konstante Leistung bis zur nächsten Messung.
-        base_kw_aligned = base_kw.reindex(simulation_time_index, method="ffill")
-        pv_kw_aligned = pv_kw.reindex(simulation_time_index, method="ffill")
+        base_kw_aligned = base_kw_input.reindex(simulation_time_index, method="ffill")
+        pv_kw_aligned = pv_kw_input.reindex(simulation_time_index, method="ffill")
         price_aligned = price_series.reindex(simulation_time_index, method="ffill")
 
     else:
         # Simulation gröber als CSV: mittlere Leistung über das größere Intervall.
         rule = f"{sim_step_min}min"
-        base_kw_aligned = base_kw.resample(rule).mean().reindex(simulation_time_index)
-        pv_kw_aligned = pv_kw.resample(rule).mean().reindex(simulation_time_index)
+        base_kw_aligned = base_kw_input.resample(rule).mean().reindex(simulation_time_index)
+        pv_kw_aligned = pv_kw_input.resample(rule).mean().reindex(simulation_time_index)
         price_aligned = price_series.resample(rule).mean().reindex(simulation_time_index, method="ffill")
 
-    # Fehlende Werte in Leistung als 0 interpretieren (z. B. außerhalb CSV-Bereich).
+    # Fehlende Werte als 0 interpretieren (z. B. außerhalb CSV-Bereich).
     base_kw_aligned = base_kw_aligned.fillna(0.0)
     pv_kw_aligned = pv_kw_aligned.fillna(0.0)
 
-    # Leistung [kW] -> Energie [kWh] je Simulationsschritt.
-    base_kwh_step = base_kw_aligned * sim_step_hours
-    pv_kwh_step = pv_kw_aligned * sim_step_hours
-
     return (
-        base_kwh_step.astype(float),
-        pv_kwh_step.astype(float),
+        base_kw_aligned.astype(float),
+        pv_kw_aligned.astype(float),
         price_aligned.astype(float),
     )
 
@@ -1184,25 +1150,25 @@ def required_site_energy_for_session(
     return float(max(needed_site_kwh, 0.0))
 
 
-def available_energy_for_session_step(
+def available_power_for_session_step(
     *,
     step_index: int,
     scenario: dict,
     curve: VehicleChargingCurve,
     state_of_charge_fraction: float,
     remaining_site_energy_kwh: float,
-    pv_generation_kwh_per_step: np.ndarray,
-    base_load_kwh_per_step: np.ndarray,
-    reserved_total_ev_energy_kwh_per_step: np.ndarray,
-    reserved_pv_ev_energy_kwh_per_step: Optional[np.ndarray] = None,
-    already_allocated_on_this_charger_kwh: float = 0.0,
+    pv_generation_kw_per_step: np.ndarray,
+    base_load_kw_per_step: np.ndarray,
+    reserved_total_ev_power_kw_per_step: np.ndarray,
+    reserved_pv_ev_power_kw_per_step: Optional[np.ndarray] = None,
+    already_allocated_on_this_charger_kw: float = 0.0,
     supply_mode: Literal["site", "pv_only", "grid_only"] = "site",
 ) -> Tuple[float, float]:
     """
-    Bestimmt die maximal allokierbare Ladeenergie (kWh/Step) für eine Session in einem Schritt.
+    Bestimmt die maximal allokierbare Ladeleistung (kW) für eine Session in einem Schritt.
 
-    Die verfügbare Energie ergibt sich aus PV und Netzlimit nach Deckung der Grundlast sowie nach
-    Abzug bereits reservierter EV-Energie. Zusätzlich wird die Allokation durch das Ladepunktlimit,
+    Die verfügbare Leistung ergibt sich aus PV und Netzlimit nach Deckung der Grundlast sowie nach
+    Abzug bereits reservierter EV-Leistung. Zusätzlich wird die Allokation durch das Ladepunktlimit,
     die Fahrzeug-Ladekurve (SoC-abhängige maximale Ladeleistung) und den Restenergiebedarf begrenzt.
 
     Vor der EV-Allokation wird geprüft, ob die Grundlast im Schritt durch PV und Netzlimit versorgbar
@@ -1216,25 +1182,26 @@ def available_energy_for_session_step(
         Szenario-Dictionary mit mindestens ``site.rated_power_kw``, ``site.grid_limit_p_avb_kw``,
         ``site.charger_efficiency`` und ``time_resolution_min``.
     curve:
-        Fahrzeug-Ladekurve (SoC-Stützstellen und Ladeleistung auf Batterieseite).
+        Fahrzeug-Ladekurve (SoC-Stützstellen und Ladeleistung auf Batterieseite) in kW.
     state_of_charge_fraction:
         SoC zu Beginn des Schritts als Anteil [0..1].
     remaining_site_energy_kwh:
-        Noch benötigte Energie auf Standortseite (kWh).
-    pv_generation_kwh_per_step, base_load_kwh_per_step:
-        Zeitreihen für PV-Erzeugung und Grundlast in kWh/Step.
-    reserved_total_ev_energy_kwh_per_step, reserved_pv_ev_energy_kwh_per_step:
-        Bereits reservierte EV-Energie (gesamt und PV-Anteil) in kWh/Step.
-    already_allocated_on_this_charger_kwh:
-        Bereits im selben Schritt auf demselben Ladepunkt allokierte Energie (kWh/Step).
+        Noch benötigte Energie auf Standortseite (kWh). Wird intern über ``step_hours`` in eine
+        äquivalente maximale Schritt-Leistungsgrenze umgerechnet: ``need_limit_kw = remaining_kwh / step_hours``.
+    pv_generation_kw_per_step, base_load_kw_per_step:
+        Zeitreihen für PV-Erzeugung und Grundlast in kW (mittlere Leistung je Simulationsschritt).
+    reserved_total_ev_power_kw_per_step, reserved_pv_ev_power_kw_per_step:
+        Bereits reservierte EV-Leistung (gesamt und PV-Anteil) in kW je Schritt.
+    already_allocated_on_this_charger_kw:
+        Bereits im selben Schritt auf demselben Ladepunkt allokierte Leistung (kW).
     supply_mode:
         Versorgungsmodus: ``"site"`` (PV+Netz), ``"pv_only"`` (nur PV) oder ``"grid_only"`` (nur Netz).
 
     Rückgabe
     -------
     Tuple[float, float]
-        ``(allocated_site_kwh, pv_share_kwh)`` mit der allokierten Energie auf Standortseite und
-        dem PV-Anteil daran, jeweils in kWh/Step.
+        ``(allocated_site_kw, pv_share_kw)`` mit der allokierten Leistung auf Standortseite und
+        dem PV-Anteil daran, jeweils in kW.
 
     Ausnahmen
     ------
@@ -1244,88 +1211,91 @@ def available_energy_for_session_step(
         Wenn die Grundlast im Schritt nicht durch PV und Netzlimit versorgbar ist oder Parameter
         im Szenario ungültig sind.
     """
-    if step_index < 0 or step_index >= len(base_load_kwh_per_step):
+    if step_index < 0 or step_index >= len(base_load_kw_per_step):
         raise IndexError(f"step_index={step_index} außerhalb der Zeitreihenlänge.")
 
     site_configuration = scenario["site"]
     time_resolution_min = int(scenario["time_resolution_min"])
     step_hours = float(time_resolution_min) / 60.0
+    step_hours_safe = float(max(step_hours, 1e-12))
 
     charger_efficiency = float(site_configuration.get("charger_efficiency", 1.0))
     if not (0.0 < charger_efficiency <= 1.0):
         raise ValueError("site.charger_efficiency muss im Bereich (0, 1] liegen.")
 
-    pv_energy_kwh = float(pv_generation_kwh_per_step[step_index])
-    grid_energy_limit_kwh = float(site_configuration["grid_limit_p_avb_kw"]) * step_hours
-    building_energy_kwh = float(base_load_kwh_per_step[step_index])
+    pv_power_kw = float(pv_generation_kw_per_step[step_index])
+    grid_power_limit_kw = float(site_configuration["grid_limit_p_avb_kw"])
+    building_power_kw = float(base_load_kw_per_step[step_index])
 
-    reserved_total_ev_energy_kwh = float(reserved_total_ev_energy_kwh_per_step[step_index])
-    reserved_pv_ev_energy_kwh = (
-        float(reserved_pv_ev_energy_kwh_per_step[step_index])
-        if reserved_pv_ev_energy_kwh_per_step is not None
+    reserved_total_ev_power_kw = float(reserved_total_ev_power_kw_per_step[step_index])
+    reserved_pv_ev_power_kw = (
+        float(reserved_pv_ev_power_kw_per_step[step_index])
+        if reserved_pv_ev_power_kw_per_step is not None
         else 0.0
     )
 
     # (1) Harte Prüfung: Gebäude muss versorgbar sein (PV zuerst, Rest aus Netz bis Limit).
-    building_energy_from_grid_kwh = building_energy_kwh - float(np.minimum(pv_energy_kwh, building_energy_kwh))
-    if building_energy_from_grid_kwh > grid_energy_limit_kwh + 1e-9:
+    building_power_from_grid_kw = building_power_kw - float(np.minimum(pv_power_kw, building_power_kw))
+    if building_power_from_grid_kw > grid_power_limit_kw + 1e-9:
         raise ValueError(
-            "Strombedarf (Grundlast) höher als verfügbare Energie am Standort: "
-            f"building_energy_kwh={building_energy_kwh:.6f}, pv_energy_kwh={pv_energy_kwh:.6f}, "
-            f"grid_energy_limit_kwh={grid_energy_limit_kwh:.6f}."
+            "Strombedarf (Grundlast) höher als verfügbare Leistung am Standort: "
+            f"building_power_kw={building_power_kw:.6f}, pv_power_kw={pv_power_kw:.6f}, "
+            f"grid_power_limit_kw={grid_power_limit_kw:.6f}."
         )
 
-    # (2) Verfügbare Energie für EV (PV nach Grundlast + Grid nach Grundlast)
-    pv_after_building_kwh = float(max(pv_energy_kwh - building_energy_kwh, 0.0))
-    pv_remaining_for_ev_kwh = float(max(pv_after_building_kwh - reserved_pv_ev_energy_kwh, 0.0))
+    # (2) Verfügbare Leistung für EV (PV nach Grundlast + Grid nach Grundlast)
+    pv_after_building_kw = float(max(pv_power_kw - building_power_kw, 0.0))
+    pv_remaining_for_ev_kw = float(max(pv_after_building_kw - reserved_pv_ev_power_kw, 0.0))
 
-    grid_remaining_after_building_kwh = float(grid_energy_limit_kwh - building_energy_from_grid_kwh)
+    grid_remaining_after_building_kw = float(grid_power_limit_kw - building_power_from_grid_kw)
 
     # "Grid-EV bereits" = reserved_total - (physikalisch möglicher PV-Anteil)
-    pv_ev_physical_kwh = float(np.minimum(reserved_pv_ev_energy_kwh, pv_after_building_kwh))
-    grid_ev_already_kwh = float(max(reserved_total_ev_energy_kwh - pv_ev_physical_kwh, 0.0))
-    grid_remaining_for_ev_kwh = float(max(grid_remaining_after_building_kwh - grid_ev_already_kwh, 0.0))
+    pv_ev_physical_kw = float(np.minimum(reserved_pv_ev_power_kw, pv_after_building_kw))
+    grid_ev_already_kw = float(max(reserved_total_ev_power_kw - pv_ev_physical_kw, 0.0))
+    grid_remaining_for_ev_kw = float(max(grid_remaining_after_building_kw - grid_ev_already_kw, 0.0))
 
     if supply_mode == "pv_only":
-        supply_headroom_kwh = pv_remaining_for_ev_kwh
+        supply_headroom_kw = pv_remaining_for_ev_kw
     elif supply_mode == "grid_only":
-        supply_headroom_kwh = grid_remaining_for_ev_kwh
+        supply_headroom_kw = grid_remaining_for_ev_kw
     elif supply_mode == "site":
-        supply_headroom_kwh = pv_remaining_for_ev_kwh + grid_remaining_for_ev_kwh
+        supply_headroom_kw = pv_remaining_for_ev_kw + grid_remaining_for_ev_kw
     else:
         raise ValueError("supply_mode muss 'site', 'pv_only' oder 'grid_only' sein.")
 
     # (3) Chargerlimit
-    charger_limit_kwh = float(site_configuration["rated_power_kw"]) * step_hours
-    charger_headroom_kwh = float(max(charger_limit_kwh - already_allocated_on_this_charger_kwh, 0.0))
+    charger_limit_kw = float(site_configuration["rated_power_kw"])
+    charger_headroom_kw = float(max(charger_limit_kw - float(already_allocated_on_this_charger_kw), 0.0))
 
     # (4) Fahrzeuglimit aus Ladekurve (Batterieseite -> Standortseite)
     state_of_charge = float(np.clip(state_of_charge_fraction, 0.0, 1.0))
     battery_power_kw = float(np.interp(state_of_charge, curve.state_of_charge_fraction, curve.power_kw))
-    vehicle_site_limit_kwh = float(max((battery_power_kw / max(charger_efficiency, 1e-12)) * step_hours, 0.0))
+    vehicle_site_limit_kw = float(max(battery_power_kw / max(charger_efficiency, 1e-12), 0.0))
 
+    # (5) Restenergiebedarf als Leistungsgrenze für diesen Schritt (kW)
     remaining_site_energy_kwh = float(max(remaining_site_energy_kwh, 0.0))
+    need_limit_kw = float(remaining_site_energy_kwh / step_hours_safe)
 
-    allocated_site_kwh = float(
+    allocated_site_kw = float(
         np.minimum.reduce(
             np.array(
-                [supply_headroom_kwh, charger_headroom_kwh, vehicle_site_limit_kwh, remaining_site_energy_kwh],
+                [supply_headroom_kw, charger_headroom_kw, vehicle_site_limit_kw, need_limit_kw],
                 dtype=float,
             )
         )
     )
-    allocated_site_kwh = float(max(allocated_site_kwh, 0.0))
-    if allocated_site_kwh <= 1e-12:
+    allocated_site_kw = float(max(allocated_site_kw, 0.0))
+    if allocated_site_kw <= 1e-12:
         return 0.0, 0.0
 
     if supply_mode == "pv_only":
-        pv_share_kwh = allocated_site_kwh
+        pv_share_kw = allocated_site_kw
     elif supply_mode == "grid_only":
-        pv_share_kwh = 0.0
+        pv_share_kw = 0.0
     else:
-        pv_share_kwh = float(np.minimum(allocated_site_kwh, pv_remaining_for_ev_kwh))
+        pv_share_kw = float(np.minimum(allocated_site_kw, pv_remaining_for_ev_kw))
 
-    return allocated_site_kwh, float(max(pv_share_kwh, 0.0))
+    return allocated_site_kw, float(max(pv_share_kw, 0.0))
 
 
 def charging_strategy_immediate(
@@ -1333,40 +1303,45 @@ def charging_strategy_immediate(
     session_arrival_step: int,
     session_departure_step: int,
     required_site_energy_kwh: float,
-    pv_generation_kwh_per_step: np.ndarray,
-    base_load_kwh_per_step: np.ndarray,
-    reserved_total_ev_energy_kwh_per_step: np.ndarray,
-    reserved_pv_ev_energy_kwh_per_step: np.ndarray,
+    pv_generation_kw_per_step: np.ndarray,
+    base_load_kw_per_step: np.ndarray,
+    reserved_total_ev_power_kw_per_step: np.ndarray,
+    reserved_pv_ev_power_kw_per_step: np.ndarray,
     curve: VehicleChargingCurve,
     state_of_charge_at_arrival: float,
     scenario: dict,
 ) -> Dict[str, Any]:
     """
-    Vergibt Energie an eine Session nach der Immediate-Strategie (chronologisch laden, solange möglich).
+    Vergibt Ladeleistung an eine Session nach der Immediate-Strategie (chronologisch laden, solange möglich).
 
-    Pro Zeitschritt wird die maximal allokierbare Energie über
-    ``available_energy_for_session_step(...)`` bestimmt und anschließend
+    Pro Zeitschritt wird die maximal allokierbare Ladeleistung über
+    ``available_power_for_session_step(...)`` bestimmt und anschließend
     (a) in Plan-Arrays geschrieben und (b) in globale Reservierungen addiert.
 
     Rückgabe
     -------
     Dict[str, Any]
         Enthält nur session-relevante Ergebnisse:
-        - plan_site_kwh_per_step, plan_pv_site_kwh_per_step
+        - plan_site_kw_per_step, plan_pv_site_kw_per_step
         - charged_site_kwh, charged_pv_site_kwh
         - remaining_site_kwh, final_soc
     """
-    n_total = int(len(reserved_total_ev_energy_kwh_per_step))
+    n_total = int(len(reserved_total_ev_power_kw_per_step))
 
     site_cfg = scenario["site"]
     charger_efficiency = float(site_cfg.get("charger_efficiency", 1.0))
+
+    time_resolution_min = int(scenario["time_resolution_min"])
+    step_hours = float(time_resolution_min) / 60.0
+    step_hours_safe = float(max(step_hours, 1e-12))
 
     start = int(max(0, session_arrival_step))
     end_excl = int(min(int(session_departure_step), n_total))
     window_len = int(max(0, end_excl - start))
 
-    plan_site_kwh_per_step = np.zeros(window_len, dtype=float)
-    plan_pv_site_kwh_per_step = np.zeros(window_len, dtype=float)
+    # Pläne jetzt in kW (mittlere Leistung je Simulationsschritt)
+    plan_site_kw_per_step = np.zeros(window_len, dtype=float)
+    plan_pv_site_kw_per_step = np.zeros(window_len, dtype=float)
 
     remaining_site_kwh = float(max(required_site_energy_kwh, 0.0))
     state_of_charge = float(np.clip(state_of_charge_at_arrival, 0.0, 1.0))
@@ -1381,51 +1356,55 @@ def charging_strategy_immediate(
         if remaining_site_kwh <= 1e-12 or state_of_charge >= 1.0 - 1e-12:
             break
 
-        alloc_site_kwh, alloc_pv_kwh = available_energy_for_session_step(
+        alloc_site_kw, alloc_pv_kw = available_power_for_session_step(
             step_index=int(abs_step),
             scenario=scenario,
             curve=curve,
             state_of_charge_fraction=float(state_of_charge),
-            remaining_site_energy_kwh=float(remaining_site_kwh),
-            pv_generation_kwh_per_step=pv_generation_kwh_per_step,
-            base_load_kwh_per_step=base_load_kwh_per_step,
-            reserved_total_ev_energy_kwh_per_step=reserved_total_ev_energy_kwh_per_step,
-            reserved_pv_ev_energy_kwh_per_step=reserved_pv_ev_energy_kwh_per_step,
-            already_allocated_on_this_charger_kwh=0.0,
+            remaining_site_energy_kwh=float(remaining_site_kwh),  # bleibt kWh (Bedarf)
+            pv_generation_kw_per_step=pv_generation_kw_per_step,
+            base_load_kw_per_step=base_load_kw_per_step,
+            reserved_total_ev_power_kw_per_step=reserved_total_ev_power_kw_per_step,
+            reserved_pv_ev_power_kw_per_step=reserved_pv_ev_power_kw_per_step,
+            already_allocated_on_this_charger_kw=0.0,
             supply_mode="site",
         )
 
-        alloc_site_kwh = float(alloc_site_kwh)
-        if alloc_site_kwh <= 1e-12:
+        alloc_site_kw = float(alloc_site_kw)
+        if alloc_site_kw <= 1e-12:
             continue
 
-        alloc_pv_kwh = float(np.clip(float(alloc_pv_kwh), 0.0, alloc_site_kwh))
+        alloc_pv_kw = float(np.clip(float(alloc_pv_kw), 0.0, alloc_site_kw))
 
         local_i = int(abs_step - start)
-        plan_site_kwh_per_step[local_i] += alloc_site_kwh
-        plan_pv_site_kwh_per_step[local_i] += alloc_pv_kwh
+        plan_site_kw_per_step[local_i] += alloc_site_kw
+        plan_pv_site_kw_per_step[local_i] += alloc_pv_kw
 
-        reserved_total_ev_energy_kwh_per_step[abs_step] += alloc_site_kwh
-        reserved_pv_ev_energy_kwh_per_step[abs_step] += alloc_pv_kwh
+        # Reservierungen jetzt in kW
+        reserved_total_ev_power_kw_per_step[abs_step] += alloc_site_kw
+        reserved_pv_ev_power_kw_per_step[abs_step] += alloc_pv_kw
+
+        # KPI-/Zustandsgrößen bleiben Energie (kWh) => Integration über step_hours
+        alloc_site_kwh = alloc_site_kw * step_hours_safe
+        alloc_pv_kwh = alloc_pv_kw * step_hours_safe
 
         charged_site_kwh += alloc_site_kwh
         charged_pv_site_kwh += alloc_pv_kwh
         remaining_site_kwh -= alloc_site_kwh
 
-        # SoC-Update (notwendig für Ladekurvenlimit im nächsten Step)
+        # SoC-Update (Energie auf Batterieseite)
         battery_energy_kwh = alloc_site_kwh * eff
         state_of_charge = float(min(1.0, state_of_charge + battery_energy_kwh / battery_capacity_kwh))
 
     return {
-        "plan_site_kwh_per_step": plan_site_kwh_per_step,
-        "plan_pv_site_kwh_per_step": plan_pv_site_kwh_per_step,
-        "plan_market_kwh_per_step": np.zeros_like(plan_site_kwh_per_step),
+        "plan_site_kw_per_step": plan_site_kw_per_step,
+        "plan_pv_site_kw_per_step": plan_pv_site_kw_per_step,
+        "plan_market_kw_per_step": np.zeros_like(plan_site_kw_per_step),
         "charged_site_kwh": float(charged_site_kwh),
         "charged_pv_site_kwh": float(charged_pv_site_kwh),
         "remaining_site_kwh": float(max(remaining_site_kwh, 0.0)),
         "final_soc": float(state_of_charge),
     }
-
 
 
 def charging_strategy_market(
@@ -1434,105 +1413,155 @@ def charging_strategy_market(
     session_departure_step: int,
     required_site_energy_kwh: float,
     market_price_eur_per_mwh: np.ndarray,
-    pv_generation_kwh_per_step: np.ndarray,
-    base_load_kwh_per_step: np.ndarray,
-    reserved_total_ev_energy_kwh_per_step: np.ndarray,
-    reserved_pv_ev_energy_kwh_per_step: np.ndarray,
+    pv_generation_kw_per_step: np.ndarray,
+    base_load_kw_per_step: np.ndarray,
+    reserved_total_ev_power_kw_per_step: np.ndarray,
+    reserved_pv_ev_power_kw_per_step: np.ndarray,
     curve: VehicleChargingCurve,
     state_of_charge_at_arrival: float,
     scenario: dict,
+    preallocated_site_kw_per_step: Optional[np.ndarray] = None,
+    preallocated_pv_site_kw_per_step: Optional[np.ndarray] = None,
+    supply_mode: Literal["site", "pv_only", "grid_only"] = "site",
 ) -> Dict[str, Any]:
     """
-    Vergibt Energie an eine Session nach der Market-Strategie (günstige Slots nutzen).
+    Vergibt Ladeleistung an eine Session nach der Market-Strategie (günstige Slots nutzen).
 
-    Vorgehen
-    --------
-    1) Alle Zeitschritte der Session-Standzeit werden bestimmt.
-    2) Diese Schritte werden nach Marktpreis aufsteigend sortiert.
-    3) Es werden die k günstigsten Schritte ausgewählt, bis eine optimistische Kapazitätsschätzung
-       (ohne SoC-Limit) theoretisch ausreichen würde. Falls das nicht möglich ist, werden alle
-       Schritte zugelassen.
-    4) Die tatsächliche Zuweisung erfolgt chronologisch und ausschließlich in den zugelassenen
-       Schritten über ``available_energy_for_session_step(...)``.
+    Slot-Auswahl (ohne expliziten Fallback):
+    - Slots werden nach Preis sortiert.
+    - Die billigsten Slots werden nacheinander in 'allowed' aufgenommen.
+    - Nach jedem Hinzufügen wird ein CHRONOLOGISCHER Dry-Run gemacht (SoC-konsistent).
+    - Sobald die Zielenergie erreicht ist, stoppt die Slot-Auswahl.
+    - Wenn die Zielenergie nicht erreichbar ist, werden am Ende automatisch alle Slots erlaubt
+      (weil alle Slots nacheinander hinzugefügt wurden) – und das Fahrzeug bleibt ggf. unter Ziel-SoC.
 
-    Wenn die Session innerhalb ihrer Standzeit nicht genug Energie bekommt (weil keine
-    Standortenergie verfügbar ist), bleibt Restbedarf übrig.
+    Erweiterung für Re-Use (z. B. PV->Market/Grid-only):
+    - preallocated_*: bereits geplante Leistung je Step (z. B. PV-only), wird in Dry-Run und finaler
+      Allokation als "Baseline" berücksichtigt.
+    - supply_mode: wird an available_power_for_session_step durchgereicht (z. B. "grid_only").
 
-    Rückgabe
-    -------
-    Dict[str, Any]
-        Session-relevante Ergebnisse:
-        - plan_site_kwh_per_step, plan_pv_site_kwh_per_step, plan_market_kwh_per_step
-        - charged_site_kwh, charged_pv_site_kwh
-        - remaining_site_kwh, final_soc
+    Rückgabe:
+    - plan_*_kw_per_step sind mittlere Leistung je Schritt (kW)
+    - charged_* und remaining_* sind Energien (kWh)
     """
-    n_total = int(len(reserved_total_ev_energy_kwh_per_step))
+    n_total = int(len(reserved_total_ev_power_kw_per_step))
 
     site_cfg = scenario["site"]
     charger_efficiency = float(site_cfg.get("charger_efficiency", 1.0))
+
+    time_resolution_min = int(scenario["time_resolution_min"])
+    step_hours = float(time_resolution_min) / 60.0
+    step_hours_safe = float(max(step_hours, 1e-12))
 
     start = int(max(0, session_arrival_step))
     end_excl = int(min(int(session_departure_step), n_total))
     window_len = int(max(0, end_excl - start))
 
-    plan_site_kwh_per_step = np.zeros(window_len, dtype=float)
-    plan_pv_site_kwh_per_step = np.zeros(window_len, dtype=float)
-    plan_market_kwh_per_step = np.zeros(window_len, dtype=float)
+    required_site_energy_kwh = float(max(required_site_energy_kwh, 0.0))
+    state_of_charge_at_arrival = float(np.clip(state_of_charge_at_arrival, 0.0, 1.0))
 
-    remaining_site_kwh = float(max(required_site_energy_kwh, 0.0))
-    state_of_charge = float(np.clip(state_of_charge_at_arrival, 0.0, 1.0))
+    # -----------------------------
+    # Baseline (Vorallokation) je Step
+    # -----------------------------
+    base_site_kw = np.zeros(window_len, dtype=float)
+    base_pv_kw = np.zeros(window_len, dtype=float)
 
-    if window_len == 0 or remaining_site_kwh <= 1e-12:
+    if preallocated_site_kw_per_step is not None:
+        tmp = np.asarray(preallocated_site_kw_per_step, float).reshape(-1)
+        base_site_kw[: min(window_len, len(tmp))] = tmp[: min(window_len, len(tmp))]
+    if preallocated_pv_site_kw_per_step is not None:
+        tmp = np.asarray(preallocated_pv_site_kw_per_step, float).reshape(-1)
+        base_pv_kw[: min(window_len, len(tmp))] = tmp[: min(window_len, len(tmp))]
+
+    base_site_kw = np.maximum(base_site_kw, 0.0)
+    base_pv_kw = np.clip(np.maximum(base_pv_kw, 0.0), 0.0, base_site_kw)
+
+    # Output-Pläne: enthalten Baseline + Zusatz
+    plan_site_kw_per_step = base_site_kw.copy()
+    plan_pv_site_kw_per_step = base_pv_kw.copy()
+    plan_market_kw_per_step = np.zeros(window_len, dtype=float)
+
+    if window_len == 0 or required_site_energy_kwh <= 1e-12:
         return {
-            "plan_site_kwh_per_step": plan_site_kwh_per_step,
-            "plan_pv_site_kwh_per_step": plan_pv_site_kwh_per_step,
-            "plan_market_kwh_per_step": plan_market_kwh_per_step,
+            "plan_site_kw_per_step": plan_site_kw_per_step,
+            "plan_pv_site_kw_per_step": plan_pv_site_kw_per_step,
+            "plan_market_kw_per_step": plan_market_kw_per_step,
             "charged_site_kwh": 0.0,
             "charged_pv_site_kwh": 0.0,
-            "remaining_site_kwh": float(max(remaining_site_kwh, 0.0)),
-            "final_soc": float(state_of_charge),
+            "remaining_site_kwh": float(max(required_site_energy_kwh, 0.0)),
+            "final_soc": float(state_of_charge_at_arrival),
         }
-
-    # --- Slot-Auswahl (k günstigste Slots bis "optimistisch ausreichend") ---
-    time_resolution_min = int(scenario["time_resolution_min"])
-    step_hours = float(time_resolution_min) / 60.0
-
-    grid_limit_kwh = float(site_cfg["grid_limit_p_avb_kw"]) * step_hours
-    charger_cap_kwh = float(site_cfg["rated_power_kw"]) * step_hours
 
     session_steps = np.arange(start, end_excl, dtype=int)
     prices_window = market_price_eur_per_mwh[session_steps].astype(float)
+    order_by_price = np.argsort(prices_window)  # cheapest first
 
-    # Optimistische Cap-Schätzung ohne SoC-Limit:
-    # PV + GridLimit - Base - bereits reservierte EV (alles pro Step), dann durch ChargerCap begrenzen.
-    supply_headroom_est = (
-        pv_generation_kwh_per_step[session_steps].astype(float)
-        + grid_limit_kwh
-        - base_load_kwh_per_step[session_steps].astype(float)
-        - reserved_total_ev_energy_kwh_per_step[session_steps].astype(float)
-    )
-    supply_headroom_est = np.maximum(supply_headroom_est, 0.0)
-
-    cap_est = np.minimum(supply_headroom_est, charger_cap_kwh)
-    cap_est = np.maximum(cap_est, 0.0)
-
-    order_by_price = np.argsort(prices_window)  
-
-    allowed = np.zeros(window_len, dtype=bool)
-    cap_acc = 0.0
-    for idx in order_by_price:
-        allowed[idx] = True
-        cap_acc += float(cap_est[idx])
-        if cap_acc >= remaining_site_kwh - 1e-9:
-            break
-
-    # Wenn selbst optimistisch nicht genug möglich ist -> alle Slots erlauben
-    if float(np.sum(cap_est)) < remaining_site_kwh - 1e-9:
-        allowed[:] = True
-
-    # --- Chronologische Zuweisung nur in erlaubten Slots ---
     battery_capacity_kwh = float(max(curve.battery_capacity_kwh, 1e-12))
     eff = float(charger_efficiency)
+
+    def _dry_run_remaining_kwh(allowed_mask: np.ndarray) -> float:
+        """Chronologischer Dry-Run: keine Side-Effects auf Reservierungen/Pläne."""
+        remaining_kwh = float(required_site_energy_kwh)
+        soc = float(state_of_charge_at_arrival)
+
+        for local_i, abs_step in enumerate(range(start, end_excl)):
+            if remaining_kwh <= 1e-12 or soc >= 1.0 - 1e-12:
+                break
+
+            # Baseline passiert immer
+            base_kw_i = float(base_site_kw[local_i])
+            if base_kw_i > 1e-12:
+                base_kwh_i = base_kw_i * step_hours_safe
+                remaining_kwh -= base_kwh_i
+                soc = float(min(1.0, soc + (base_kwh_i * eff) / battery_capacity_kwh))
+                if remaining_kwh <= 1e-12 or soc >= 1.0 - 1e-12:
+                    break
+
+            if not bool(allowed_mask[local_i]):
+                continue
+
+            alloc_site_kw, _alloc_pv_kw = available_power_for_session_step(
+                step_index=int(abs_step),
+                scenario=scenario,
+                curve=curve,
+                state_of_charge_fraction=float(soc),
+                remaining_site_energy_kwh=float(remaining_kwh),
+                pv_generation_kw_per_step=pv_generation_kw_per_step,
+                base_load_kw_per_step=base_load_kw_per_step,
+                reserved_total_ev_power_kw_per_step=reserved_total_ev_power_kw_per_step,
+                reserved_pv_ev_power_kw_per_step=reserved_pv_ev_power_kw_per_step,
+                already_allocated_on_this_charger_kw=float(base_kw_i),  # wichtig!
+                supply_mode=supply_mode,
+            )
+
+            alloc_site_kw = float(alloc_site_kw)
+            if alloc_site_kw <= 1e-12:
+                continue
+
+            alloc_site_kwh = alloc_site_kw * step_hours_safe
+            remaining_kwh -= alloc_site_kwh
+
+            soc = float(min(1.0, soc + (alloc_site_kwh * eff) / battery_capacity_kwh))
+
+        return float(max(remaining_kwh, 0.0))
+
+    # ---------------------------------------------------------
+    # Slot-Auswahl: billigste Slots nacheinander hinzufügen,
+    # jeweils mit CHRONOLOGISCHEM Dry-Run prüfen.
+    # ---------------------------------------------------------
+    allowed = np.zeros(window_len, dtype=bool)
+    for idx in order_by_price:
+        allowed[idx] = True
+        if _dry_run_remaining_kwh(allowed) <= 1e-9:
+            break
+
+    # ---------------------------------------------------------
+    # Finale Zuweisung: chronologisch, nur in allowed-Slots,
+    # Side-Effects: zusätzliche Pläne + Reservierungen.
+    # Baseline bleibt unberührt (ist schon in plan_* drin).
+    # ---------------------------------------------------------
+    remaining_site_kwh = float(required_site_energy_kwh)
+    state_of_charge = float(state_of_charge_at_arrival)
 
     charged_site_kwh = 0.0
     charged_pv_site_kwh = 0.0
@@ -1540,53 +1569,73 @@ def charging_strategy_market(
     for local_i, abs_step in enumerate(range(start, end_excl)):
         if remaining_site_kwh <= 1e-12 or state_of_charge >= 1.0 - 1e-12:
             break
+
+        base_kw_i = float(base_site_kw[local_i])
+        if base_kw_i > 1e-12:
+            base_kwh_i = base_kw_i * step_hours_safe
+            remaining_site_kwh -= base_kwh_i
+            state_of_charge = float(min(1.0, state_of_charge + (base_kwh_i * eff) / battery_capacity_kwh))
+            if remaining_site_kwh <= 1e-12 or state_of_charge >= 1.0 - 1e-12:
+                break
+
         if not bool(allowed[local_i]):
             continue
 
-        alloc_site_kwh, alloc_pv_kwh = available_energy_for_session_step(
+        alloc_site_kw, alloc_pv_kw = available_power_for_session_step(
             step_index=int(abs_step),
             scenario=scenario,
             curve=curve,
             state_of_charge_fraction=float(state_of_charge),
             remaining_site_energy_kwh=float(remaining_site_kwh),
-            pv_generation_kwh_per_step=pv_generation_kwh_per_step,
-            base_load_kwh_per_step=base_load_kwh_per_step,
-            reserved_total_ev_energy_kwh_per_step=reserved_total_ev_energy_kwh_per_step,
-            reserved_pv_ev_energy_kwh_per_step=reserved_pv_ev_energy_kwh_per_step,
-            already_allocated_on_this_charger_kwh=0.0,
-            supply_mode="site",
+            pv_generation_kw_per_step=pv_generation_kw_per_step,
+            base_load_kw_per_step=base_load_kw_per_step,
+            reserved_total_ev_power_kw_per_step=reserved_total_ev_power_kw_per_step,
+            reserved_pv_ev_power_kw_per_step=reserved_pv_ev_power_kw_per_step,
+            already_allocated_on_this_charger_kw=float(base_kw_i),
+            supply_mode=supply_mode,
         )
 
-        alloc_site_kwh = float(alloc_site_kwh)
-        if alloc_site_kwh <= 1e-12:
+        alloc_site_kw = float(alloc_site_kw)
+        if alloc_site_kw <= 1e-12:
             continue
 
-        alloc_pv_kwh = float(np.clip(float(alloc_pv_kwh), 0.0, alloc_site_kwh))
+        alloc_pv_kw = float(np.clip(float(alloc_pv_kw), 0.0, alloc_site_kw))
 
-        plan_site_kwh_per_step[local_i] += alloc_site_kwh
-        plan_pv_site_kwh_per_step[local_i] += alloc_pv_kwh
-        plan_market_kwh_per_step[local_i] += alloc_site_kwh
+        # Zusatzpläne
+        plan_site_kw_per_step[local_i] += alloc_site_kw
+        plan_pv_site_kw_per_step[local_i] += alloc_pv_kw
+        plan_market_kw_per_step[local_i] += alloc_site_kw  
 
-        reserved_total_ev_energy_kwh_per_step[abs_step] += alloc_site_kwh
-        reserved_pv_ev_energy_kwh_per_step[abs_step] += alloc_pv_kwh
+        # Reservierungen: nur Zusatz
+        reserved_total_ev_power_kw_per_step[abs_step] += alloc_site_kw
+        reserved_pv_ev_power_kw_per_step[abs_step] += alloc_pv_kw
+
+        alloc_site_kwh = alloc_site_kw * step_hours_safe
+        alloc_pv_kwh = alloc_pv_kw * step_hours_safe
 
         charged_site_kwh += alloc_site_kwh
         charged_pv_site_kwh += alloc_pv_kwh
         remaining_site_kwh -= alloc_site_kwh
 
-        battery_energy_kwh = alloc_site_kwh * eff
-        state_of_charge = float(min(1.0, state_of_charge + battery_energy_kwh / battery_capacity_kwh))
+        state_of_charge = float(min(1.0, state_of_charge + (alloc_site_kwh * eff) / battery_capacity_kwh))
+
+    # charged_* im Return soll die Gesamtenergie sein (Baseline + Zusatz).
+    total_charged_site_kwh = float(np.sum(plan_site_kw_per_step) * step_hours_safe)
+    total_charged_pv_kwh = float(np.sum(np.clip(plan_pv_site_kw_per_step, 0.0, plan_site_kw_per_step)) * step_hours_safe)
 
     return {
-        "plan_site_kwh_per_step": plan_site_kwh_per_step,
-        "plan_pv_site_kwh_per_step": plan_pv_site_kwh_per_step,
-        "plan_market_kwh_per_step": plan_market_kwh_per_step,
-        "charged_site_kwh": float(charged_site_kwh),
-        "charged_pv_site_kwh": float(charged_pv_site_kwh),
-        "remaining_site_kwh": float(max(remaining_site_kwh, 0.0)),
+        "plan_site_kw_per_step": plan_site_kw_per_step,
+        "plan_pv_site_kw_per_step": plan_pv_site_kw_per_step,
+        "plan_market_kw_per_step": plan_market_kw_per_step,
+        "charged_site_kwh": total_charged_site_kwh,
+        "charged_pv_site_kwh": total_charged_pv_kwh,
+        "remaining_site_kwh": float(max(required_site_energy_kwh - total_charged_site_kwh, 0.0)),
         "final_soc": float(state_of_charge),
     }
 
+
+from typing import Any, Dict
+import numpy as np
 
 def charging_strategy_pv(
     *,
@@ -1595,219 +1644,156 @@ def charging_strategy_pv(
     session_departure_step: int,
     required_site_energy_kwh: float,
     market_price_eur_per_mwh: np.ndarray,
-    pv_generation_kwh_per_step: np.ndarray,
-    base_load_kwh_per_step: np.ndarray,
-    reserved_total_ev_energy_kwh_per_step: np.ndarray,
-    reserved_pv_ev_energy_kwh_per_step: np.ndarray,
+    pv_generation_kw_per_step: np.ndarray,
+    base_load_kw_per_step: np.ndarray,
+    reserved_total_ev_power_kw_per_step: np.ndarray,
+    reserved_pv_ev_power_kw_per_step: np.ndarray,
     curve: VehicleChargingCurve,
     state_of_charge_at_arrival: float,
 ) -> Dict[str, Any]:
     """
-    Plant und allokiert Ladeenergie nach dem Prinzip „PV zuerst, Netz nur als günstiger Fallback“.
+    Plant und allokiert Ladeleistung nach dem Prinzip „PV zuerst, danach Netz nach Marktpreis“.
 
-    Grundidee
-    ---------
-    - Solange innerhalb der Standzeit PV-Überschuss (nach Grundlast) verfügbar ist, wird damit geladen.
-    - Reicht PV voraussichtlich nicht aus, wird zusätzlich Netzstrom in den günstigsten Preis-Zeitschritten
-    (Marktpreis) zugelassen.
+    Zuerst wird in jedem Zeitschritt ausschließlich mit PV-Überschuss geladen (``supply_mode="pv_only"``).
+    Falls danach noch Energiebedarf übrig ist, wird zusätzlicher Netzbezug über die Market-Strategie
+    abgedeckt (``supply_mode="grid_only"``). Dabei wird die bereits geplante PV-Leistung als
+    Vorbelegung (``preallocated_*``) an ``charging_strategy_market`` übergeben, sodass der
+    Grid-Anteil nur als Zusatzladung geplant wird und SoC/Ladekurven konsistent bleiben.
 
+    Hinweis zu Einheiten:
+        - ``plan_*_kw_per_step`` beschreibt die mittlere Leistung je Simulationsschritt in kW.
+        - ``charged_*`` und ``remaining_*`` sind Energiemengen in kWh (Integration über die Schrittbreite).
 
-    1) PV-Ladung (pv_only):
-    Es wird versucht, ausschließlich mit PV-Überschuss zu laden.
-    Dabei werden berücksichtigt:
-    - PV nach Abzug der Grundlast,
-    - bereits reservierte PV-EV-Anteile,
-    - Ladepunktlimit,
-    - Fahrzeug-Ladekurve (SoC-abhängige Leistung),
-    - verbleibender Energiebedarf.
-
-    2) Netz-Fallback (grid_only) nur in ausgewählten Schritten:
-    Wenn vorher geschätzt wurde, dass PV insgesamt nicht reicht, werden einige Zeitschritte als
-    „Netz erlaubt“ markiert. Diese Schritte sind die günstigsten (niedrigster Marktpreis) innerhalb
-    der Standzeit, bis die geschätzte fehlende Energie gedeckt wäre.
-    In genau diesen Schritten wird nach der PV-Ladung optional zusätzlich aus dem Netz geladen
-    (ebenfalls begrenzt durch Netzlimit, Reservierungen, Ladepunktlimit, Ladekurve und Restbedarf).
-
-    Wichtige Eigenschaften
-    ----------------------
-    - Chronologisch: Obwohl Netz-Slots nach Preis ausgewählt werden, wird die tatsächliche Ladung
-    immer in Zeitreihen-Reihenfolge durchgeführt, damit SoC und Ladekurve konsistent bleiben.
-
-    Rückgabe
-    --------
-    Gibt Zeitreihen (pro Session-Fenster) und Summen zurück:
-    - plan_site_kwh_per_step: gesamte zugewiesene Energie (PV + Netz) je Schritt
-    - plan_pv_site_kwh_per_step: PV-Anteil je Schritt
-    - plan_market_kwh_per_step: Netz-Anteil je Schritt (Fallback)
-    sowie charged_* Summen, remaining_site_kwh und final_soc.
+    Rückgabe:
+        dict[str, Any] mit u. a.:
+        - ``plan_site_kw_per_step``: Gesamtleistung (PV + Netz) je Schritt [kW]
+        - ``plan_pv_site_kw_per_step``: PV-Anteil je Schritt [kW]
+        - ``plan_market_kw_per_step``: zusätzlicher Netz-/Market-Anteil je Schritt [kW]
+        - ``charged_site_kwh``: insgesamt geladene Energie [kWh]
+        - ``charged_pv_site_kwh``: aus PV geladene Energie [kWh]
+        - ``charged_market_kwh``: aus Netz/Market geladene Energie [kWh]
+        - ``remaining_site_kwh``: verbleibender Energiebedarf [kWh]
+        - ``final_soc``: finaler SoC am Ende der Standzeit [-]
     """
-    n_total = int(len(reserved_total_ev_energy_kwh_per_step))
+    n_total = int(len(reserved_total_ev_power_kw_per_step))
 
     site_cfg = scenario["site"]
     charger_efficiency = float(site_cfg.get("charger_efficiency", 1.0))
+
+    time_resolution_min = int(scenario["time_resolution_min"])
+    step_hours = float(time_resolution_min) / 60.0
+    step_hours_safe = float(max(step_hours, 1e-12))
 
     start = int(max(0, session_arrival_step))
     end_excl = int(min(int(session_departure_step), n_total))
     window_len = int(max(0, end_excl - start))
 
-    plan_site_kwh_per_step = np.zeros(window_len, dtype=float)
-    plan_pv_site_kwh_per_step = np.zeros(window_len, dtype=float)
-    plan_market_kwh_per_step = np.zeros(window_len, dtype=float)
+    plan_site_kw_per_step = np.zeros(window_len, dtype=float)
+    plan_pv_site_kw_per_step = np.zeros(window_len, dtype=float)
+    plan_market_kw_per_step = np.zeros(window_len, dtype=float)
 
-    remaining_site_kwh = float(max(required_site_energy_kwh, 0.0))
-    state_of_charge = float(np.clip(state_of_charge_at_arrival, 0.0, 1.0))
+    required_site_energy_kwh = float(max(required_site_energy_kwh, 0.0))
+    remaining_site_kwh = float(required_site_energy_kwh)
+    state_of_charge_at_arrival = float(np.clip(state_of_charge_at_arrival, 0.0, 1.0))
+    state_of_charge = float(state_of_charge_at_arrival)
 
     if window_len == 0 or remaining_site_kwh <= 1e-12:
         return {
-            "plan_site_kwh_per_step": plan_site_kwh_per_step,
-            "plan_pv_site_kwh_per_step": plan_pv_site_kwh_per_step,
-            "plan_market_kwh_per_step": plan_market_kwh_per_step,
+            "plan_site_kw_per_step": plan_site_kw_per_step,
+            "plan_pv_site_kw_per_step": plan_pv_site_kw_per_step,
+            "plan_market_kw_per_step": plan_market_kw_per_step,
             "charged_site_kwh": 0.0,
             "charged_pv_site_kwh": 0.0,
             "charged_market_kwh": 0.0,
-            "remaining_site_kwh": float(remaining_site_kwh),
+            "remaining_site_kwh": float(max(remaining_site_kwh, 0.0)),
             "final_soc": float(state_of_charge),
         }
 
-    time_resolution_min = int(scenario["time_resolution_min"])
-    step_hours = float(time_resolution_min) / 60.0
-
     battery_capacity_kwh = float(max(curve.battery_capacity_kwh, 1e-12))
+    eff = float(np.clip(charger_efficiency, 1e-12, 1.0))
 
-    # -------------------------------------------------------------------------
-    # Grid-Fallback-Slots auswählen (preisgünstige Schritte), basierend auf
-    # einem SoC-unabhängigen Kapazitäts-Estimate.
-    # -------------------------------------------------------------------------
-    window_steps = np.arange(start, end_excl, dtype=int)
-
-    pv_energy = pv_generation_kwh_per_step[window_steps].astype(float)
-    base_energy = base_load_kwh_per_step[window_steps].astype(float)
-    reserved_total = reserved_total_ev_energy_kwh_per_step[window_steps].astype(float)
-    reserved_pv = reserved_pv_ev_energy_kwh_per_step[window_steps].astype(float)
-
-    pv_after_building = np.maximum(pv_energy - base_energy, 0.0)
-    pv_remaining_for_ev = np.maximum(pv_after_building - reserved_pv, 0.0)
-
-    building_from_grid = np.maximum(base_energy - pv_energy, 0.0)
-    grid_limit_kwh = float(site_cfg["grid_limit_p_avb_kw"]) * step_hours
-    grid_remaining_after_building = np.maximum(grid_limit_kwh - building_from_grid, 0.0)
-
-    pv_ev_physical = np.minimum(reserved_pv, pv_after_building)
-    grid_ev_already = np.maximum(reserved_total - pv_ev_physical, 0.0)
-    grid_remaining_for_ev = np.maximum(grid_remaining_after_building - grid_ev_already, 0.0)
-
-    charger_limit_kwh = float(site_cfg["rated_power_kw"]) * step_hours
-
-    pv_cap_est = np.minimum(pv_remaining_for_ev, charger_limit_kwh)
-    grid_cap_est = np.minimum(grid_remaining_for_ev, charger_limit_kwh)
-
-    pv_total_est = float(np.sum(pv_cap_est))
-    grid_needed_est = float(max(0.0, remaining_site_kwh - pv_total_est))
-
-    preferred_grid = np.zeros(window_len, dtype=bool)
-    if grid_needed_est > 1e-9:
-        prices = market_price_eur_per_mwh[window_steps].astype(float)
-        order = np.argsort(prices)  # cheapest first
-
-        cap_sorted = grid_cap_est[order]
-        cumsum = np.cumsum(cap_sorted)
-        k = int(np.searchsorted(cumsum, grid_needed_est, side="left")) + 1
-        k = int(np.clip(k, 0, window_len))
-
-        if k > 0:
-            preferred_grid[order[:k]] = True
-
-    # -------------------------------------------------------------------------
-    # Chronologische Allokation: erst PV-only, dann (wenn Slot ausgewählt) Grid-only
-    # -------------------------------------------------------------------------
-    charged_site_kwh = 0.0
-    charged_pv_site_kwh = 0.0
-    charged_market_kwh = 0.0
-
+    # ---------------------------------------------------------------------
+    # (1) PV-only: chronologisch planen + reservieren
+    # ---------------------------------------------------------------------
     for local_i, abs_step in enumerate(range(start, end_excl)):
         if remaining_site_kwh <= 1e-12 or state_of_charge >= 1.0 - 1e-12:
             break
 
-        # (1) PV-only
-        pv_alloc_kwh, pv_share_kwh = available_energy_for_session_step(
+        pv_alloc_kw, pv_share_kw = available_power_for_session_step(
             step_index=int(abs_step),
             scenario=scenario,
             curve=curve,
             state_of_charge_fraction=float(state_of_charge),
             remaining_site_energy_kwh=float(remaining_site_kwh),
-            pv_generation_kwh_per_step=pv_generation_kwh_per_step,
-            base_load_kwh_per_step=base_load_kwh_per_step,
-            reserved_total_ev_energy_kwh_per_step=reserved_total_ev_energy_kwh_per_step,
-            reserved_pv_ev_energy_kwh_per_step=reserved_pv_ev_energy_kwh_per_step,
-            already_allocated_on_this_charger_kwh=0.0,
+            pv_generation_kw_per_step=pv_generation_kw_per_step,
+            base_load_kw_per_step=base_load_kw_per_step,
+            reserved_total_ev_power_kw_per_step=reserved_total_ev_power_kw_per_step,
+            reserved_pv_ev_power_kw_per_step=reserved_pv_ev_power_kw_per_step,
+            already_allocated_on_this_charger_kw=0.0,
             supply_mode="pv_only",
         )
 
-        pv_alloc_kwh = float(max(pv_alloc_kwh, 0.0))
-        if pv_alloc_kwh > 1e-12:
-            # pv_only => pv_share == pv_alloc (sicherheitshalber clamp)
-            pv_share_kwh = float(np.clip(float(pv_share_kwh), 0.0, pv_alloc_kwh))
-
-            plan_site_kwh_per_step[local_i] += pv_alloc_kwh
-            plan_pv_site_kwh_per_step[local_i] += pv_share_kwh
-
-            reserved_total_ev_energy_kwh_per_step[abs_step] += pv_alloc_kwh
-            reserved_pv_ev_energy_kwh_per_step[abs_step] += pv_share_kwh
-
-            charged_site_kwh += pv_alloc_kwh
-            charged_pv_site_kwh += pv_share_kwh
-            remaining_site_kwh -= pv_alloc_kwh
-
-            battery_energy_kwh = pv_alloc_kwh * charger_efficiency
-            state_of_charge = float(min(1.0, state_of_charge + battery_energy_kwh / battery_capacity_kwh))
-
-            if remaining_site_kwh <= 1e-12 or state_of_charge >= 1.0 - 1e-12:
-                break
-
-        # (2) Grid-only Fallback in ausgewählten Slots
-        if not bool(preferred_grid[local_i]):
+        pv_alloc_kw = float(max(pv_alloc_kw, 0.0))
+        if pv_alloc_kw <= 1e-12:
             continue
 
-        grid_alloc_kwh, _grid_pv_share = available_energy_for_session_step(
-            step_index=int(abs_step),
-            scenario=scenario,
-            curve=curve,
-            state_of_charge_fraction=float(state_of_charge),
-            remaining_site_energy_kwh=float(remaining_site_kwh),
-            pv_generation_kwh_per_step=pv_generation_kwh_per_step,
-            base_load_kwh_per_step=base_load_kwh_per_step,
-            reserved_total_ev_energy_kwh_per_step=reserved_total_ev_energy_kwh_per_step,
-            reserved_pv_ev_energy_kwh_per_step=reserved_pv_ev_energy_kwh_per_step,
-            already_allocated_on_this_charger_kwh=float(pv_alloc_kwh),
-            supply_mode="grid_only",
-        )
+        # pv_only => pv_share == pv_alloc (clamp)
+        pv_share_kw = float(np.clip(float(pv_share_kw), 0.0, pv_alloc_kw))
 
-        grid_alloc_kwh = float(max(grid_alloc_kwh, 0.0))
-        if grid_alloc_kwh <= 1e-12:
-            continue
+        plan_site_kw_per_step[local_i] += pv_alloc_kw
+        plan_pv_site_kw_per_step[local_i] += pv_share_kw
 
-        plan_site_kwh_per_step[local_i] += grid_alloc_kwh
-        plan_market_kwh_per_step[local_i] += grid_alloc_kwh
+        # Reservierungen (kW)
+        reserved_total_ev_power_kw_per_step[abs_step] += pv_alloc_kw
+        reserved_pv_ev_power_kw_per_step[abs_step] += pv_share_kw
 
-        reserved_total_ev_energy_kwh_per_step[abs_step] += grid_alloc_kwh
+        # KPI/SoC (kWh)
+        pv_alloc_kwh = pv_alloc_kw * step_hours_safe
+        remaining_site_kwh -= pv_alloc_kwh
 
-        charged_site_kwh += grid_alloc_kwh
-        charged_market_kwh += grid_alloc_kwh
-        remaining_site_kwh -= grid_alloc_kwh
-
-        battery_energy_kwh = grid_alloc_kwh * charger_efficiency
+        battery_energy_kwh = pv_alloc_kwh * eff
         state_of_charge = float(min(1.0, state_of_charge + battery_energy_kwh / battery_capacity_kwh))
 
-    return {
-        "plan_site_kwh_per_step": plan_site_kwh_per_step,
-        "plan_pv_site_kwh_per_step": plan_pv_site_kwh_per_step,
-        "plan_market_kwh_per_step": plan_market_kwh_per_step,
-        "charged_site_kwh": float(charged_site_kwh),
-        "charged_pv_site_kwh": float(charged_pv_site_kwh),
-        "charged_market_kwh": float(charged_market_kwh),
-        "remaining_site_kwh": float(max(remaining_site_kwh, 0.0)),
-        "final_soc": float(state_of_charge),
-    }
+    # Wenn PV-only schon gereicht hat -> fertig
+    if remaining_site_kwh <= 1e-12 or state_of_charge >= 1.0 - 1e-12:
+        charged_site_kwh = float(np.sum(plan_site_kw_per_step) * step_hours_safe)
+        charged_pv_site_kwh = float(np.sum(np.clip(plan_pv_site_kw_per_step, 0.0, plan_site_kw_per_step)) * step_hours_safe)
+        return {
+            "plan_site_kw_per_step": plan_site_kw_per_step,
+            "plan_pv_site_kw_per_step": plan_pv_site_kw_per_step,
+            "plan_market_kw_per_step": plan_market_kw_per_step,
+            "charged_site_kwh": charged_site_kwh,
+            "charged_pv_site_kwh": charged_pv_site_kwh,
+            "charged_market_kwh": 0.0,
+            "remaining_site_kwh": float(max(required_site_energy_kwh - charged_site_kwh, 0.0)),
+            "final_soc": float(state_of_charge),
+        }
+
+    # ---------------------------------------------------------------------
+    # (2) Grid-only als Market-Fallback: Re-Use der Market-Strategie
+    # ---------------------------------------------------------------------
+    market_res = charging_strategy_market(
+        session_arrival_step=int(start),
+        session_departure_step=int(end_excl),
+        required_site_energy_kwh=float(required_site_energy_kwh),
+        market_price_eur_per_mwh=market_price_eur_per_mwh,
+        pv_generation_kw_per_step=pv_generation_kw_per_step,
+        base_load_kw_per_step=base_load_kw_per_step,
+        reserved_total_ev_power_kw_per_step=reserved_total_ev_power_kw_per_step,
+        reserved_pv_ev_power_kw_per_step=reserved_pv_ev_power_kw_per_step,
+        curve=curve,
+        state_of_charge_at_arrival=float(state_of_charge_at_arrival),
+        scenario=scenario,
+        preallocated_site_kw_per_step=plan_site_kw_per_step,
+        preallocated_pv_site_kw_per_step=plan_pv_site_kw_per_step,
+        supply_mode="grid_only",
+    )
+
+    # charged_market_kwh aus dem Zusatzplan (plan_market) integrieren
+    charged_market_kwh = float(np.sum(np.asarray(market_res["plan_market_kw_per_step"], float)) * step_hours_safe)
+
+    market_res["charged_market_kwh"] = charged_market_kwh
+    return market_res
 
 
 def plan_charging_for_day(
@@ -1815,14 +1801,14 @@ def plan_charging_for_day(
     sessions: list[SampledSession],
     scenario: dict,
     vehicle_curves_by_name: dict[str, VehicleChargingCurve],
-    pv_generation_kwh_per_step: np.ndarray,
-    base_load_kwh_per_step: np.ndarray,
-    reserved_total_ev_energy_kwh_per_step: np.ndarray,
-    reserved_pv_ev_energy_kwh_per_step: np.ndarray,
+    pv_generation_kw_per_step: np.ndarray,
+    base_load_kw_per_step: np.ndarray,
+    reserved_total_ev_power_kw_per_step: np.ndarray,
+    reserved_pv_ev_power_kw_per_step: np.ndarray,
     market_price_eur_per_mwh: np.ndarray | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Plant für einen Kalendertag die Ladeenergie-Zuweisung für alle Ladesessions.
+    Plant für einen Kalendertag die Ladeleistungs-Zuweisung (kW pro Step) für alle Ladesessions.
 
     Die Funktion wählt die Reihenfolge der Planung abhängig von
     ``scenario["charging_strategy"]`` und ruft anschließend pro Session die
@@ -1845,15 +1831,15 @@ def plan_charging_for_day(
         sowie Parameter unter ``scenario["site"]`` und ``scenario["vehicles"]``.
     vehicle_curves_by_name:
         Zuordnung von ``vehicle_name`` zu ``VehicleChargingCurve``.
-    pv_generation_kwh_per_step:
-        PV-Erzeugung pro Simulationsschritt [kWh/Schritt].
-    base_load_kwh_per_step:
-        Grundlast pro Simulationsschritt [kWh/Schritt].
-    reserved_total_ev_energy_kwh_per_step:
-        Bereits reservierte EV-Ladeenergie (gesamt) pro Schritt [kWh/Schritt].
+    pv_generation_kw_per_step:
+        PV-Erzeugung pro Simulationsschritt [kW].
+    base_load_kw_per_step:
+        Grundlast pro Simulationsschritt [kW].
+    reserved_total_ev_power_kw_per_step:
+        Bereits reservierte EV-Ladeleistung (gesamt) pro Schritt [kW].
         Wird in-place um die geplanten Zuweisungen dieser Funktion erhöht.
-    reserved_pv_ev_energy_kwh_per_step:
-        Bereits reservierter PV-Anteil der EV-Ladeenergie pro Schritt [kWh/Schritt].
+    reserved_pv_ev_power_kw_per_step:
+        Bereits reservierter PV-Anteil der EV-Ladeleistung pro Schritt [kW].
         Wird in-place um die geplanten PV-Zuweisungen dieser Funktion erhöht.
     market_price_eur_per_mwh:
         Marktpreis-Zeitreihe [€/MWh]. Erforderlich für ``"market"`` sowie als
@@ -1863,7 +1849,7 @@ def plan_charging_for_day(
     -------
     list[dict[str, Any]]
         Liste von Ergebnis-Dictionaries, je Session ein Eintrag. Enthält u. a.
-        Plan-Zeitreihen (z. B. ``plan_site_kwh_per_step``) sowie Summenwerte
+        Plan-Zeitreihen (z. B. ``plan_site_kw_per_step``) sowie Summenwerte
         (z. B. ``charged_site_kwh``, ``remaining_site_kwh``) und Metadaten
         (z. B. ``session_id``, ``arrival_time``).
 
@@ -1884,6 +1870,7 @@ def plan_charging_for_day(
         if curve is None:
             raise ValueError(f"Keine Ladekurve für vehicle_name='{session.vehicle_name}' gefunden.")
 
+        # Energiebedarf bleibt bewusst in kWh (SoC-Ziel -> Energiemenge)
         required_site_energy_kwh = required_site_energy_for_session(
             scenario=scenario,
             curve=curve,
@@ -1896,10 +1883,10 @@ def plan_charging_for_day(
                 session_arrival_step=int(session.arrival_step),
                 session_departure_step=int(session.departure_step),
                 required_site_energy_kwh=float(required_site_energy_kwh),
-                pv_generation_kwh_per_step=pv_generation_kwh_per_step,
-                base_load_kwh_per_step=base_load_kwh_per_step,
-                reserved_total_ev_energy_kwh_per_step=reserved_total_ev_energy_kwh_per_step,
-                reserved_pv_ev_energy_kwh_per_step=reserved_pv_ev_energy_kwh_per_step,
+                pv_generation_kw_per_step=pv_generation_kw_per_step,
+                base_load_kw_per_step=base_load_kw_per_step,
+                reserved_total_ev_power_kw_per_step=reserved_total_ev_power_kw_per_step,
+                reserved_pv_ev_power_kw_per_step=reserved_pv_ev_power_kw_per_step,
                 curve=curve,
                 state_of_charge_at_arrival=float(session.state_of_charge_at_arrival),
             )
@@ -1914,19 +1901,17 @@ def plan_charging_for_day(
                 session_departure_step=int(session.departure_step),
                 required_site_energy_kwh=float(required_site_energy_kwh),
                 market_price_eur_per_mwh=market_price_eur_per_mwh,
-                pv_generation_kwh_per_step=pv_generation_kwh_per_step,
-                base_load_kwh_per_step=base_load_kwh_per_step,
-                reserved_total_ev_energy_kwh_per_step=reserved_total_ev_energy_kwh_per_step,
-                reserved_pv_ev_energy_kwh_per_step=reserved_pv_ev_energy_kwh_per_step,
+                pv_generation_kw_per_step=pv_generation_kw_per_step,
+                base_load_kw_per_step=base_load_kw_per_step,
+                reserved_total_ev_power_kw_per_step=reserved_total_ev_power_kw_per_step,
+                reserved_pv_ev_power_kw_per_step=reserved_pv_ev_power_kw_per_step,
                 curve=curve,
                 state_of_charge_at_arrival=float(session.state_of_charge_at_arrival),
             )
 
         elif strategy in ("pv", "generation"):
             if market_price_eur_per_mwh is None:
-                raise ValueError(
-                    "charging_strategy='pv' benötigt market_price_eur_per_mwh (Fallback-Ranking)."
-                )
+                raise ValueError("charging_strategy='pv' benötigt market_price_eur_per_mwh (Fallback-Ranking).")
 
             session_result = charging_strategy_pv(
                 scenario=scenario,
@@ -1934,10 +1919,10 @@ def plan_charging_for_day(
                 session_departure_step=int(session.departure_step),
                 required_site_energy_kwh=float(required_site_energy_kwh),
                 market_price_eur_per_mwh=market_price_eur_per_mwh,
-                pv_generation_kwh_per_step=pv_generation_kwh_per_step,
-                base_load_kwh_per_step=base_load_kwh_per_step,
-                reserved_total_ev_energy_kwh_per_step=reserved_total_ev_energy_kwh_per_step,
-                reserved_pv_ev_energy_kwh_per_step=reserved_pv_ev_energy_kwh_per_step,
+                pv_generation_kw_per_step=pv_generation_kw_per_step,
+                base_load_kw_per_step=base_load_kw_per_step,
+                reserved_total_ev_power_kw_per_step=reserved_total_ev_power_kw_per_step,
+                reserved_pv_ev_power_kw_per_step=reserved_pv_ev_power_kw_per_step,
                 curve=curve,
                 state_of_charge_at_arrival=float(session.state_of_charge_at_arrival),
             )
@@ -1999,10 +1984,10 @@ def simulate_site_fcfs_with_planning(
     timestamps: pd.DatetimeIndex,
     sessions: list[SampledSession],
     vehicle_curves_by_name: dict[str, VehicleChargingCurve],
-    pv_generation_kwh_per_step: np.ndarray,
-    base_load_kwh_per_step: np.ndarray,
-    reserved_total_ev_energy_kwh_per_step: Optional[np.ndarray] = None,
-    reserved_pv_ev_energy_kwh_per_step: Optional[np.ndarray] = None,
+    pv_generation_kw_per_step: np.ndarray,
+    base_load_kw_per_step: np.ndarray,
+    reserved_total_ev_power_kw_per_step: Optional[np.ndarray] = None,
+    reserved_pv_ev_power_kw_per_step: Optional[np.ndarray] = None,
     market_price_eur_per_mwh: Optional[np.ndarray] = None,
     record_debug: bool = False,
 ) -> tuple[np.ndarray, list[dict[str, Any]], np.ndarray, np.ndarray, Optional[pd.DataFrame]]:
@@ -2013,25 +1998,23 @@ def simulate_site_fcfs_with_planning(
     ------
     1) FCFS-Admission: Charger-Vergabe, Sessions ohne freien Charger -> "drive_off"
     2) Tagesplanung: pro Arrival-Tag ``plan_charging_for_day(...)`` (nutzt Strategien + Reservierungen)
-    3) Lastgang: ``ev_load_kw`` aus reservierter EV-Energie (kWh/Step) / step_hours
+    3) Lastgang: ``ev_load_kw`` entspricht der reservierten EV-Leistung (kW/Step)
     4) Optional: Debug-Bilanz als DataFrame
 
     Rückgabe
     -------
-    (ev_load_kw, sessions_out, reserved_total_kwh, reserved_pv_kwh, debug_df)
+    (ev_load_kw, sessions_out, reserved_total_kw, reserved_pv_kw, debug_df)
     """
     n_total = int(len(timestamps))
-    time_resolution_min = int(scenario["time_resolution_min"])
-    step_hours = float(time_resolution_min) / 60.0
 
     # Reservierungs-Arrays (global, in-place durch Strategien gefüllt)
-    if reserved_total_ev_energy_kwh_per_step is None:
-        reserved_total_ev_energy_kwh_per_step = np.zeros(n_total, dtype=float)
-    if reserved_pv_ev_energy_kwh_per_step is None:
-        reserved_pv_ev_energy_kwh_per_step = np.zeros(n_total, dtype=float)
+    if reserved_total_ev_power_kw_per_step is None:
+        reserved_total_ev_power_kw_per_step = np.zeros(n_total, dtype=float)
+    if reserved_pv_ev_power_kw_per_step is None:
+        reserved_pv_ev_power_kw_per_step = np.zeros(n_total, dtype=float)
 
-    reserved_total = reserved_total_ev_energy_kwh_per_step
-    reserved_pv = reserved_pv_ev_energy_kwh_per_step
+    reserved_total = reserved_total_ev_power_kw_per_step
+    reserved_pv = reserved_pv_ev_power_kw_per_step
 
     number_chargers = int(scenario["site"]["number_chargers"])
     charger_occupied_until: list[int] = [0] * number_chargers
@@ -2061,19 +2044,19 @@ def simulate_site_fcfs_with_planning(
                     "vehicle_class": session.vehicle_class,
                     "arrival_step": a,
                     "departure_step": d,
-                    "arrival_time": session.arrival_time,             
-                    "departure_time": session.departure_time,         
-                    "parking_duration_min": float(session.duration_minutes),  
-                    "state_of_charge_at_arrival": float(session.state_of_charge_at_arrival), 
+                    "arrival_time": session.arrival_time,
+                    "departure_time": session.departure_time,
+                    "parking_duration_min": float(session.duration_minutes),
+                    "state_of_charge_at_arrival": float(session.state_of_charge_at_arrival),
                     "status": "drive_off",
                     "charger_id": None,
                     "charged_site_kwh": 0.0,
                     "charged_pv_site_kwh": 0.0,
                     "remaining_site_kwh": np.nan,
                     "final_soc": float(np.clip(session.state_of_charge_at_arrival, 0.0, 1.0)),
-                    "plan_site_kwh_per_step": np.zeros(0, dtype=float),
-                    "plan_pv_site_kwh_per_step": np.zeros(0, dtype=float),
-                    "plan_market_kwh_per_step": np.zeros(0, dtype=float),
+                    "plan_site_kw_per_step": np.zeros(0, dtype=float),
+                    "plan_pv_site_kw_per_step": np.zeros(0, dtype=float),
+                    "plan_market_kw_per_step": np.zeros(0, dtype=float),
                 }
             )
             continue
@@ -2092,10 +2075,10 @@ def simulate_site_fcfs_with_planning(
             sessions=day_sessions,
             scenario=scenario,
             vehicle_curves_by_name=vehicle_curves_by_name,
-            pv_generation_kwh_per_step=np.asarray(pv_generation_kwh_per_step, dtype=float),
-            base_load_kwh_per_step=np.asarray(base_load_kwh_per_step, dtype=float),
-            reserved_total_ev_energy_kwh_per_step=reserved_total,
-            reserved_pv_ev_energy_kwh_per_step=reserved_pv,
+            pv_generation_kw_per_step=np.asarray(pv_generation_kw_per_step, dtype=float),
+            base_load_kw_per_step=np.asarray(base_load_kw_per_step, dtype=float),
+            reserved_total_ev_power_kw_per_step=reserved_total,
+            reserved_pv_ev_power_kw_per_step=reserved_pv,
             market_price_eur_per_mwh=np.asarray(market_price_eur_per_mwh, dtype=float)
             if market_price_eur_per_mwh is not None
             else None,
@@ -2108,17 +2091,18 @@ def simulate_site_fcfs_with_planning(
             r["charger_id"] = int(charger_id_by_session_id[session_identifier])
             sessions_out.append(r)
 
-    ev_load_kw = np.asarray(reserved_total, dtype=float) / max(step_hours, 1e-12)
+    # EV-Lastgang ist jetzt direkt die reservierte Leistung
+    ev_load_kw = np.asarray(reserved_total, dtype=float)
 
     debug_df = None
     if record_debug:
         debug_df = _compute_debug_balance(
             timestamps=timestamps,
             scenario=scenario,
-            pv_generation_kwh_per_step=pv_generation_kwh_per_step,
-            base_load_kwh_per_step=base_load_kwh_per_step,
-            reserved_total_ev_energy_kwh_per_step=reserved_total,
-            reserved_pv_ev_energy_kwh_per_step=reserved_pv,
+            pv_generation_kw_per_step=pv_generation_kw_per_step,
+            base_load_kw_per_step=base_load_kw_per_step,
+            reserved_total_ev_power_kw_per_step=reserved_total,
+            reserved_pv_ev_power_kw_per_step=reserved_pv,
         )
 
     return ev_load_kw, sessions_out, reserved_total, reserved_pv, debug_df
@@ -2234,19 +2218,19 @@ def _compute_debug_balance(
     *,
     timestamps: pd.DatetimeIndex,
     scenario: dict,
-    pv_generation_kwh_per_step: np.ndarray,
-    base_load_kwh_per_step: np.ndarray,
-    reserved_total_ev_energy_kwh_per_step: np.ndarray,
-    reserved_pv_ev_energy_kwh_per_step: np.ndarray,
+    pv_generation_kw_per_step: np.ndarray,
+    base_load_kw_per_step: np.ndarray,
+    reserved_total_ev_power_kw_per_step: np.ndarray,
+    reserved_pv_ev_power_kw_per_step: np.ndarray,
 ) -> pd.DataFrame:
     """
-    Erstellt eine Debug-Energiebilanz pro Simulationsschritt als DataFrame.
+    Erstellt eine Debug-Leistungsbilanz pro Simulationsschritt als DataFrame.
 
     Die Bilanz zerlegt PV-Erzeugung und Netzbezug in nachvollziehbare Flüsse:
 
     - PV → Grundlast: PV deckt zuerst die Grundlast bis zur Höhe der Grundlast.
     - PV → EV: verbleibender PV-Überschuss wird den EV-Ladevorgängen zugeordnet
-    (begrenzt durch den in ``reserved_pv_ev_energy_kwh_per_step`` getrackten PV-Anteil).
+      (begrenzt durch den in ``reserved_pv_ev_power_kw_per_step`` getrackten PV-Anteil).
     - Netz → Grundlast: Rest-Grundlast wird aus dem Netz gedeckt (begrenzt durch das Netzlimit).
     - Netz → EV: verbleibender Netz-Spielraum nach Grundlast wird den EV-Ladevorgängen zugeordnet.
 
@@ -2259,33 +2243,30 @@ def _compute_debug_balance(
         Simulations-Zeitindex (Länge = Anzahl Simulationsschritte).
     scenario:
         Szenario-Konfiguration. Verwendet:
-        - ``scenario["time_resolution_min"]`` zur Umrechnung kW↔kWh,
         - ``scenario["site"]["grid_limit_p_avb_kw"]`` als Netzanschlussgrenze [kW].
-    pv_generation_kwh_per_step:
-        PV-Erzeugung pro Schritt [kWh/Schritt].
-    base_load_kwh_per_step:
-        Grundlast pro Schritt [kWh/Schritt].
-    reserved_total_ev_energy_kwh_per_step:
-        Gesamte EV-Ladeenergie pro Schritt (PV + Netz) [kWh/Schritt].
-    reserved_pv_ev_energy_kwh_per_step:
-        Getrackter PV-Anteil der EV-Ladeenergie pro Schritt [kWh/Schritt].
+    pv_generation_kw_per_step:
+        PV-Erzeugung pro Schritt [kW/Schritt].
+    base_load_kw_per_step:
+        Grundlast pro Schritt [kW/Schritt].
+    reserved_total_ev_power_kw_per_step:
+        Gesamte EV-Ladeleistung pro Schritt (PV + Netz) [kW/Schritt].
+    reserved_pv_ev_power_kw_per_step:
+        Getrackter PV-Anteil der EV-Ladeleistung pro Schritt [kW/Schritt].
 
     Rückgabe
     --------
     pd.DataFrame
-        DataFrame mit Zeitstempel und Bilanzspalten (alle in kWh/Schritt), u. a.:
-        - ``pv_to_base_kwh_per_step``, ``pv_to_ev_kwh_per_step``
-        - ``grid_to_base_kwh_per_step``, ``grid_to_ev_kwh_per_step``
-        - ``grid_limit_kwh_per_step`` (konstant pro Schritt)
+        DataFrame mit Zeitstempel und Bilanzspalten (alle in kW/Schritt), u. a.:
+        - ``pv_to_base_kw_per_step``, ``pv_to_ev_kw_per_step``
+        - ``grid_to_base_kw_per_step``, ``grid_to_ev_kw_per_step``
+        - ``grid_limit_kw_per_step`` (konstant pro Schritt)
     """
-    time_resolution_min = int(scenario["time_resolution_min"])
-    step_hours = float(time_resolution_min) / 60.0
-    grid_limit_kwh = float(scenario["site"]["grid_limit_p_avb_kw"]) * step_hours
+    grid_limit_kw = float(scenario["site"]["grid_limit_p_avb_kw"])
 
-    pv = np.asarray(pv_generation_kwh_per_step, dtype=float)
-    base = np.asarray(base_load_kwh_per_step, dtype=float)
-    ev = np.asarray(reserved_total_ev_energy_kwh_per_step, dtype=float)
-    pv_ev_tracked = np.asarray(reserved_pv_ev_energy_kwh_per_step, dtype=float)
+    pv = np.asarray(pv_generation_kw_per_step, dtype=float)
+    base = np.asarray(base_load_kw_per_step, dtype=float)
+    ev = np.asarray(reserved_total_ev_power_kw_per_step, dtype=float)
+    pv_ev_tracked = np.asarray(reserved_pv_ev_power_kw_per_step, dtype=float)
 
     pv_to_base = np.minimum(pv, base)
     base_remaining = base - pv_to_base
@@ -2294,22 +2275,22 @@ def _compute_debug_balance(
     pv_to_ev = np.minimum(pv_ev_tracked, pv_after_base)
     ev_remaining = np.maximum(ev - pv_to_ev, 0.0)
 
-    grid_to_base = np.minimum(base_remaining, grid_limit_kwh)
-    grid_headroom_after_base = np.maximum(grid_limit_kwh - grid_to_base, 0.0)
+    grid_to_base = np.minimum(base_remaining, grid_limit_kw)
+    grid_headroom_after_base = np.maximum(grid_limit_kw - grid_to_base, 0.0)
     grid_to_ev = np.minimum(ev_remaining, grid_headroom_after_base)
 
     dataframe = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(timestamps),
-            "pv_generation_kwh_per_step": pv,
-            "base_load_kwh_per_step": base,
-            "ev_load_kwh_per_step": ev,
-            "pv_ev_tracked_kwh_per_step": pv_ev_tracked,
-            "pv_to_base_kwh_per_step": pv_to_base,
-            "pv_to_ev_kwh_per_step": pv_to_ev,
-            "grid_to_base_kwh_per_step": grid_to_base,
-            "grid_to_ev_kwh_per_step": grid_to_ev,
-            "grid_limit_kwh_per_step": grid_limit_kwh,
+            "pv_generation_kw_per_step": pv,
+            "base_load_kw_per_step": base,
+            "ev_load_kw_per_step": ev,
+            "pv_ev_tracked_kw_per_step": pv_ev_tracked,
+            "pv_to_base_kw_per_step": pv_to_base,
+            "pv_to_ev_kw_per_step": pv_to_ev,
+            "grid_to_base_kw_per_step": grid_to_base,
+            "grid_to_ev_kw_per_step": grid_to_ev,
+            "grid_limit_kw_per_step": grid_limit_kw,
         }
     )
     return dataframe
@@ -2469,97 +2450,140 @@ def summarize_sessions(sessions_out: list[dict[str, Any]], *, tol_kwh: float = 1
     }
 
 
-def build_plugged_sessions_preview_table(sessions_out: list[dict[str, Any]], *, n: int = 10) -> pd.DataFrame:
+def build_plugged_sessions_preview_table(
+    sessions_out: list[dict[str, Any]], *, n: int = 10
+) -> pd.DataFrame:
     """
     Erzeugt eine Vorschau-Tabelle für die ersten n erfolgreichen Ladesessions.
-    
+
+    (Umstellung auf kW/Step-Logik)
+    - Summen bleiben Energiemengen in kWh (charged_*, remaining_*), weil das über viele Steps
+      integriert wird und weiterhin sinnvoll ist.
+    - Zusätzlich werden mittlere Leistungen über die Session ergänzt (avg_*_kw), abgeleitet aus
+      Energie / Dauer.
+
     Parameter
     ---------
     sessions_out:
         Session-Ergebnisliste aus der Simulation.
     n:
         Maximale Anzahl Zeilen.
-    
+
     Rückgabe
     --------
     pd.DataFrame
         Vorschau mit wichtigen Session-Attributen.
     """
-    rows = []
+    rows: list[dict[str, Any]] = []
+
     for session in sessions_out:
         if str(session.get("status")) != "plugged":
             continue
+
+        a = session.get("arrival_time")
+        d = session.get("departure_time")
+        duration_h = np.nan
+        try:
+            if a is not None and d is not None:
+                duration_h = float((pd.to_datetime(d) - pd.to_datetime(a)).total_seconds()) / 3600.0
+        except Exception:
+            duration_h = np.nan
+        duration_h = float(duration_h) if np.isfinite(duration_h) and duration_h > 0.0 else np.nan
+
+        charged_site_kwh = float(session.get("charged_site_kwh", 0.0) or 0.0)
+        charged_pv_site_kwh = float(session.get("charged_pv_site_kwh", 0.0) or 0.0)
+        charged_market_kwh = float(session.get("charged_market_kwh", 0.0) or 0.0)
+
+        avg_site_kw = charged_site_kwh / duration_h if np.isfinite(duration_h) else np.nan
+        avg_pv_kw = charged_pv_site_kwh / duration_h if np.isfinite(duration_h) else np.nan
+        avg_grid_kw = (charged_site_kwh - charged_pv_site_kwh) / duration_h if np.isfinite(duration_h) else np.nan
+        avg_market_kw = charged_market_kwh / duration_h if np.isfinite(duration_h) else np.nan
+
         rows.append(
             {
                 "session_id": session.get("session_id"),
                 "charger_id": session.get("charger_id"),
-                "arrival_time": session.get("arrival_time"),
-                "departure_time": session.get("departure_time"),
+                "arrival_time": a,
+                "departure_time": d,
                 "parking_duration_min": session.get("parking_duration_min"),
                 "soc_arrival": session.get("state_of_charge_at_arrival"),
                 "soc_end": session.get("final_soc"),
-                "charged_site_kwh": session.get("charged_site_kwh"),
-                "charged_pv_site_kwh": session.get("charged_pv_site_kwh"),
+                "charged_site_kwh": charged_site_kwh,
+                "charged_pv_site_kwh": charged_pv_site_kwh,
+                "charged_market_kwh": charged_market_kwh,
                 "remaining_site_kwh": session.get("remaining_site_kwh"),
+                "avg_site_kw": float(avg_site_kw) if np.isfinite(avg_site_kw) else np.nan,
+                "avg_pv_kw": float(avg_pv_kw) if np.isfinite(avg_pv_kw) else np.nan,
+                "avg_grid_kw": float(avg_grid_kw) if np.isfinite(avg_grid_kw) else np.nan,
+                "avg_market_kw": float(avg_market_kw) if np.isfinite(avg_market_kw) else np.nan,
                 "vehicle_name": session.get("vehicle_name"),
             }
         )
+
     dataframe = pd.DataFrame(rows)
     if len(dataframe) == 0:
         return dataframe
-    return dataframe.sort_values(["arrival_time", "session_id"], na_position="last").head(int(n)).reset_index(drop=True)
+
+    return (
+        dataframe.sort_values(["arrival_time", "session_id"], na_position="last")
+        .head(int(n))
+        .reset_index(drop=True)
+    )
+
 
 
 def build_timeseries_dataframe(
     *,
     timestamps: pd.DatetimeIndex,
     scenario: dict,
-    base_load_kwh_per_step: np.ndarray,
-    pv_generation_kwh_per_step: np.ndarray,
+    base_load_kw_per_step: np.ndarray,
+    pv_generation_kw_per_step: np.ndarray,
     ev_load_kw: np.ndarray,
     market_price_eur_per_mwh: Optional[np.ndarray] = None,
     debug_df: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
     Baut eine Zeitreihen-Tabelle für Auswertung und Plots.
-    
+
     Parameter
     ---------
     timestamps:
         Simulationszeitindex.
     scenario:
         Szenario-Dictionary (Zeitauflösung).
-        base_load_kwh_per_step:
-            Grundlast als Energie pro Schritt.
-        pv_generation_kwh_per_step:
-            PV-Erzeugung als Energie pro Schritt.
-        ev_load_kw:
-            EV-Ladeleistung als Leistung pro Schritt.
-        market_price_eur_per_mwh:
-            Optional: Marktpreis pro Schritt.
-        debug_df:
-            Optional: Debug-Bilanzdaten; Spalten werden übernommen, falls kompatibel.
-    
+    base_load_kw_per_step:
+        Grundlast als Leistung pro Schritt [kW/Schritt].
+    pv_generation_kw_per_step:
+        PV-Erzeugung als Leistung pro Schritt [kW/Schritt].
+    ev_load_kw:
+        EV-Ladeleistung als Leistung pro Schritt [kW/Schritt].
+    market_price_eur_per_mwh:
+        Optional: Marktpreis pro Schritt.
+    debug_df:
+        Optional: Debug-Bilanzdaten; Spalten werden übernommen, falls kompatibel.
+
     Rückgabe
     --------
     pd.DataFrame
         Einheitliche Tabelle (timestamp, base_load_kw, pv_generation_kw, ev_load_kw, ...).
     """
-    step_h = get_time_resolution_min_from_scenario(scenario) / 60.0
     dataframe = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(timestamps),
-            "base_load_kw": np.asarray(base_load_kwh_per_step, float) / max(step_h, 1e-12),
-            "pv_generation_kw": np.asarray(pv_generation_kwh_per_step, float) / max(step_h, 1e-12),
-            "ev_load_kw": np.asarray(ev_load_kw, float),
+            "base_load_kw": np.asarray(base_load_kw_per_step, dtype=float),
+            "pv_generation_kw": np.asarray(pv_generation_kw_per_step, dtype=float),
+            "ev_load_kw": np.asarray(ev_load_kw, dtype=float),
         }
     )
+
     if market_price_eur_per_mwh is not None:
-        dataframe["market_price_eur_per_mwh"] = np.asarray(market_price_eur_per_mwh, float)
+        dataframe["market_price_eur_per_mwh"] = np.asarray(market_price_eur_per_mwh, dtype=float)
+
     if debug_df is not None and len(debug_df) == len(dataframe):
         for c in debug_df.columns:
             if c != "timestamp" and c not in dataframe.columns:
                 dataframe[c] = debug_df[c].to_numpy()
+
     return dataframe
 
 
@@ -2602,12 +2626,10 @@ def build_site_overview_plot_data(*, timeseries_dataframe: pd.DataFrame, scenari
 def build_ev_power_by_source_timeseries(timeseries_dataframe: pd.DataFrame) -> pd.DataFrame:
     """
     Leitet EV-Leistung nach Quelle (PV vs Netz) als Zeitreihe ab.
-    
-    Parameter
-    ---------
-    timeseries_dataframe:
-        Zeitreihen-DataFrame der Simulation (ggf. mit Debug-Spalten).
-    
+
+    Erwartet: timeseries_dataframe enthält Leistungen in kW (ev_load_kw etc.).
+    Optional können Debug-Spalten bereits als kW vorliegen.
+
     Rückgabe
     --------
     pd.DataFrame
@@ -2615,36 +2637,67 @@ def build_ev_power_by_source_timeseries(timeseries_dataframe: pd.DataFrame) -> p
     """
     dataframe = timeseries_dataframe.copy()
     dataframe["timestamp"] = pd.to_datetime(dataframe["timestamp"])
-    step_h = (
-        float((dataframe["timestamp"].iloc[1] - dataframe["timestamp"].iloc[0]).total_seconds()) / 3600.0
-        if len(dataframe) >= 2 else 0.25
-    )
-    step_h = max(step_h, 1e-12)
 
     ev_kw = dataframe["ev_load_kw"].astype(float).fillna(0.0).to_numpy()
 
-    if "pv_to_ev_kwh_per_step" in dataframe.columns:
-        pv_kw = dataframe["pv_to_ev_kwh_per_step"].astype(float).fillna(0.0).to_numpy() / step_h
-        grid_kw = dataframe.get("grid_to_ev_kwh_per_step")
-        if isinstance(grid_kw, pd.Series):
-            grid_kw = grid_kw.astype(float).fillna(0.0).to_numpy() / step_h
+    # Falls Debug-Bilanz bereits in kW existiert, direkt nutzen.
+    if "pv_to_ev_kw" in dataframe.columns:
+        pv_kw = dataframe["pv_to_ev_kw"].astype(float).fillna(0.0).to_numpy()
+        grid_series = dataframe.get("grid_to_ev_kw")
+        if isinstance(grid_series, pd.Series):
+            grid_kw = grid_series.astype(float).fillna(0.0).to_numpy()
         else:
             grid_kw = np.maximum(ev_kw - pv_kw, 0.0)
-    elif "pv_ev_tracked_kwh_per_step" in dataframe.columns:
-        pv_kw = dataframe["pv_ev_tracked_kwh_per_step"].astype(float).fillna(0.0).to_numpy() / step_h
+
+    elif "pv_ev_tracked_kw_per_step" in dataframe.columns:
+        pv_kw = dataframe["pv_ev_tracked_kw_per_step"].astype(float).fillna(0.0).to_numpy()
         pv_kw = np.clip(pv_kw, 0.0, ev_kw)
         grid_kw = np.maximum(ev_kw - pv_kw, 0.0)
+
+    # Backward-compat (falls noch kWh/Step-Spalten vorhanden sind):
+    elif "pv_to_ev_kwh_per_step" in dataframe.columns or "pv_ev_tracked_kwh_per_step" in dataframe.columns:
+        step_h = (
+            float((dataframe["timestamp"].iloc[1] - dataframe["timestamp"].iloc[0]).total_seconds()) / 3600.0
+            if len(dataframe) >= 2
+            else 0.25
+        )
+        step_h = max(step_h, 1e-12)
+
+        if "pv_to_ev_kwh_per_step" in dataframe.columns:
+            pv_kw = dataframe["pv_to_ev_kwh_per_step"].astype(float).fillna(0.0).to_numpy() / step_h
+            grid_series = dataframe.get("grid_to_ev_kwh_per_step")
+            if isinstance(grid_series, pd.Series):
+                grid_kw = grid_series.astype(float).fillna(0.0).to_numpy() / step_h
+            else:
+                grid_kw = np.maximum(ev_kw - pv_kw, 0.0)
+        else:
+            pv_kw = dataframe["pv_ev_tracked_kwh_per_step"].astype(float).fillna(0.0).to_numpy() / step_h
+            pv_kw = np.clip(pv_kw, 0.0, ev_kw)
+            grid_kw = np.maximum(ev_kw - pv_kw, 0.0)
+
     else:
         pv_kw = np.zeros_like(ev_kw)
         grid_kw = ev_kw
 
-    return pd.DataFrame({"timestamp": dataframe["timestamp"], "ev_from_pv_kw": pv_kw, "ev_from_grid_kw": grid_kw})
+    return pd.DataFrame(
+        {
+            "timestamp": dataframe["timestamp"],
+            "ev_from_pv_kw": pv_kw,
+            "ev_from_grid_kw": grid_kw,
+        }
+    )
 
 
-def build_charger_traces_dataframe(*, sessions_out: list[dict[str, Any]], scenario: dict, vehicle_curves_by_name: dict[str, VehicleChargingCurve], timestamps: pd.DatetimeIndex) -> pd.DataFrame:
+def build_charger_traces_dataframe(
+    *,
+    sessions_out: list[dict[str, Any]],
+    scenario: dict,
+    vehicle_curves_by_name: dict[str, VehicleChargingCurve],
+    timestamps: pd.DatetimeIndex,
+) -> pd.DataFrame:
     """
     Erzeugt einen zeitaufgelösten Trace pro Ladepunkt und Session.
-    
+
     Parameter
     ---------
     sessions_out:
@@ -2655,12 +2708,11 @@ def build_charger_traces_dataframe(*, sessions_out: list[dict[str, Any]], scenar
         Ladekurven inkl. Batteriekapazitäten.
     timestamps:
         Simulationszeitindex.
-    
+
     Rückgabe
     --------
     pd.DataFrame
         Zeilen pro (Zeit, Ladepunkt) mit Leistung, PV-Anteil und SoC.
-    
     """
     step_h = get_time_resolution_min_from_scenario(scenario) / 60.0
     eff = float(scenario["site"].get("charger_efficiency", 1.0))
@@ -2678,12 +2730,23 @@ def build_charger_traces_dataframe(*, sessions_out: list[dict[str, Any]], scenar
             continue
         window_length_steps = d - a
 
-        plan_site = np.asarray(session.get("plan_site_kwh_per_step", np.zeros(0)), float).reshape(-1)[:window_length_steps]
-        plan_pv = np.asarray(session.get("plan_pv_site_kwh_per_step", np.zeros(0)), float).reshape(-1)[:window_length_steps]
+        plan_site = (
+            np.asarray(session.get("plan_site_kw_per_step", np.zeros(0)), dtype=float)
+            .reshape(-1)[:window_length_steps]
+        )
+        plan_pv = (
+            np.asarray(session.get("plan_pv_site_kw_per_step", np.zeros(0)), dtype=float)
+            .reshape(-1)[:window_length_steps]
+        )
+
         if len(plan_site) < window_length_steps:
-            temporary_dataframe = np.zeros(window_length_steps, float); temporary_dataframe[:len(plan_site)] = plan_site; plan_site = temporary_dataframe
+            tmp = np.zeros(window_length_steps, dtype=float)
+            tmp[:len(plan_site)] = plan_site
+            plan_site = tmp
         if len(plan_pv) < window_length_steps:
-            temporary_dataframe = np.zeros(window_length_steps, float); temporary_dataframe[:len(plan_pv)] = plan_pv; plan_pv = temporary_dataframe
+            tmp = np.zeros(window_length_steps, dtype=float)
+            tmp[:len(plan_pv)] = plan_pv
+            plan_pv = tmp
 
         soc0 = session.get("state_of_charge_at_arrival")
         soc0 = float(np.clip(float(soc0), 0.0, 1.0)) if soc0 is not None else np.nan
@@ -2691,27 +2754,31 @@ def build_charger_traces_dataframe(*, sessions_out: list[dict[str, Any]], scenar
         curve = vehicle_curves_by_name.get(str(session.get("vehicle_name", "")))
         cap = float(max(getattr(curve, "battery_capacity_kwh", 1e-12), 1e-12))
 
-        batt_added_before = np.concatenate(([0.0], np.cumsum(plan_site[:-1]) * eff))
+        # Battery-energy increment uses energy = power * hours; power is site-side.
+        batt_added_before = np.concatenate(([0.0], np.cumsum(plan_site[:-1]) * step_h * eff))
+
         soc_trace = (
             np.clip(soc0 + batt_added_before / cap, 0.0, 1.0)
             if np.isfinite(soc0)
             else np.full(window_length_steps, np.nan)
         )
+
         for i in range(window_length_steps):
             abs_step = a + i
-            site_kwh = float(plan_site[i])
-            pv_kwh = float(np.clip(plan_pv[i], 0.0, site_kwh))
+            site_kw = float(plan_site[i])
+            pv_kw = float(np.clip(plan_pv[i], 0.0, site_kw))
+
             rows.append(
                 {
                     "timestamp": pd.Timestamp(timestamps[abs_step]),
                     "charger_id": None if session.get("charger_id") is None else int(session["charger_id"]),
                     "session_id": session.get("session_id"),
                     "vehicle_name": session.get("vehicle_name"),
-                    "power_kw": site_kwh / max(step_h, 1e-12),
-                    "pv_power_kw": pv_kwh / max(step_h, 1e-12),
+                    "power_kw": site_kw,
+                    "pv_power_kw": pv_kw,
                     "soc": float(soc_trace[i]) if np.isfinite(soc_trace[i]) else np.nan,
                     "is_plugged": True,
-                    "is_charging": bool(site_kwh > 1e-12),
+                    "is_charging": bool(site_kw > 1e-12),
                 }
             )
 
@@ -2829,10 +2896,15 @@ def build_charger_power_heatmap_matrix(charger_traces_dataframe: pd.DataFrame, *
     return {"matrix": pivot.to_numpy(float).T, "timestamps": timestamp_list, "charger_ids": charger_ids}
 
 
-def build_ev_power_by_mode_timeseries_dataframe(*, timeseries_dataframe: pd.DataFrame, sessions_out: list[dict[str, Any]], scenario: dict) -> pd.DataFrame:
+def build_ev_power_by_mode_timeseries_dataframe(
+    *,
+    timeseries_dataframe: pd.DataFrame,
+    sessions_out: list[dict[str, Any]],
+    scenario: dict,
+) -> pd.DataFrame:
     """
     Aggregiert EV-Leistung nach Lademodus (z. B. PV/Market/Immediate).
-    
+
     Parameter
     ---------
     timeseries_dataframe:
@@ -2849,52 +2921,69 @@ def build_ev_power_by_mode_timeseries_dataframe(*, timeseries_dataframe: pd.Data
     """
     dataframe = timeseries_dataframe.copy()
     dataframe["timestamp"] = pd.to_datetime(dataframe["timestamp"])
-    n = len(dataframe)
+    n = int(len(dataframe))
 
-    step_h = get_time_resolution_min_from_scenario(scenario) / 60.0
     strategy = str(scenario.get("charging_strategy", "immediate")).strip().lower()
 
-    ev_gen = np.zeros(n, float)
-    ev_market = np.zeros(n, float)
-    ev_imm = np.zeros(n, float)
+    ev_gen_kw = np.zeros(n, dtype=float)
+    ev_market_kw = np.zeros(n, dtype=float)
+    ev_imm_kw = np.zeros(n, dtype=float)
 
     for session in sessions_out:
         if str(session.get("status")) != "plugged":
             continue
+
         a = int(np.clip(int(session.get("arrival_step", 0)), 0, n))
         d = int(np.clip(int(session.get("departure_step", a)), 0, n))
         if d <= a:
             continue
         window_length_steps = d - a
 
-        site = np.asarray(session.get("plan_site_kwh_per_step", np.zeros(0)), float).reshape(-1)[:window_length_steps]
-        pv = np.asarray(session.get("plan_pv_site_kwh_per_step", np.zeros(0)), float).reshape(-1)[:window_length_steps]
-        mkt = np.asarray(session.get("plan_market_kwh_per_step", np.zeros(0)), float).reshape(-1)[:window_length_steps]
+        site_kw = (
+            np.asarray(session.get("plan_site_kw_per_step", np.zeros(0)), dtype=float)
+            .reshape(-1)[:window_length_steps]
+        )
+        pv_kw = (
+            np.asarray(session.get("plan_pv_site_kw_per_step", np.zeros(0)), dtype=float)
+            .reshape(-1)[:window_length_steps]
+        )
+        mkt_kw = (
+            np.asarray(session.get("plan_market_kw_per_step", np.zeros(0)), dtype=float)
+            .reshape(-1)[:window_length_steps]
+        )
 
         # pad falls nötig
-        if len(site) < window_length_steps:
-            temporary_dataframe = np.zeros(window_length_steps, float); temporary_dataframe[:len(site)] = site; site = temporary_dataframe
-        if len(pv) < window_length_steps:
-            temporary_dataframe = np.zeros(window_length_steps, float); temporary_dataframe[:len(pv)] = pv; pv = temporary_dataframe
-        if len(mkt) < window_length_steps:
-            temporary_dataframe = np.zeros(window_length_steps, float); temporary_dataframe[:len(mkt)] = mkt; mkt = temporary_dataframe
+        if len(site_kw) < window_length_steps:
+            tmp = np.zeros(window_length_steps, dtype=float)
+            tmp[:len(site_kw)] = site_kw
+            site_kw = tmp
+        if len(pv_kw) < window_length_steps:
+            tmp = np.zeros(window_length_steps, dtype=float)
+            tmp[:len(pv_kw)] = pv_kw
+            pv_kw = tmp
+        if len(mkt_kw) < window_length_steps:
+            tmp = np.zeros(window_length_steps, dtype=float)
+            tmp[:len(mkt_kw)] = mkt_kw
+            mkt_kw = tmp
 
         if strategy == "immediate":
-            ev_imm[a:d] += site
+            ev_imm_kw[a:d] += site_kw
         elif strategy == "market":
-            ev_market[a:d] += site  # market == site
+            ev_market_kw[a:d] += site_kw  # market == site
         else:
-            pv = np.clip(pv, 0.0, site)
-            ev_gen[a:d] += pv
-            # grid-fallback ist plan_market; wenn du in pv-strategy nur Grid dort schreibst, passt das.
-            ev_market[a:d] += mkt if np.sum(mkt) > 1e-12 else np.maximum(site - pv, 0.0)
+            pv_kw = np.clip(pv_kw, 0.0, site_kw)
+            ev_gen_kw[a:d] += pv_kw
+            # Grid-Fallback ist plan_market; falls nicht befüllt, als Rest (site - pv) interpretieren
+            ev_market_kw[a:d] += (
+                mkt_kw if float(np.sum(mkt_kw)) > 1e-12 else np.maximum(site_kw - pv_kw, 0.0)
+            )
 
     return pd.DataFrame(
         {
             "timestamp": dataframe["timestamp"],
-            "ev_generation_kw": ev_gen / max(step_h, 1e-12),
-            "ev_market_kw": ev_market / max(step_h, 1e-12),
-            "ev_immediate_kw": ev_imm / max(step_h, 1e-12),
+            "ev_generation_kw": ev_gen_kw,
+            "ev_market_kw": ev_market_kw,
+            "ev_immediate_kw": ev_imm_kw,
         }
     )
 
@@ -2952,56 +3041,23 @@ def build_master_curve_and_actual_points_for_vehicle(
     *,
     charger_traces_dataframe: pd.DataFrame,
     scenario: dict,
-    curve,  # VehicleChargingCurve
+    curve: VehicleChargingCurve,
     power_tolerance_kw: float = 1e-6,
 ) -> dict[str, object]:
     """
     Bereitet Daten für den Vergleich von Master-Ladekurve und Ist-Ladepunkten auf.
 
-    Die Funktion extrahiert aus ``curve`` die fahrzeugspezifische Master-Ladekurve
-    (maximal zulässige Ladeleistung in Abhängigkeit vom SoC) und stellt dieser die
-    tatsächlich in der Simulation auftretenden Ladepunkte (SoC und Leistung) aus
-    ``charger_traces_dataframe`` gegenüber.
-
-    Wichtiger Hinweis zur Leistungsdefinition
-    -----------------------------------------
-    - Die Masterkurve ``curve.power_kw`` ist auf **Batterieseite** definiert.
-    - ``charger_traces_dataframe["power_kw"]`` ist die Leistung auf **Standort-/Ladepunktseite**.
-      Für den Vergleich wird daher mit der Ladepunkt-Effizienz
-      ``scenario["site"]["charger_efficiency"]`` auf Batterieseite umgerechnet:
+    Hinweis zur Leistungsdefinition
+    -------------------------------
+    - Masterkurve ``curve.power_kw`` ist auf **Batterieseite**.
+    - Trace-Leistung ist auf **Standort-/Ladepunktseite** (typisch Spalte ``power_kw``).
+      Für den Vergleich wird auf Batterieseite umgerechnet:
       ``power_batt_kw = power_site_kw * charger_efficiency``.
 
-    Parameter
-    ---------
-    charger_traces_dataframe:
-        DataFrame mit Zeitschritt-Traces der Simulation. Erwartete Spalten:
-        - ``"vehicle_name"`` (Fahrzeugname),
-        - ``"timestamp"`` (Zeitpunkt),
-        - ``"soc"`` (SoC als Anteil 0..1),
-        - ``"power_kw"`` (Leistung auf Standort-/Ladepunktseite in kW).
-    scenario:
-        Szenario-Dictionary. Verwendet wird insbesondere ``scenario["site"]["charger_efficiency"]``.
-    curve:
-        Fahrzeug-Ladekurve (z. B. ``VehicleChargingCurve``) mit Attributen
-        ``vehicle_name``, ``state_of_charge_fraction`` und ``power_kw``.
-    power_tolerance_kw:
-        Toleranz in kW für die Überschreitungsprüfung. Ein Ist-Punkt gilt als Überschreitung,
-        wenn ``actual_power_batt_kw > allowed_power_batt_kw + power_tolerance_kw``.
-
-    Rückgabe
-    --------
-    dict[str, object]
-        Dictionary mit folgenden Einträgen:
-        - ``"vehicle_name"``: Name des Fahrzeugs (String).
-        - ``"master_soc"``: SoC-Stützstellen der Masterkurve (np.ndarray, 0..1).
-        - ``"master_power_battery_kw"``: Master-Leistung auf Batterieseite (np.ndarray, kW).
-        - ``"actual_soc"``: Ist-SoC-Werte aus den Traces (np.ndarray, 0..1).
-        - ``"actual_power_batt_kw"``: Ist-Leistung auf Batterieseite (np.ndarray, kW).
-        - ``"violation_mask"``: Bool-Maske gleicher Länge wie ``actual_soc`` mit True bei Überschreitung.
-        - ``"number_violations"``: Anzahl der Überschreitungen (int).
-
-        Wenn keine Ist-Daten vorhanden sind (z. B. leerer DataFrame oder keine passenden Zeilen),
-        werden ``actual_*`` als leere Arrays zurückgegeben und ``number_violations`` ist 0.
+    Erwartete Spalten im charger_traces_dataframe
+    ---------------------------------------------
+    - vehicle_name, timestamp, soc
+    - Leistungsspalte: bevorzugt ``power_kw``; alternativ wird auch ``site_power_kw`` akzeptiert.
     """
     master_soc = np.asarray(curve.state_of_charge_fraction, dtype=float).reshape(-1)
     master_power_batt_kw = np.asarray(curve.power_kw, dtype=float).reshape(-1)
@@ -3021,16 +3077,24 @@ def build_master_curve_and_actual_points_for_vehicle(
 
     dataframe = charger_traces_dataframe.copy()
 
-    # Spalten-Check (robuster als .get(...).astype(...))
-    required_cols = {"vehicle_name", "timestamp", "soc", "power_kw"}
-    if not required_cols.issubset(set(dataframe.columns)):
+    # Spalten-Check: Leistungsspalte kann je nach Pipeline "power_kw" oder "site_power_kw" heißen.
+    required_base_cols = {"vehicle_name", "timestamp", "soc"}
+    if not required_base_cols.issubset(set(dataframe.columns)):
+        return empty_result
+
+    power_col = None
+    if "power_kw" in dataframe.columns:
+        power_col = "power_kw"
+    elif "site_power_kw" in dataframe.columns:
+        power_col = "site_power_kw"
+    else:
         return empty_result
 
     dataframe["timestamp"] = pd.to_datetime(dataframe["timestamp"], errors="coerce")
     dataframe = dataframe[dataframe["vehicle_name"].astype(str) == str(curve.vehicle_name)]
 
     actual_soc = pd.to_numeric(dataframe["soc"], errors="coerce").to_numpy(dtype=float)
-    actual_power_site_kw = pd.to_numeric(dataframe["power_kw"], errors="coerce").to_numpy(dtype=float)
+    actual_power_site_kw = pd.to_numeric(dataframe[power_col], errors="coerce").to_numpy(dtype=float)
 
     eff = float(np.clip(float(scenario["site"].get("charger_efficiency", 1.0)), 1e-12, 1.0))
     actual_power_batt_kw = np.maximum(actual_power_site_kw * eff, 0.0)
