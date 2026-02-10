@@ -120,6 +120,84 @@ def _localize_wall_time_index(
     )
 
 
+def get_day_type(simulation_day_start: datetime, holiday_dates: Set[date]) -> str:
+    """
+    Klassifiziert einen Simulationstag als "working_day", "saturday" oder "sunday_holiday".
+
+    Parameter
+    ----------
+    simulation_day_start:
+        Startzeitpunkt des Tages (Datumsteil ist relevant).
+    holiday_dates:
+        Menge von Feiertagen als datetime.date.
+
+    Rückgabe
+    -------
+    str
+        "working_day", "saturday" oder "sunday_holiday".
+    """
+    if simulation_day_start.date() in holiday_dates:
+        return "sunday_holiday"
+    weekday_index = int(simulation_day_start.weekday())  # 0=Mo .. 6=So
+    if weekday_index == 5:
+        return "saturday"
+    if weekday_index == 6:
+        return "sunday_holiday"
+    return "working_day"
+
+
+def resolve_paths_relative_to_yaml(scenario: dict, scenario_path: str) -> dict:
+    """
+    Löst relative Dateipfade im Szenario relativ zum Speicherort der YAML-Datei auf.
+
+    Diese Funktion sorgt dafür, dass Pfade aus der YAML (z. B. CSV-Dateien) unabhängig vom
+    aktuellen Working Directory korrekt gefunden werden. Relative Pfade werden relativ zum
+    Ordner der YAML-Datei in absolute Pfade umgewandelt. Absolute Pfade bleiben unverändert.
+
+    Aktuell werden folgende Szenario-Felder aufgelöst:
+    - scenario["localload_pv_market_csv"]
+    - scenario["vehicles"]["vehicle_curve_csv"]
+
+    Parameter
+    ----------
+    scenario:
+        Szenario-Dictionary, wie es aus der YAML eingelesen wurde. Das Dictionary wird
+        in-place aktualisiert.
+    scenario_path:
+        Pfad zur YAML-Datei, die als Referenz für relative Pfade dient.
+
+    Rückgabe
+    -------
+    dict
+        Das aktualisierte Szenario-Dictionary mit absoluten Pfaden.
+
+    Ausnahmen
+    ------
+    KeyError
+        Wenn eines der erwarteten Pfadfelder im Szenario fehlt.
+    ValueError
+        Wenn ein Pfad leer ist oder nur aus Whitespaces besteht.
+    """
+    base_directory = Path(scenario_path).resolve().parent
+
+    def to_absolute(path_value: Any) -> str:
+        """Wandelt einen Pfad in einen absoluten Pfad um.
+        
+            Relative Pfade werden relativ zum YAML-Verzeichnis aufgelöst.
+        """
+        path_text = str(path_value).strip()
+        if not path_text:
+            raise ValueError("CSV-Pfad darf nicht leer sein.")
+        path_object = Path(path_text).expanduser()
+        if path_object.is_absolute():
+            return str(path_object)
+        return str((base_directory / path_object).resolve())
+
+    scenario["localload_pv_market_csv"] = to_absolute(scenario["localload_pv_market_csv"])
+    scenario["vehicles"]["vehicle_curve_csv"] = to_absolute(scenario["vehicles"]["vehicle_curve_csv"])
+    return scenario
+
+
 # =============================================================================
 # 1) Daten-Reader: Gebäudeprofil / Marktpreise / Ladekurven / PV-Generation
 # =============================================================================
@@ -241,58 +319,6 @@ def read_scenario_from_yaml(scenario_path: str) -> Dict[str, Any]:
     scenario["site"] = site_configuration
     scenario["vehicles"] = vehicles_configuration
 
-    return scenario
-
-
-def resolve_paths_relative_to_yaml(scenario: dict, scenario_path: str) -> dict:
-    """
-    Löst relative Dateipfade im Szenario relativ zum Speicherort der YAML-Datei auf.
-
-    Diese Funktion sorgt dafür, dass Pfade aus der YAML (z. B. CSV-Dateien) unabhängig vom
-    aktuellen Working Directory korrekt gefunden werden. Relative Pfade werden relativ zum
-    Ordner der YAML-Datei in absolute Pfade umgewandelt. Absolute Pfade bleiben unverändert.
-
-    Aktuell werden folgende Szenario-Felder aufgelöst:
-    - scenario["localload_pv_market_csv"]
-    - scenario["vehicles"]["vehicle_curve_csv"]
-
-    Parameter
-    ----------
-    scenario:
-        Szenario-Dictionary, wie es aus der YAML eingelesen wurde. Das Dictionary wird
-        in-place aktualisiert.
-    scenario_path:
-        Pfad zur YAML-Datei, die als Referenz für relative Pfade dient.
-
-    Rückgabe
-    -------
-    dict
-        Das aktualisierte Szenario-Dictionary mit absoluten Pfaden.
-
-    Ausnahmen
-    ------
-    KeyError
-        Wenn eines der erwarteten Pfadfelder im Szenario fehlt.
-    ValueError
-        Wenn ein Pfad leer ist oder nur aus Whitespaces besteht.
-    """
-    base_directory = Path(scenario_path).resolve().parent
-
-    def to_absolute(path_value: Any) -> str:
-        """Wandelt einen Pfad in einen absoluten Pfad um.
-        
-            Relative Pfade werden relativ zum YAML-Verzeichnis aufgelöst.
-        """
-        path_text = str(path_value).strip()
-        if not path_text:
-            raise ValueError("CSV-Pfad darf nicht leer sein.")
-        path_object = Path(path_text).expanduser()
-        if path_object.is_absolute():
-            return str(path_object)
-        return str((base_directory / path_object).resolve())
-
-    scenario["localload_pv_market_csv"] = to_absolute(scenario["localload_pv_market_csv"])
-    scenario["vehicles"]["vehicle_curve_csv"] = to_absolute(scenario["vehicles"]["vehicle_curve_csv"])
     return scenario
 
 
@@ -687,32 +713,6 @@ class SampledSession:
     day_type: str
 
 
-def get_day_type(simulation_day_start: datetime, holiday_dates: Set[date]) -> str:
-    """
-    Klassifiziert einen Simulationstag als "working_day", "saturday" oder "sunday_holiday".
-
-    Parameter
-    ----------
-    simulation_day_start:
-        Startzeitpunkt des Tages (Datumsteil ist relevant).
-    holiday_dates:
-        Menge von Feiertagen als datetime.date.
-
-    Rückgabe
-    -------
-    str
-        "working_day", "saturday" oder "sunday_holiday".
-    """
-    if simulation_day_start.date() in holiday_dates:
-        return "sunday_holiday"
-    weekday_index = int(simulation_day_start.weekday())  # 0=Mo .. 6=So
-    if weekday_index == 5:
-        return "saturday"
-    if weekday_index == 6:
-        return "sunday_holiday"
-    return "working_day"
-
-
 def define_sample_from_distribution(spec: Any, random_generator: np.random.Generator) -> float:
     """
     Zieht genau einen Sample-Wert aus einer Verteilungsspezifikation.
@@ -1105,6 +1105,85 @@ def sample_sessions_for_simulation_day(
 # 3) Strategie: Reservierungsbasierte Session-Planung (immediate / market / generation)
 # =============================================================================
 
+def order_sessions_for_planning(
+    sessions: list[SampledSession],
+    charging_strategy: str,
+) -> list[SampledSession]:
+    """
+    Sortiert Sessions in der Reihenfolge, in der sie geplant werden sollen.
+
+    - "immediate": FCFS (Ankunft zuerst)
+    - sonst (z. B. "market", "pv"): kürzeste Standzeit zuerst
+
+    Tie-Breaker: arrival_step, session_id (stabil & reproduzierbar).
+    """
+    strategy = str(charging_strategy).strip().lower()
+
+    def duration_steps(session: SampledSession) -> int:
+        """Berechnet die Sessiondauer in Simulationsschritten.
+        """
+        return int(max(0, int(session.departure_step) - int(session.arrival_step)))
+
+    if strategy == "immediate":
+        return sorted(
+            sessions,
+            key=lambda session: (int(session.arrival_step), int(session.departure_step), str(session.session_id)),
+        )
+
+    return sorted(
+        sessions,
+        key=lambda session: (duration_steps(session), int(session.arrival_step), str(session.session_id)),
+    )
+
+
+def required_site_energy_for_session(
+    *,
+    scenario: dict,
+    curve: VehicleChargingCurve,
+    soc_at_arrival: float,
+) -> float:
+    """
+    Berechnet die benötigte Ladeenergie auf Standortseite bis zum Ziel-SoC.
+
+    Die Zielgröße ist die Energie, die der Standort (über den Ladepunkt) liefern muss,
+    damit die Fahrzeugbatterie von ``soc_at_arrival`` auf ``scenario["vehicles"]["soc_target"]``
+    geladen werden kann. Dabei wird der Ladepunktwirkungsgrad berücksichtigt.
+
+    Formel
+    ------
+    needed_battery_kwh = max(0, (soc_target - soc_at_arrival) * battery_capacity_kwh)
+    needed_site_kwh    = needed_battery_kwh / charger_efficiency
+
+    Parameter
+    ---------
+    scenario:
+        Szenario-Konfiguration. Verwendet:
+        - ``scenario["vehicles"]["soc_target"]`` als Ziel-SoC (0..1),
+        - ``scenario["site"]["charger_efficiency"]`` als Wirkungsgrad (0..1].
+    curve:
+        Fahrzeugspezifische Ladekurve mit ``battery_capacity_kwh`` (Batteriekapazität).
+    soc_at_arrival:
+        Ladezustand bei Ankunft als Anteil (0..1).
+
+    Rückgabe
+    --------
+    float
+        Benötigte Energie auf Standortseite in kWh (>= 0).
+    """
+    vehicles_cfg = scenario["vehicles"]
+    site_cfg = scenario["site"]
+
+    soc_target = float(np.clip(float(vehicles_cfg.get("soc_target", 1.0)), 0.0, 1.0))
+    soc0 = float(np.clip(float(soc_at_arrival), 0.0, 1.0))
+
+    battery_capacity_kwh = float(max(curve.battery_capacity_kwh, 1e-12))
+    charger_efficiency = float(site_cfg.get("charger_efficiency", 1.0))
+
+    needed_battery_kwh = float(max(0.0, (soc_target - soc0) * battery_capacity_kwh))
+    needed_site_kwh = float(needed_battery_kwh / max(charger_efficiency, 1e-12))
+    return float(max(needed_site_kwh, 0.0))
+
+
 def available_energy_for_session_step(
     *,
     step_index: int,
@@ -1437,7 +1516,7 @@ def charging_strategy_market(
     cap_est = np.minimum(supply_headroom_est, charger_cap_kwh)
     cap_est = np.maximum(cap_est, 0.0)
 
-    order_by_price = np.argsort(prices_window)  # cheapest first
+    order_by_price = np.argsort(prices_window)  
 
     allowed = np.zeros(window_len, dtype=bool)
     cap_acc = 0.0
@@ -1731,85 +1810,6 @@ def charging_strategy_pv(
     }
 
 
-def order_sessions_for_planning(
-    sessions: list[SampledSession],
-    charging_strategy: str,
-) -> list[SampledSession]:
-    """
-    Sortiert Sessions in der Reihenfolge, in der sie geplant werden sollen.
-
-    - "immediate": FCFS (Ankunft zuerst)
-    - sonst (z. B. "market", "pv", "generation"): kürzeste Standzeit zuerst
-
-    Tie-Breaker: arrival_step, session_id (stabil & reproduzierbar).
-    """
-    strategy = str(charging_strategy).strip().lower()
-
-    def duration_steps(session: SampledSession) -> int:
-        """Berechnet die Sessiondauer in Simulationsschritten.
-        """
-        return int(max(0, int(session.departure_step) - int(session.arrival_step)))
-
-    if strategy == "immediate":
-        return sorted(
-            sessions,
-            key=lambda session: (int(session.arrival_step), int(session.departure_step), str(session.session_id)),
-        )
-
-    return sorted(
-        sessions,
-        key=lambda session: (duration_steps(session), int(session.arrival_step), str(session.session_id)),
-    )
-
-
-def required_site_energy_for_session(
-    *,
-    scenario: dict,
-    curve: VehicleChargingCurve,
-    soc_at_arrival: float,
-) -> float:
-    """
-    Berechnet die benötigte Ladeenergie auf Standortseite bis zum Ziel-SoC.
-
-    Die Zielgröße ist die Energie, die der Standort (über den Ladepunkt) liefern muss,
-    damit die Fahrzeugbatterie von ``soc_at_arrival`` auf ``scenario["vehicles"]["soc_target"]``
-    geladen werden kann. Dabei wird der Ladepunktwirkungsgrad berücksichtigt.
-
-    Formel
-    ------
-    needed_battery_kwh = max(0, (soc_target - soc_at_arrival) * battery_capacity_kwh)
-    needed_site_kwh    = needed_battery_kwh / charger_efficiency
-
-    Parameter
-    ---------
-    scenario:
-        Szenario-Konfiguration. Verwendet:
-        - ``scenario["vehicles"]["soc_target"]`` als Ziel-SoC (0..1),
-        - ``scenario["site"]["charger_efficiency"]`` als Wirkungsgrad (0..1].
-    curve:
-        Fahrzeugspezifische Ladekurve mit ``battery_capacity_kwh`` (Batteriekapazität).
-    soc_at_arrival:
-        Ladezustand bei Ankunft als Anteil (0..1).
-
-    Rückgabe
-    --------
-    float
-        Benötigte Energie auf Standortseite in kWh (>= 0).
-    """
-    vehicles_cfg = scenario["vehicles"]
-    site_cfg = scenario["site"]
-
-    soc_target = float(np.clip(float(vehicles_cfg.get("soc_target", 1.0)), 0.0, 1.0))
-    soc0 = float(np.clip(float(soc_at_arrival), 0.0, 1.0))
-
-    battery_capacity_kwh = float(max(curve.battery_capacity_kwh, 1e-12))
-    charger_efficiency = float(site_cfg.get("charger_efficiency", 1.0))
-
-    needed_battery_kwh = float(max(0.0, (soc_target - soc0) * battery_capacity_kwh))
-    needed_site_kwh = float(needed_battery_kwh / max(charger_efficiency, 1e-12))
-    return float(max(needed_site_kwh, 0.0))
-
-
 def plan_charging_for_day(
     *,
     sessions: list[SampledSession],
@@ -1991,127 +1991,6 @@ def find_free_charger_fcfs(
         if int(occupied_until) <= int(arrival_step):
             return int(charger_id)
     return None
-
-
-def _group_sessions_by_arrival_day(
-    sessions: list[SampledSession],
-    timestamps: pd.DatetimeIndex,
-) -> dict[pd.Timestamp, list[SampledSession]]:
-    """
-    Gruppiert Sessions nach dem Kalendertag ihrer Ankunft.
-
-    Diese Gruppierung ist für die Simulation notwendig, weil die Ladeplanung in
-    ``simulate_site_fcfs_with_planning(...)`` tageweise erfolgt: Für jeden Ankunftstag
-    werden alle an diesem Tag „plugged“ Sessions gemeinsam an ``plan_charging_for_day(...)``
-    übergeben (inkl. Sortierung gemäß Strategie und gemeinsamer Nutzung der Reservierungen).
-
-    Der Kalendertag wird aus dem Simulationszeitstempel am ``arrival_step`` abgeleitet und
-    mit ``normalize()`` auf 00:00 Uhr des jeweiligen Tages gesetzt. Dadurch ist die
-    Gruppierung zeitzonenrobust, solange ``timestamps`` tz-aware ist.
-
-    Parameter
-    ---------
-    sessions:
-        Liste von Sessions, die gruppiert werden sollen.
-    timestamps:
-        Simulations-Zeitindex. Der Eintrag an Position ``arrival_step`` bestimmt den
-        zugehörigen Kalendertag der Session.
-
-    Rückgabe
-    --------
-    dict[pd.Timestamp, list[SampledSession]]
-        Dictionary mit Tages-Schlüssel (Timestamp auf Tagesstart) und den zugehörigen Sessions.
-    """
-    by_day: dict[pd.Timestamp, list[SampledSession]] = {}
-    for session in sessions:
-        day_key = pd.Timestamp(timestamps[int(session.arrival_step)]).normalize()
-        by_day.setdefault(day_key, []).append(session)
-    return by_day
-
-
-def _compute_debug_balance(
-    *,
-    timestamps: pd.DatetimeIndex,
-    scenario: dict,
-    pv_generation_kwh_per_step: np.ndarray,
-    base_load_kwh_per_step: np.ndarray,
-    reserved_total_ev_energy_kwh_per_step: np.ndarray,
-    reserved_pv_ev_energy_kwh_per_step: np.ndarray,
-) -> pd.DataFrame:
-    """
-    Erstellt eine Debug-Energiebilanz pro Simulationsschritt als DataFrame.
-
-    Die Bilanz zerlegt PV-Erzeugung und Netzbezug in nachvollziehbare Flüsse:
-
-    - PV → Grundlast: PV deckt zuerst die Grundlast bis zur Höhe der Grundlast.
-    - PV → EV: verbleibender PV-Überschuss wird den EV-Ladevorgängen zugeordnet
-    (begrenzt durch den in ``reserved_pv_ev_energy_kwh_per_step`` getrackten PV-Anteil).
-    - Netz → Grundlast: Rest-Grundlast wird aus dem Netz gedeckt (begrenzt durch das Netzlimit).
-    - Netz → EV: verbleibender Netz-Spielraum nach Grundlast wird den EV-Ladevorgängen zugeordnet.
-
-    Diese Funktion dient ausschließlich der Plausibilisierung/Analyse (Debugging) und hat
-    keinen Einfluss auf die eigentliche Ladeplanung.
-
-    Parameter
-    ---------
-    timestamps:
-        Simulations-Zeitindex (Länge = Anzahl Simulationsschritte).
-    scenario:
-        Szenario-Konfiguration. Verwendet:
-        - ``scenario["time_resolution_min"]`` zur Umrechnung kW↔kWh,
-        - ``scenario["site"]["grid_limit_p_avb_kw"]`` als Netzanschlussgrenze [kW].
-    pv_generation_kwh_per_step:
-        PV-Erzeugung pro Schritt [kWh/Schritt].
-    base_load_kwh_per_step:
-        Grundlast pro Schritt [kWh/Schritt].
-    reserved_total_ev_energy_kwh_per_step:
-        Gesamte EV-Ladeenergie pro Schritt (PV + Netz) [kWh/Schritt].
-    reserved_pv_ev_energy_kwh_per_step:
-        Getrackter PV-Anteil der EV-Ladeenergie pro Schritt [kWh/Schritt].
-
-    Rückgabe
-    --------
-    pd.DataFrame
-        DataFrame mit Zeitstempel und Bilanzspalten (alle in kWh/Schritt), u. a.:
-        - ``pv_to_base_kwh_per_step``, ``pv_to_ev_kwh_per_step``
-        - ``grid_to_base_kwh_per_step``, ``grid_to_ev_kwh_per_step``
-        - ``grid_limit_kwh_per_step`` (konstant pro Schritt)
-    """
-    time_resolution_min = int(scenario["time_resolution_min"])
-    step_hours = float(time_resolution_min) / 60.0
-    grid_limit_kwh = float(scenario["site"]["grid_limit_p_avb_kw"]) * step_hours
-
-    pv = np.asarray(pv_generation_kwh_per_step, dtype=float)
-    base = np.asarray(base_load_kwh_per_step, dtype=float)
-    ev = np.asarray(reserved_total_ev_energy_kwh_per_step, dtype=float)
-    pv_ev_tracked = np.asarray(reserved_pv_ev_energy_kwh_per_step, dtype=float)
-
-    pv_to_base = np.minimum(pv, base)
-    base_remaining = base - pv_to_base
-
-    pv_after_base = np.maximum(pv - pv_to_base, 0.0)
-    pv_to_ev = np.minimum(pv_ev_tracked, pv_after_base)
-    ev_remaining = np.maximum(ev - pv_to_ev, 0.0)
-
-    grid_to_base = np.minimum(base_remaining, grid_limit_kwh)
-    grid_headroom_after_base = np.maximum(grid_limit_kwh - grid_to_base, 0.0)
-    grid_to_ev = np.minimum(ev_remaining, grid_headroom_after_base)
-
-    dataframe = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(timestamps),
-            "pv_generation_kwh_per_step": pv,
-            "base_load_kwh_per_step": base,
-            "ev_load_kwh_per_step": ev,
-            "pv_ev_tracked_kwh_per_step": pv_ev_tracked,
-            "pv_to_base_kwh_per_step": pv_to_base,
-            "pv_to_ev_kwh_per_step": pv_to_ev,
-            "grid_to_base_kwh_per_step": grid_to_base,
-            "grid_to_ev_kwh_per_step": grid_to_ev,
-            "grid_limit_kwh_per_step": grid_limit_kwh,
-        }
-    )
-    return dataframe
 
 
 def simulate_site_fcfs_with_planning(
@@ -2313,6 +2192,127 @@ def get_holiday_dates_from_scenario(scenario: dict, timestamps: pd.DatetimeIndex
         return set(cal.keys())
     except Exception:
         return set()
+
+
+def _group_sessions_by_arrival_day(
+    sessions: list[SampledSession],
+    timestamps: pd.DatetimeIndex,
+) -> dict[pd.Timestamp, list[SampledSession]]:
+    """
+    Gruppiert Sessions nach dem Kalendertag ihrer Ankunft.
+
+    Diese Gruppierung ist für die Simulation notwendig, weil die Ladeplanung in
+    ``simulate_site_fcfs_with_planning(...)`` tageweise erfolgt: Für jeden Ankunftstag
+    werden alle an diesem Tag „plugged“ Sessions gemeinsam an ``plan_charging_for_day(...)``
+    übergeben (inkl. Sortierung gemäß Strategie und gemeinsamer Nutzung der Reservierungen).
+
+    Der Kalendertag wird aus dem Simulationszeitstempel am ``arrival_step`` abgeleitet und
+    mit ``normalize()`` auf 00:00 Uhr des jeweiligen Tages gesetzt. Dadurch ist die
+    Gruppierung zeitzonenrobust, solange ``timestamps`` tz-aware ist.
+
+    Parameter
+    ---------
+    sessions:
+        Liste von Sessions, die gruppiert werden sollen.
+    timestamps:
+        Simulations-Zeitindex. Der Eintrag an Position ``arrival_step`` bestimmt den
+        zugehörigen Kalendertag der Session.
+
+    Rückgabe
+    --------
+    dict[pd.Timestamp, list[SampledSession]]
+        Dictionary mit Tages-Schlüssel (Timestamp auf Tagesstart) und den zugehörigen Sessions.
+    """
+    by_day: dict[pd.Timestamp, list[SampledSession]] = {}
+    for session in sessions:
+        day_key = pd.Timestamp(timestamps[int(session.arrival_step)]).normalize()
+        by_day.setdefault(day_key, []).append(session)
+    return by_day
+
+
+def _compute_debug_balance(
+    *,
+    timestamps: pd.DatetimeIndex,
+    scenario: dict,
+    pv_generation_kwh_per_step: np.ndarray,
+    base_load_kwh_per_step: np.ndarray,
+    reserved_total_ev_energy_kwh_per_step: np.ndarray,
+    reserved_pv_ev_energy_kwh_per_step: np.ndarray,
+) -> pd.DataFrame:
+    """
+    Erstellt eine Debug-Energiebilanz pro Simulationsschritt als DataFrame.
+
+    Die Bilanz zerlegt PV-Erzeugung und Netzbezug in nachvollziehbare Flüsse:
+
+    - PV → Grundlast: PV deckt zuerst die Grundlast bis zur Höhe der Grundlast.
+    - PV → EV: verbleibender PV-Überschuss wird den EV-Ladevorgängen zugeordnet
+    (begrenzt durch den in ``reserved_pv_ev_energy_kwh_per_step`` getrackten PV-Anteil).
+    - Netz → Grundlast: Rest-Grundlast wird aus dem Netz gedeckt (begrenzt durch das Netzlimit).
+    - Netz → EV: verbleibender Netz-Spielraum nach Grundlast wird den EV-Ladevorgängen zugeordnet.
+
+    Diese Funktion dient ausschließlich der Plausibilisierung/Analyse (Debugging) und hat
+    keinen Einfluss auf die eigentliche Ladeplanung.
+
+    Parameter
+    ---------
+    timestamps:
+        Simulations-Zeitindex (Länge = Anzahl Simulationsschritte).
+    scenario:
+        Szenario-Konfiguration. Verwendet:
+        - ``scenario["time_resolution_min"]`` zur Umrechnung kW↔kWh,
+        - ``scenario["site"]["grid_limit_p_avb_kw"]`` als Netzanschlussgrenze [kW].
+    pv_generation_kwh_per_step:
+        PV-Erzeugung pro Schritt [kWh/Schritt].
+    base_load_kwh_per_step:
+        Grundlast pro Schritt [kWh/Schritt].
+    reserved_total_ev_energy_kwh_per_step:
+        Gesamte EV-Ladeenergie pro Schritt (PV + Netz) [kWh/Schritt].
+    reserved_pv_ev_energy_kwh_per_step:
+        Getrackter PV-Anteil der EV-Ladeenergie pro Schritt [kWh/Schritt].
+
+    Rückgabe
+    --------
+    pd.DataFrame
+        DataFrame mit Zeitstempel und Bilanzspalten (alle in kWh/Schritt), u. a.:
+        - ``pv_to_base_kwh_per_step``, ``pv_to_ev_kwh_per_step``
+        - ``grid_to_base_kwh_per_step``, ``grid_to_ev_kwh_per_step``
+        - ``grid_limit_kwh_per_step`` (konstant pro Schritt)
+    """
+    time_resolution_min = int(scenario["time_resolution_min"])
+    step_hours = float(time_resolution_min) / 60.0
+    grid_limit_kwh = float(scenario["site"]["grid_limit_p_avb_kw"]) * step_hours
+
+    pv = np.asarray(pv_generation_kwh_per_step, dtype=float)
+    base = np.asarray(base_load_kwh_per_step, dtype=float)
+    ev = np.asarray(reserved_total_ev_energy_kwh_per_step, dtype=float)
+    pv_ev_tracked = np.asarray(reserved_pv_ev_energy_kwh_per_step, dtype=float)
+
+    pv_to_base = np.minimum(pv, base)
+    base_remaining = base - pv_to_base
+
+    pv_after_base = np.maximum(pv - pv_to_base, 0.0)
+    pv_to_ev = np.minimum(pv_ev_tracked, pv_after_base)
+    ev_remaining = np.maximum(ev - pv_to_ev, 0.0)
+
+    grid_to_base = np.minimum(base_remaining, grid_limit_kwh)
+    grid_headroom_after_base = np.maximum(grid_limit_kwh - grid_to_base, 0.0)
+    grid_to_ev = np.minimum(ev_remaining, grid_headroom_after_base)
+
+    dataframe = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(timestamps),
+            "pv_generation_kwh_per_step": pv,
+            "base_load_kwh_per_step": base,
+            "ev_load_kwh_per_step": ev,
+            "pv_ev_tracked_kwh_per_step": pv_ev_tracked,
+            "pv_to_base_kwh_per_step": pv_to_base,
+            "pv_to_ev_kwh_per_step": pv_to_ev,
+            "grid_to_base_kwh_per_step": grid_to_base,
+            "grid_to_ev_kwh_per_step": grid_to_ev,
+            "grid_limit_kwh_per_step": grid_limit_kwh,
+        }
+    )
+    return dataframe
 
 
 def get_daytype_calendar(*, start_datetime: pd.Timestamp, horizon_days: int, holiday_dates: set[date]) -> dict[str, list[date]]:
