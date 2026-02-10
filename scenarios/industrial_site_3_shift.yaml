@@ -21,62 +21,26 @@ site:
   allow_cross_day_charging: true                              # Ermöglicht Ladungen über Mitternacht hinaus
 
   # =============================================================================
-  # Lademanagementstrategie des Standorts
+  # Angaben zur lokalen PV-Anlage
   # =============================================================================
-  # Daten für generation / market: https://www.smard.de/home/downloadcenter/download-marktdaten/
-
-  charging_strategy: "generation"                              # Lademanagementstrategie: "immediate" (default), "market", "generation"
-
-  # CSV-Datei: PV-Erzeugung (generation)
-  # Beim Einlesen einer anlagenspezifischen Datei "tilt_angle_solar_module" und "location_pv_site" leer lassen und "generation_strategy_value_col" anpassen
-  generation_strategy_csv: "../data/strategies/generation/PV_Erzeugung_Standardprofile_DE.csv"      # Pfad bei vorhandenen Daten zur Stromgeneration: "../data/strategies//generation/PV_Erzeugung_Standardprofile_DE.csv"
-  generation_strategy_value_col: 7                                                                  # Spalte, die entsprechende Werte ("MWh", "kWh", o.ä.) enthalten, woran sich die Lademanagementstrategie richtet (1-basierter Code: 1 = erste Spalte)
-  generation_strategy_unit: "kW"                                                                    # Einheit, die für den Wert im Lademanagement verwendet wird ("MWh", "kWh", "kW", "€/MWh")
-  pv_system_size_kwp: 2500                                                                          # Größe der untersuchten Anlage in kWp
-  tilt_angle_solar_module: 10                                                                       # Neigungswinkel des Solarmoduls in Grad ("10", "15", "20", "25", "30")
-  location_pv_site: Augsburg                                                                        # Standort der Anlage bzw. vergleichbar laut Globalstrahlung in DE ("Augsburg", "Cottbus", "Hamburg", "Hannover", "Ingolstadt", "Leipzig", "Magdeburg", "Nürnberg", "Regensburg", "Schwerin")
-
-  # CSV-Datei: Marktpreise (market)
-  market_strategy_csv: "../data/strategies/market/Marktdaten_Grosshandelspreise_DE_2025.csv"        # Pfad bei vorhandenen Daten zu Strompreisen: "../data/strategies//market/Marktdaten_Grosshandelspreise_DE_2025.csv"
-  market_strategy_value_col: 3                                                                      # Spalte, die entsprechende Werte ("€/MWh", "€/kWh", o.ä.) enthalten, woran sich die Lademanagementstrategie richtet (1-basierter Code: 1 = erste Spalte)
-  market_strategy_unit: "€/MWh"                                                                     # Einheit, die für den Wert im Lademanagement verwendet wird (€/kWh", "€/MWh")
-
+  pv_system_size_kwp: 100                                      # Größe der untersuchten Anlage in kWp
+  
   # =============================================================================
   # Grundlast des Standorts - Gebäudeprofil
   # =============================================================================
-  # Die Grundlast beschreibt den zeitlich aufgelösten Stromverbrauch des Gebäudes im 15-Minuten-Raster
-  #
-  # Wird eine CSV angegeben, wird deren Profil als zeitlicher Verlauf ("Shape") verwendet und auf den
-  # angegebenen Standort skaliert:
-  # - base_load_unit = "kWh":
-  #     CSV-Werte sind Energie pro Zeitschritt (z. B. HTW-Profile, auf 1000 kWh/Jahr normiert).
-  #     Die Werte werden auf base_load_annual skaliert und anschließend in kW umgerechnet.
-  # - base_load_unit = "kW":
-  #     CSV-Werte sind mittlere Leistung je Zeitschritt.
-  #     Das Profil wird so skaliert, dass seine mittlere Leistung base_load_annual entspricht.
-  #
-  # Ist keine CSV angegeben, wird eine konstante Grundlast verwendet.
-
-  # Option A: konstante Grundlast (kW)
-  base_load_kw: 50
-
-  # Option B: Grundlast aus CSV-Datei (hat Vorrang gegenüber Option A)
-  base_load_csv: "../data/building_loads/office_tub_2018.csv"            # Pfad zu den Gebäudeprofilen: "../data/building_loads/office_tub_2018.csv"
-  base_load_value_col: 2                                                # Spalte mit dem Profilwert (1-basiert, z. B. Mean_Value)
-  base_load_unit: "kWh"                                                 # "kWh" oder "kW"
-  base_load_annual: 500000                                              # jährlicher standortspezifischer Verbrauch (kWh oder kW, passend zur Einheit)
-
+  base_load_annual_kwh: 500000                                 # jährlicher standortspezifischer Verbrauch
 
 # =============================================================================
-# Fuhrparkbeschreibung – Parameter / Datenquellen
+# Fuhrparkbeschreibung – Ladekurven + Kapazitäten kommen aus CSV
 # =============================================================================
 
 vehicles:
-  soc_target: 0.95                                                # Gewünschter Ladezustand am Ende des Ladeprozesses
-  vehicle_curve_csv: "../data/Ladekurven_Master.csv"              # Batteriekapazität und Ladekurve nach SOC
-  fleet_mix:                                                      # Gewichtung der Fahrzeugtypen - PKW & Transporter
-    PKW: 0.95
-    Transporter: 0.05
+  soc_target: 0.95                                             # Gewünschter Ladezustand am Ende des Ladeprozesses
+  vehicle_curve_csv: "../data/Ladekurven_Master.csv"           # Batteriekapazität und Ladekurve nach SOC
+  fleet_mix:                                                   # Gewichtung der Fahrzeugtypen - PKW & Transporter
+    PKW: 0.5
+    Transporter: 0.5
+  vehicle_type: ["Mercedes E-Sprinter"]                        # Fahrzeuge können bei bekannten Fuhrpark spezifisch als In-Liste eingegeben werden (z.B. ["Fiat 500e Hatchback", "Audi e-tron GT", "Mercedes E-Sprinter"])
 
 # =============================================================================
 # Ankunftszeiten, Standzeit und SoC bei Ankunft

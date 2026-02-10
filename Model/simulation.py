@@ -771,7 +771,19 @@ def sample_vehicle_for_session(
     vehicle_type: Optional[Any] = None,
 ) -> Tuple[str, str]:
     """
-    Wählt ein Fahrzeug für eine Ladesession (Klasse nach fleet_mix, Fahrzeug gleichverteilt).
+    Wählt ein Fahrzeug für eine Ladesession.
+
+    Auswahllogik
+    ------------
+    1) Zuerst wird die Fahrzeugklasse gewählt:
+       - Wenn `fleet_mix` gesetzt ist: gemäß Gewichten (renormalisiert auf verfügbare Klassen).
+       - Sonst: gleichverteilt über verfügbare Klassen.
+
+    2) Dann wird ein Fahrzeugname innerhalb der gewählten Klasse gewählt:
+       - Wenn `vehicle_type` gesetzt ist:
+         * Für Klassen, in denen mindestens ein Name angegeben wurde, wird nur aus diesen Namen gewählt.
+         * Für Klassen ohne Angabe in `vehicle_type` bleiben alle Fahrzeuge der Klasse auswählbar.
+       - Wenn `vehicle_type` nicht gesetzt ist: alle Fahrzeuge der Klasse sind auswählbar.
 
     Parameter
     ----------
@@ -782,14 +794,15 @@ def sample_vehicle_for_session(
     random_generator:
         Numpy RNG.
     vehicle_type:
-        Optionaler Override: String oder Liste[String], max. 5 Fahrzeugnamen.
+        Optional: String oder Liste[String], max. 10 Fahrzeugnamen.
+        Wirkt als Whitelist innerhalb der jeweiligen Fahrzeugklassen.
 
     Rückgabe
     -------
     Tuple[str, str]
         (vehicle_name, vehicle_class)
 
-    Ausnahmen
+    Raises
     ------
     ValueError
         Wenn keine Fahrzeuge verfügbar sind oder Konfiguration ungültig ist.
@@ -797,6 +810,7 @@ def sample_vehicle_for_session(
     if len(vehicle_curves_by_name) == 0:
         raise ValueError("vehicle_curves_by_name ist leer.")
 
+    # ---- vehicle_type normalisieren (optional) ----
     selected_vehicle_names: Optional[List[str]] = None
     if vehicle_type is not None:
         if isinstance(vehicle_type, str):
@@ -809,35 +823,50 @@ def sample_vehicle_for_session(
         selected_vehicle_names = list(dict.fromkeys(selected_vehicle_names))
         if len(selected_vehicle_names) == 0:
             selected_vehicle_names = None
-        elif len(selected_vehicle_names) > 5:
-            raise ValueError("vehicles.vehicle_type darf maximal 5 Fahrzeuge enthalten.")
+        elif len(selected_vehicle_names) > 10:
+            raise ValueError("vehicles.vehicle_type darf maximal 10 Fahrzeuge enthalten.")
 
-    if selected_vehicle_names is None:
-        candidate_curves = vehicle_curves_by_name
-    else:
+    # ---- pro Klasse erlaubte Fahrzeuge bauen ----
+    allowed_names_by_class: Dict[str, List[str]] = {}
+    for name, curve in vehicle_curves_by_name.items():
+        cls = str(curve.vehicle_class)
+        allowed_names_by_class.setdefault(cls, []).append(str(name))
+
+    # Falls vehicle_type gesetzt: nur innerhalb der betroffenen Klassen einschränken
+    if selected_vehicle_names is not None:
         unknown_names = [name for name in selected_vehicle_names if name not in vehicle_curves_by_name]
         if unknown_names:
             raise ValueError(f"vehicles.vehicle_type enthält unbekannte Fahrzeugnamen: {unknown_names}")
-        candidate_curves = {name: vehicle_curves_by_name[name] for name in selected_vehicle_names}
 
-    available_classes = sorted({curve.vehicle_class for curve in candidate_curves.values()})
+        restricted_by_class: Dict[str, List[str]] = {}
+        for name in selected_vehicle_names:
+            cls = str(vehicle_curves_by_name[name].vehicle_class)
+            restricted_by_class.setdefault(cls, []).append(str(name))
+
+        # In Klassen, die in vehicle_type vorkommen, ersetzen wir die erlaubte Liste durch die Restriktion.
+        for cls, names in restricted_by_class.items():
+            # dedupe (falls gleiche Namen mehrfach)
+            allowed_names_by_class[cls] = list(dict.fromkeys(names))
+
+    # Verfügbare Klassen = Klassen mit mind. einem Fahrzeug
+    available_classes = sorted([cls for cls, names in allowed_names_by_class.items() if len(names) > 0])
     if len(available_classes) == 0:
-        raise ValueError("Keine Fahrzeugklassen in candidate_curves gefunden.")
+        raise ValueError("Keine Fahrzeugklassen verfügbar.")
 
+    # ---- Klasse wählen ----
     if fleet_mix:
-        class_names = [class_name for class_name in fleet_mix.keys() if class_name in available_classes]
+        class_names = [cls for cls in fleet_mix.keys() if cls in available_classes]
         if len(class_names) == 0:
             raise ValueError("fleet_mix passt zu keiner verfügbaren Fahrzeugklasse.")
-        class_weights = np.array([float(fleet_mix[name]) for name in class_names], dtype=float)
+        class_weights = np.array([float(fleet_mix[cls]) for cls in class_names], dtype=float)
         if np.any(class_weights < 0.0) or float(class_weights.sum()) <= 0.0:
             raise ValueError("fleet_mix Gewichte müssen >= 0 sein und eine positive Summe haben.")
         chosen_class = str(random_generator.choice(class_names, p=class_weights / float(class_weights.sum())))
     else:
         chosen_class = str(random_generator.choice(available_classes))
 
-    vehicle_names_in_class = [
-        curve.vehicle_name for curve in candidate_curves.values() if str(curve.vehicle_class) == chosen_class
-    ]
+    # ---- Fahrzeug innerhalb der Klasse wählen ----
+    vehicle_names_in_class = allowed_names_by_class.get(chosen_class, [])
     if len(vehicle_names_in_class) == 0:
         raise ValueError(f"Keine Fahrzeuge in Klasse '{chosen_class}' verfügbar.")
     chosen_vehicle_name = str(random_generator.choice(vehicle_names_in_class))
