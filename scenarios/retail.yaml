@@ -39,8 +39,8 @@ vehicles:
   soc_target: 0.95                                             # Gewünschter Ladezustand am Ende des Ladeprozesses
   vehicle_curve_csv: "../data/Ladekurven_Master.csv"           # Batteriekapazität und Ladekurve nach SOC
   fleet_mix:                                                   # Gewichtung der Fahrzeugtypen - PKW & Transporter
-    PKW: 0.5
-    Transporter: 0.5
+    PKW: 0.95
+    Transporter: 0.05
   vehicle_type: ["Mercedes E-Sprinter"]                        # Fahrzeuge können bei bekannten Fuhrpark spezifisch als In-Liste eingegeben werden (z.B. ["Fiat 500e Hatchback", "Audi e-tron GT", "Mercedes E-Sprinter"])
 
 # =============================================================================

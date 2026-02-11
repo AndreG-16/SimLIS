@@ -4,8 +4,8 @@ simulation_horizon_days: 3                                    # gewünschter Ana
 
 start_datetime: "2025-03-29 00:00"                            # Zeitpunkt, ab dem die Simulation beginnen soll
 
-charging_strategy: "generation"                                   # "immediate" | "market" | "pv"
-localload_pv_market_csv: "../data/localload_pv_market.csv"    # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
+charging_strategy: "generation"                               # "immediate" | "market" | "pv"
+localload_pv_market_csv: "../data/localload_pv_logistics_center.csv"    # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
   
 timezone: "Europe/Berlin"                                     # Zeitzone, in der sich die Anlage befindet
 holidays:
@@ -14,10 +14,10 @@ holidays:
   dates: []                                                   # zusätzliche bekannte betriebsfreie Tage manuell eingeben, getrennt durch neue Zeile (- "2026-01-01")
 
 site:
-  number_chargers: 20                                          # Anzahl der Ladepunkte am Standort
-  rated_power_kw: 22                                         # Verfügbare Leistung pro Ladepunkt
+  number_chargers: 20                                         # Anzahl der Ladepunkte am Standort
+  rated_power_kw: 22                                          # Verfügbare Leistung pro Ladepunkt
   grid_limit_p_avb_kw: 200                                    # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
-  expected_sessions_per_charger_per_day: [1.0, 4.0]            # erwartete Ladevorgänge pro LP und Tag
+  expected_sessions_per_charger_per_day: [1.0, 4.0]           # erwartete Ladevorgänge pro LP und Tag
   charger_efficiency: 0.95                                    # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
   allow_cross_day_charging: true                              # Ermöglicht Ladungen über Mitternacht hinaus
 
