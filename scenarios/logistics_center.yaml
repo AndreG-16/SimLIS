@@ -5,7 +5,7 @@ simulation_horizon_days: 3                                    # gewünschter Ana
 start_datetime: "2025-03-29 00:00"                            # Zeitpunkt, ab dem die Simulation beginnen soll
 
 charging_strategy: "generation"                               # "immediate" | "market" | "pv"
-localload_pv_market_csv: "../data/localload_pv_logistics_center.csv"    # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
+localload_pv_market_csv: "../data/localload_pv_market_logistics_center.csv"    # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
   
 timezone: "Europe/Berlin"                                     # Zeitzone, in der sich die Anlage befindet
 holidays:
@@ -15,7 +15,7 @@ holidays:
 
 site:
   number_chargers: 20                                         # Anzahl der Ladepunkte am Standort
-  rated_power_kw: 22                                          # Verfügbare Leistung pro Ladepunkt
+  rated_power_kw: 12                                          # Verfügbare Leistung pro Ladepunkt
   grid_limit_p_avb_kw: 200                                    # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
   expected_sessions_per_charger_per_day: [1.0, 4.0]           # erwartete Ladevorgänge pro LP und Tag
   charger_efficiency: 0.95                                    # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
@@ -24,7 +24,7 @@ site:
   # =============================================================================
   # Angaben zur lokalen PV-Anlage
   # =============================================================================
-  pv_system_size_kwp: 100                                      # Größe der untersuchten Anlage in kWp
+  pv_system_size_kwp: 3000                                      # Größe der untersuchten Anlage in kWp
   
   # =============================================================================
   # Grundlast des Standorts - Gebäudeprofil
@@ -39,8 +39,8 @@ vehicles:
   soc_target: 0.95                                             # Gewünschter Ladezustand am Ende des Ladeprozesses
   vehicle_curve_csv: "../data/Ladekurven_Master.csv"           # Batteriekapazität und Ladekurve nach SOC
   fleet_mix:                                                   # Gewichtung der Fahrzeugtypen - PKW & Transporter
-    PKW: 0.5
-    Transporter: 0.5
+    PKW: 0.05
+    Transporter: 0.95
   vehicle_type: ["Mercedes E-Sprinter"]                        # Fahrzeuge können bei bekannten Fuhrpark spezifisch als In-Liste eingegeben werden (z.B. ["Fiat 500e Hatchback", "Audi e-tron GT", "Mercedes E-Sprinter"])
 
 # =============================================================================
