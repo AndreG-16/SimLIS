@@ -5,7 +5,7 @@ simulation_horizon_days: 3                                    # gewünschter Ana
 start_datetime: "2025-03-29 00:00"                            # Zeitpunkt, ab dem die Simulation beginnen soll
 
 charging_strategy: "immediate"                                # "immediate" | "market" | "pv"
-localload_pv_market_csv: "../data/localload_pv_market.csv"    # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
+localload_pv_market_csv: "../data/localload_pv_market_highway.csv"    # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
   
 timezone: "Europe/Berlin"                                     # Zeitzone, in der sich die Anlage befindet
 holidays:
