@@ -1,10 +1,10 @@
 site_type: logistics_center                                   # Standort des Ladepunkts
 time_resolution_min: 15                                       # Zeitschritt, in der die Simulation berechnet wird
-simulation_horizon_days: 3                                    # gewünschter Analysehorizont in Tagen
+simulation_horizon_days: 365                                    # gewünschter Analysehorizont in Tagen
 
 start_datetime: "2025-03-29 00:00"                            # Zeitpunkt, ab dem die Simulation beginnen soll
 
-charging_strategy: "generation"                               # "immediate" | "market" | "pv"
+charging_strategy: "market"                               # "immediate" | "market" | "pv"
 localload_pv_market_csv: "../data/localload_pv_market_logistics_center.csv"    # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
   
 timezone: "Europe/Berlin"                                     # Zeitzone, in der sich die Anlage befindet
@@ -15,8 +15,8 @@ holidays:
 
 site:
   number_chargers: 20                                         # Anzahl der Ladepunkte am Standort
-  rated_power_kw: 12                                          # Verfügbare Leistung pro Ladepunkt
-  grid_limit_p_avb_kw: 200                                    # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  rated_power_kw: 100                                          # Verfügbare Leistung pro Ladepunkt
+  grid_limit_p_avb_kw: 500                                    # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
   expected_sessions_per_charger_per_day: [1.0, 4.0]           # erwartete Ladevorgänge pro LP und Tag
   charger_efficiency: 0.95                                    # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
   allow_cross_day_charging: true                              # Ermöglicht Ladungen über Mitternacht hinaus

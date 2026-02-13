@@ -1,8 +1,8 @@
 site_type: highway                                            # Standort des Ladepunkts
-time_resolution_min: 1                                       # Zeitschritt, in der die Simulation berechnet wird
-simulation_horizon_days: 3                                    # gewünschter Analysehorizont in Tagen
+time_resolution_min: 5                                       # Zeitschritt, in der die Simulation berechnet wird
+simulation_horizon_days: 365                                    # gewünschter Analysehorizont in Tagen
 
-start_datetime: "2025-03-29 00:00"                            # Zeitpunkt, ab dem die Simulation beginnen soll
+start_datetime: "2025-01-01 00:00"                            # Zeitpunkt, ab dem die Simulation beginnen soll
 
 charging_strategy: "immediate"                                # "immediate" | "market" | "pv"
 localload_pv_market_csv: "../data/localload_pv_market_highway.csv"    # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
@@ -10,7 +10,7 @@ localload_pv_market_csv: "../data/localload_pv_market_highway.csv"    # CSV-Date
 timezone: "Europe/Berlin"                                     # Zeitzone, in der sich die Anlage befindet
 holidays:
   country: "DE"
-  subdivision: "BY"                                           # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
+  subdivision: "HH"                                           # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
   dates: []                                                   # zusätzliche bekannte betriebsfreie Tage manuell eingeben, getrennt durch neue Zeile (- "2026-01-01")
 
 site:
@@ -24,12 +24,12 @@ site:
   # =============================================================================
   # Angaben zur lokalen PV-Anlage
   # =============================================================================
-  pv_system_size_kwp: 1000                                     # Größe der untersuchten Anlage in kWp
+  pv_system_size_kwp: 1000                                    # Größe der untersuchten Anlage in kWp
   
   # =============================================================================
   # Grundlast des Standorts - Gebäudeprofil
   # =============================================================================
-  base_load_annual_kwh: 50000                                 # jährlicher standortspezifischer Verbrauch
+  base_load_annual_kwh: 10000                                  # jährlicher standortspezifischer Verbrauch
 
 # =============================================================================
 # Fuhrparkbeschreibung – Ladekurven + Kapazitäten kommen aus CSV
@@ -54,9 +54,9 @@ arrival_time_distribution:
 
   # Skalierung der Ladevorgänge je nach Tagtyp
   weekday_weight:
-    working_day: [0.55, 0.95]                         # mittlerer bis hoher Betrieb durch Pendler und Lieferungen
-    saturday: [0.40, 0.70]                            # mittlerer Betrieb durch Tagesausflüge
-    sunday_holiday: [0.4, 0.80]                       # mittlerer Betrieb durch Tages- und Wochenendausflüge
+    working_day: 0.8                         # mittlerer bis hoher Betrieb durch Pendler und Lieferungen
+    saturday: 0.6                            # mittlerer Betrieb durch Tagesausflüge
+    sunday_holiday: 0.6                       # mittlerer Betrieb durch Tages- und Wochenendausflüge
 
   components_per_weekday:
     # Highway: zwei Peaks – mittags und am frühen Abend
@@ -64,40 +64,40 @@ arrival_time_distribution:
     working_day:
       - name: peak_1                                  # Ladungen zur Mittagspause
         distribution: normal
-        mu: [11.0, 14.0]                              # Peak in Stunden seit Mitternacht (z. B. 12.0 = 12:00 Uhr)
-        sigma: [0.5, 2.5]                             # Streuung in Stunden
+        mu: 13.0                                      # Peak in Stunden seit Mitternacht (z. B. 12.0 = 12:00 Uhr)
+        sigma: 2.0                                    # Streuung in Stunden
         weight: 0.5                                   # Gewichtung innerhalb working_day
 
       - name: peak_2
         distribution: normal
-        mu: [17.0, 19.0]
-        sigma: [0.5, 2.2]
+        mu: 18
+        sigma: 1.5
         weight: 0.5
 
     saturday:
       - name: peak_3
         distribution: normal
-        mu: [11.0, 15.0]
-        sigma: [1.0, 2.5]
+        mu: 13.0
+        sigma: 1.5
         weight: 0.6
 
       - name: peak_4
         distribution: normal
-        mu: [17.0, 19.0]
-        sigma: [0.0, 2.5]
+        mu: 18.0
+        sigma: 1.5
         weight: 0.4
 
     sunday_holiday:
       - name: peak_5
         distribution: normal
-        mu: [11.0, 16.0]
-        sigma: [0.5, 2.5]
+        mu: 14
+        sigma: 2.0
         weight: 0.7
 
       - name: peak_6
         distribution: normal
-        mu: [17.0, 19.0]
-        sigma: [0.5, 2.5]
+        mu: 18.0
+        sigma: 1.0
         weight: 0.3
 
 
@@ -107,21 +107,21 @@ parking_duration_distribution:
   type: mixture
   time_unit: minutes
   max_duration_minutes: 180                 # Obergrenze maximale Ladedauer
-  min_duration_minutes: 10                  # Untergrenze minimale Ladedauer
+  min_duration_minutes: 15                  # Untergrenze minimale Ladedauer
 
   components:
   # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
     - name: short_stay                      # typischer HPC-Stop (20–40 Minuten)
       distribution: normal
       weight: 0.85                          # Anteil Kurzparker
-      mu: [20, 30]                          # mittlere Parkdauer in Minuten
-      sigma: [5, 10]                        # Streuung in Minuten
+      mu: 30                                # mittlere Parkdauer in Minuten
+      sigma: 10                             # Streuung in Minuten
 
     - name: long_stay
       distribution: normal
       weight: 0.15                          # Anteil Langzeitparker
-      mu: [40, 80]                          # längere Stopps in Minuten
-      sigma: [10, 15]
+      mu: 50                                # längere Stopps in Minuten
+      sigma: 10
 
 
 # Batteriezustand bei Ankunft; Verteilung ist eine Mischung aus spontanem Laden und Laden aufgrund niedrigem Batteriezustand
@@ -135,12 +135,12 @@ soc_at_arrival_distribution:
   # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
     - name: low_battery_charging            # Laden aufgrund leerer Batterie / gezielte Anfahrt
       distribution: beta
-      weight: 0.70
-      alpha: [2.0, 3.0]                     # formt Peak bei ca. 0.10–0.20
-      beta: [5.0, 7.0]
+      weight: 0.85
+      alpha: 1.8                     
+      beta: 4.5
 
     - name: opportunistic_charging          # Laden aus Gelegenheit
       distribution: normal
-      weight: 0.30
-      mu: [0.45, 0.60]
-      sigma: [0.08, 0.12]
+      weight: 0.15
+      mu: 0.4
+      sigma: 0.05

@@ -1387,29 +1387,41 @@ def charging_strategy_immediate(
     curve: VehicleChargingCurve,
     state_of_charge_at_arrival: float,
     scenario: dict,
+    preallocated_site_kw_per_step: Optional[np.ndarray] = None,
+    preallocated_pv_site_kw_per_step: Optional[np.ndarray] = None,
+    supply_mode: Literal["site", "pv_only", "grid_only"] = "site",
 ) -> Dict[str, Any]:
     """
     Vergibt Ladeleistung an eine Session nach der Immediate-Strategie
     (chronologisch laden, solange möglich).
 
-    In jedem Simulationsschritt innerhalb der Standzeit wird die maximal
-    allokierbare Ladeleistung über ``available_power_for_session_step(...)``
-    bestimmt. Diese Leistung wird
+    Die Funktion unterstützt optional eine Vorbelegung ("preallocation") je Zeitschritt,
+    z. B. wenn zuvor PV-only geplant wurde und nun immediate als Fallback weitere Leistung
+    hinzufügen soll. Die Vorbelegung wird:
+      - in die Plan-Zeitreihen übernommen,
+      - in der SoC-/Restenergie-Fortschreibung berücksichtigt,
+      - und als bereits belegte Ladepunktleistung an ``available_power_for_session_step(...)``
+        übergeben (``already_allocated_on_this_charger_kw``), damit das Ladepunktlimit korrekt
+        eingehalten wird.
+
+    In jedem Simulationsschritt innerhalb der Standzeit wird die maximal allokierbare
+    Zusatz-Leistung über ``available_power_for_session_step(...)`` bestimmt. Diese Leistung wird
 
     1) in die session-lokalen Plan-Zeitreihen geschrieben und
     2) in die globalen Reservierungs-Zeitreihen addiert (in-place),
 
-    sodass nachfolgende Sessions die bereits belegte Standortkapazität
-    berücksichtigen.
+    sodass nachfolgende Sessions die bereits belegte Standortkapazität berücksichtigen.
 
         Einheiten und Konventionen
         -------------------------
         - ``plan_*_kw_per_step`` und ``reserved_*_kw_per_step`` sind mittlere Leistungen
-        je Simulationsschritt in kW.
+          je Simulationsschritt in kW.
         - KPI-/Zustandsgrößen bleiben Energien in kWh:
-        die pro Schritt zugewiesene Energie ergibt sich als ``alloc_kw * step_hours``.
+          die pro Schritt zugewiesene Energie ergibt sich als ``alloc_kw * step_hours``.
         - Der SoC wird mit Batterieseiten-Energie aktualisiert:
-        ``battery_energy_kwh = alloc_site_kwh * charger_efficiency``.
+          ``battery_energy_kwh = alloc_site_kwh * charger_efficiency``.
+        - Masterkurve/Leistungslimits in ``available_power_for_session_step`` werden je nach
+          ``supply_mode`` aus PV und/oder Netz abgeleitet.
 
         Parameter
         ----------
@@ -1418,17 +1430,18 @@ def charging_strategy_immediate(
         session_departure_step:
             Abfahrts-Schritt (exklusive) im Simulationsraster.
         required_site_energy_kwh:
-            Benötigte Restenergie auf Standortseite (kWh), um den Ziel-SoC zu erreichen.
+            Benötigte Energie auf Standortseite (kWh), um den Ziel-SoC zu erreichen.
+            (Wird intern um bereits vorallokierte Energie reduziert.)
         pv_generation_kw_per_step:
             PV-Erzeugung je Simulationsschritt als Leistung (kW).
         base_load_kw_per_step:
             Grundlast je Simulationsschritt als Leistung (kW).
         reserved_total_ev_power_kw_per_step:
             Bereits reservierte EV-Ladeleistung gesamt (PV + Netz) je Schritt (kW).
-            Wird in-place um die in dieser Funktion geplanten Leistungen erhöht.
+            Wird in-place um die in dieser Funktion geplanten Zusatzleistungen erhöht.
         reserved_pv_ev_power_kw_per_step:
             Bereits reservierte EV-Ladeleistung aus PV je Schritt (kW).
-            Wird in-place um die in dieser Funktion geplanten PV-Anteile erhöht.
+            Wird in-place um die in dieser Funktion geplanten PV-Zusatzanteile erhöht.
         curve:
             Fahrzeug-Ladekurve (SoC-Stützstellen und Batterieseiten-Leistung).
         state_of_charge_at_arrival:
@@ -1436,16 +1449,27 @@ def charging_strategy_immediate(
         scenario:
             Szenario-Konfiguration. Verwendet u. a.:
             ``scenario["time_resolution_min"]`` und ``scenario["site"]["charger_efficiency"]``.
+        preallocated_site_kw_per_step:
+            Optional: bereits geplante Standort-Leistung je Schritt (kW) innerhalb des Session-Fensters.
+            Wird als Baseline in die Pläne übernommen und in SoC/Restenergie berücksichtigt.
+        preallocated_pv_site_kw_per_step:
+            Optional: PV-Anteil der bereits geplanten Leistung je Schritt (kW).
+            Wird auf ``[0, preallocated_site_kw_per_step]`` geklemmt.
+        supply_mode:
+            Versorgungsmodus für die Zusatzleistung:
+            - ``"site"``: PV + Netz (Standardverhalten wie bisher)
+            - ``"pv_only"``: nur PV-Überschuss
+            - ``"grid_only"``: nur Netz (typisch für PV-Fallback)
 
         Rückgabe
         --------
         Dict[str, Any]
             Session-relevante Ergebnisse:
-            - ``plan_site_kw_per_step``: geplante Ladeleistung (Standortseite) je Schritt (kW)
+            - ``plan_site_kw_per_step``: gesamte geplante Leistung (Baseline + Zusatz) je Schritt (kW)
             - ``plan_pv_site_kw_per_step``: PV-Anteil an der geplanten Leistung je Schritt (kW)
             - ``plan_market_kw_per_step``: in dieser Strategie 0 (Array gleicher Länge)
-            - ``charged_site_kwh``: tatsächlich zugewiesene Standortenergie (kWh)
-            - ``charged_pv_site_kwh``: tatsächlich zugewiesene PV-Energie (kWh)
+            - ``charged_site_kwh``: insgesamt zugewiesene Standortenergie (kWh)
+            - ``charged_pv_site_kwh``: insgesamt zugewiesene PV-Energie (kWh)
             - ``remaining_site_kwh``: verbleibender Restbedarf auf Standortseite (kWh)
             - ``final_soc``: SoC am Ende der geplanten/allokierten Schritte [0..1]
     """
@@ -1462,8 +1486,27 @@ def charging_strategy_immediate(
     end_excl = int(min(int(session_departure_step), n_total))
     window_len = int(max(0, end_excl - start))
 
-    plan_site_kw_per_step = np.zeros(window_len, dtype=float)
-    plan_pv_site_kw_per_step = np.zeros(window_len, dtype=float)
+    # -----------------------------
+    # Baseline (Vorallokation) je Step
+    # -----------------------------
+    base_site_kw = np.zeros(window_len, dtype=float)
+    base_pv_kw = np.zeros(window_len, dtype=float)
+
+    if preallocated_site_kw_per_step is not None:
+        tmp = np.asarray(preallocated_site_kw_per_step, float).reshape(-1)
+        base_site_kw[: min(window_len, len(tmp))] = tmp[: min(window_len, len(tmp))]
+
+    if preallocated_pv_site_kw_per_step is not None:
+        tmp = np.asarray(preallocated_pv_site_kw_per_step, float).reshape(-1)
+        base_pv_kw[: min(window_len, len(tmp))] = tmp[: min(window_len, len(tmp))]
+
+    base_site_kw = np.maximum(base_site_kw, 0.0)
+    base_pv_kw = np.clip(np.maximum(base_pv_kw, 0.0), 0.0, base_site_kw)
+
+    # Output-Pläne: enthalten Baseline + Zusatz
+    plan_site_kw_per_step = base_site_kw.copy()
+    plan_pv_site_kw_per_step = base_pv_kw.copy()
+    plan_market_kw_per_step = np.zeros(window_len, dtype=float)
 
     remaining_site_kwh = float(max(required_site_energy_kwh, 0.0))
     state_of_charge = float(np.clip(state_of_charge_at_arrival, 0.0, 1.0))
@@ -1471,13 +1514,20 @@ def charging_strategy_immediate(
     battery_capacity_kwh = float(max(curve.battery_capacity_kwh, 1e-12))
     eff = float(charger_efficiency)
 
-    charged_site_kwh = 0.0
-    charged_pv_site_kwh = 0.0
-
-    for abs_step in range(start, end_excl):
+    for local_i, abs_step in enumerate(range(start, end_excl)):
         if remaining_site_kwh <= 1e-12 or state_of_charge >= 1.0 - 1e-12:
             break
 
+        # (1) Baseline dieses Steps berücksichtigen (SoC / Restenergie)
+        base_kw_i = float(base_site_kw[local_i])
+        if base_kw_i > 1e-12:
+            base_kwh_i = base_kw_i * step_hours_safe
+            remaining_site_kwh -= base_kwh_i
+            state_of_charge = float(min(1.0, state_of_charge + (base_kwh_i * eff) / battery_capacity_kwh))
+            if remaining_site_kwh <= 1e-12 or state_of_charge >= 1.0 - 1e-12:
+                break
+
+        # (2) Zusatzleistung immediate (chronologisch)
         alloc_site_kw, alloc_pv_kw = available_power_for_session_step(
             step_index=int(abs_step),
             scenario=scenario,
@@ -1488,8 +1538,8 @@ def charging_strategy_immediate(
             base_load_kw_per_step=base_load_kw_per_step,
             reserved_total_ev_power_kw_per_step=reserved_total_ev_power_kw_per_step,
             reserved_pv_ev_power_kw_per_step=reserved_pv_ev_power_kw_per_step,
-            already_allocated_on_this_charger_kw=0.0,
-            supply_mode="site",
+            already_allocated_on_this_charger_kw=float(base_kw_i),
+            supply_mode=supply_mode,
         )
 
         alloc_site_kw = float(alloc_site_kw)
@@ -1498,32 +1548,30 @@ def charging_strategy_immediate(
 
         alloc_pv_kw = float(np.clip(float(alloc_pv_kw), 0.0, alloc_site_kw))
 
-        local_i = int(abs_step - start)
         plan_site_kw_per_step[local_i] += alloc_site_kw
         plan_pv_site_kw_per_step[local_i] += alloc_pv_kw
 
         reserved_total_ev_power_kw_per_step[abs_step] += alloc_site_kw
         reserved_pv_ev_power_kw_per_step[abs_step] += alloc_pv_kw
 
-        # KPI-/Zustandsgrößen in Energie (kWh) => Integration über step_hours
         alloc_site_kwh = alloc_site_kw * step_hours_safe
-        alloc_pv_kwh = alloc_pv_kw * step_hours_safe
-
-        charged_site_kwh += alloc_site_kwh
-        charged_pv_site_kwh += alloc_pv_kwh
         remaining_site_kwh -= alloc_site_kwh
 
-        # SoC-Update
         battery_energy_kwh = alloc_site_kwh * eff
         state_of_charge = float(min(1.0, state_of_charge + battery_energy_kwh / battery_capacity_kwh))
+
+    total_charged_site_kwh = float(np.sum(plan_site_kw_per_step) * step_hours_safe)
+    total_charged_pv_kwh = float(
+        np.sum(np.clip(plan_pv_site_kw_per_step, 0.0, plan_site_kw_per_step)) * step_hours_safe
+    )
 
     return {
         "plan_site_kw_per_step": plan_site_kw_per_step,
         "plan_pv_site_kw_per_step": plan_pv_site_kw_per_step,
-        "plan_market_kw_per_step": np.zeros_like(plan_site_kw_per_step),
-        "charged_site_kwh": float(charged_site_kwh),
-        "charged_pv_site_kwh": float(charged_pv_site_kwh),
-        "remaining_site_kwh": float(max(remaining_site_kwh, 0.0)),
+        "plan_market_kw_per_step": plan_market_kw_per_step,  # immediate => 0
+        "charged_site_kwh": total_charged_site_kwh,
+        "charged_pv_site_kwh": total_charged_pv_kwh,
+        "remaining_site_kwh": float(max(required_site_energy_kwh - total_charged_site_kwh, 0.0)),
         "final_soc": float(state_of_charge),
     }
 
@@ -1837,35 +1885,46 @@ def charging_strategy_pv(
     reserved_pv_ev_power_kw_per_step: np.ndarray,
     curve: VehicleChargingCurve,
     state_of_charge_at_arrival: float,
+    preallocated_site_kw_per_step: Optional[np.ndarray] = None,
+    preallocated_pv_site_kw_per_step: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
     """
     Plant und allokiert Ladeleistung nach dem Prinzip „PV zuerst, danach Netz nach Marktpreis“.
 
+    Optional kann eine Vorbelegung ("preallocation") je Zeitschritt übergeben werden,
+    z. B. wenn bereits eine (Teil-)Planung existiert. Diese Vorbelegung wird:
+
+      - als Baseline in ``plan_site_kw_per_step`` / ``plan_pv_site_kw_per_step`` übernommen,
+      - in der Fortschreibung von SoC und Restenergiebedarf berücksichtigt,
+      - als bereits belegte Ladepunktleistung an ``available_power_for_session_step(...)``
+        übergeben (``already_allocated_on_this_charger_kw``), damit das Ladepunktlimit
+        bei zusätzlicher PV-Planung korrekt eingehalten wird.
+
     Die Strategie besteht aus zwei Stufen innerhalb der Session-Standzeit:
 
     1) PV-only (chronologisch)
-    In jedem Simulationsschritt wird ausschließlich mit PV-Überschuss geladen
-    (``supply_mode="pv_only"`` via ``available_power_for_session_step(...)``).
-    Die dabei geplante Leistung wird in die Plan-Arrays geschrieben und in die globalen
-    Reservierungen (in-place) übernommen. SoC und Restenergiebedarf werden pro Schritt
-    konsistent fortgeschrieben.
+       In jedem Simulationsschritt wird zusätzlich zur Vorbelegung ausschließlich mit PV-Überschuss
+       geladen (``supply_mode="pv_only"`` via ``available_power_for_session_step(...)``).
+       Die dabei geplante Zusatzleistung wird in die Plan-Arrays geschrieben und in die globalen
+       Reservierungen (in-place) übernommen. SoC und Restenergiebedarf werden pro Schritt
+       konsistent fortgeschrieben.
 
     2) Grid-only als Market-Fallback (preisgeführt, wiederverwendet)
-    Falls nach PV-only noch Energiebedarf übrig ist, wird zusätzlicher Netzbezug über die
-    Market-Strategie geplant (``charging_strategy_market(..., supply_mode="grid_only")``).
-    Die bereits geplante PV-Leistung wird als Vorbelegung über
-    ``preallocated_site_kw_per_step`` und ``preallocated_pv_site_kw_per_step`` übergeben.
-    Dadurch plant die Market-Strategie ausschließlich Zusatzleistung aus dem Netz, während
-    Ladepunktlimit, SoC und Ladekurve weiterhin konsistent bleiben.
+       Falls nach PV-only noch Energiebedarf übrig ist, wird zusätzlicher Netzbezug über die
+       Market-Strategie geplant (``charging_strategy_market(..., supply_mode="grid_only")``).
+       Die bis dahin geplante Leistung (Vorbelegung + PV-only) wird als Vorbelegung über
+       ``preallocated_site_kw_per_step`` und ``preallocated_pv_site_kw_per_step`` übergeben.
+       Dadurch plant die Market-Strategie ausschließlich Zusatzleistung aus dem Netz, während
+       Ladepunktlimit, SoC und Ladekurve weiterhin konsistent bleiben.
 
         Einheiten und Konventionen
         --------------------------
         - ``plan_*_kw_per_step`` und ``reserved_*_kw_per_step`` sind mittlere Leistungen je
-        Simulationsschritt in kW.
+          Simulationsschritt in kW.
         - KPI-/Zustandsgrößen sind Energien in kWh:
-        pro Schritt gilt ``alloc_kwh = alloc_kw * step_hours``.
+          pro Schritt gilt ``alloc_kwh = alloc_kw * step_hours``.
         - Der SoC wird mit Batterieseiten-Energie aktualisiert:
-        ``battery_energy_kwh = alloc_site_kwh * charger_efficiency``.
+          ``battery_energy_kwh = alloc_site_kwh * charger_efficiency``.
 
         Parameter
         ----------
@@ -1877,7 +1936,8 @@ def charging_strategy_pv(
         session_departure_step:
             Abfahrts-Schritt (exklusive) im Simulationsraster.
         required_site_energy_kwh:
-            Benötigte Restenergie auf Standortseite (kWh), um den Ziel-SoC zu erreichen.
+            Benötigte Energie auf Standortseite (kWh), um den Ziel-SoC zu erreichen.
+            (Wird intern um bereits vorallokierte Energie reduziert.)
         market_price_eur_per_mwh:
             Marktpreis je Simulationsschritt (€/MWh), wird in der Grid-only-Phase zur Slot-Sortierung genutzt.
         pv_generation_kw_per_step:
@@ -1886,20 +1946,25 @@ def charging_strategy_pv(
             Grundlast je Simulationsschritt als Leistung (kW).
         reserved_total_ev_power_kw_per_step:
             Bereits reservierte EV-Ladeleistung gesamt (PV + Netz) je Schritt (kW).
-            Wird in-place um die in dieser Funktion geplanten Leistungen erhöht.
+            Wird in-place um die in dieser Funktion geplanten Zusatzleistungen erhöht.
         reserved_pv_ev_power_kw_per_step:
             Bereits reservierte EV-Ladeleistung aus PV je Schritt (kW).
-            Wird in-place um die in dieser Funktion geplanten PV-Anteile erhöht.
+            Wird in-place um die in dieser Funktion geplanten PV-Zusatzanteile erhöht.
         curve:
             Fahrzeug-Ladekurve (SoC-Stützstellen und Batterieseiten-Leistung).
         state_of_charge_at_arrival:
             SoC zu Beginn der Session als Anteil [0..1].
+        preallocated_site_kw_per_step:
+            Optional: bereits geplante Standort-Leistung je Schritt (kW) innerhalb des Session-Fensters.
+        preallocated_pv_site_kw_per_step:
+            Optional: PV-Anteil der bereits geplanten Leistung je Schritt (kW).
+            Wird auf ``[0, preallocated_site_kw_per_step]`` geklemmt.
 
         Rückgabe
         --------
         Dict[str, Any]
             Session-relevante Ergebnisse:
-            - ``plan_site_kw_per_step``: gesamte geplante Leistung (PV + Netz) je Schritt (kW)
+            - ``plan_site_kw_per_step``: gesamte geplante Leistung (Vorbelegung + PV + Netz) je Schritt (kW)
             - ``plan_pv_site_kw_per_step``: PV-Anteil der geplanten Leistung je Schritt (kW)
             - ``plan_market_kw_per_step``: zusätzlicher Netz-/Market-Anteil je Schritt (kW)
             - ``charged_site_kwh``: insgesamt geladene Energie (kWh), über alle Schritte integriert
@@ -1921,16 +1986,34 @@ def charging_strategy_pv(
     end_excl = int(min(int(session_departure_step), n_total))
     window_len = int(max(0, end_excl - start))
 
-    plan_site_kw_per_step = np.zeros(window_len, dtype=float)
-    plan_pv_site_kw_per_step = np.zeros(window_len, dtype=float)
+    # ---------------------------------------------------------------------
+    # Baseline (Vorallokation) je Step
+    # ---------------------------------------------------------------------
+    base_site_kw = np.zeros(window_len, dtype=float)
+    base_pv_kw = np.zeros(window_len, dtype=float)
+
+    if preallocated_site_kw_per_step is not None:
+        tmp = np.asarray(preallocated_site_kw_per_step, float).reshape(-1)
+        base_site_kw[: min(window_len, len(tmp))] = tmp[: min(window_len, len(tmp))]
+
+    if preallocated_pv_site_kw_per_step is not None:
+        tmp = np.asarray(preallocated_pv_site_kw_per_step, float).reshape(-1)
+        base_pv_kw[: min(window_len, len(tmp))] = tmp[: min(window_len, len(tmp))]
+
+    base_site_kw = np.maximum(base_site_kw, 0.0)
+    base_pv_kw = np.clip(np.maximum(base_pv_kw, 0.0), 0.0, base_site_kw)
+
+    plan_site_kw_per_step = base_site_kw.copy()
+    plan_pv_site_kw_per_step = base_pv_kw.copy()
     plan_market_kw_per_step = np.zeros(window_len, dtype=float)
 
     required_site_energy_kwh = float(max(required_site_energy_kwh, 0.0))
     remaining_site_kwh = float(required_site_energy_kwh)
+
     state_of_charge_at_arrival = float(np.clip(state_of_charge_at_arrival, 0.0, 1.0))
     state_of_charge = float(state_of_charge_at_arrival)
 
-    if window_len == 0 or remaining_site_kwh <= 1e-12:
+    if window_len == 0:
         return {
             "plan_site_kw_per_step": plan_site_kw_per_step,
             "plan_pv_site_kw_per_step": plan_pv_site_kw_per_step,
@@ -1946,11 +2029,20 @@ def charging_strategy_pv(
     eff = float(np.clip(charger_efficiency, 1e-12, 1.0))
 
     # ---------------------------------------------------------------------
-    # (1) PV-only: chronologisch planen + reservieren
+    # (1) PV-only: chronologisch planen + reservieren (zusätzlich zur Baseline)
     # ---------------------------------------------------------------------
     for local_i, abs_step in enumerate(range(start, end_excl)):
         if remaining_site_kwh <= 1e-12 or state_of_charge >= 1.0 - 1e-12:
             break
+
+        # Baseline dieses Steps in SoC/Restenergie berücksichtigen
+        base_kw_i = float(base_site_kw[local_i])
+        if base_kw_i > 1e-12:
+            base_kwh_i = base_kw_i * step_hours_safe
+            remaining_site_kwh -= base_kwh_i
+            state_of_charge = float(min(1.0, state_of_charge + (base_kwh_i * eff) / battery_capacity_kwh))
+            if remaining_site_kwh <= 1e-12 or state_of_charge >= 1.0 - 1e-12:
+                break
 
         pv_alloc_kw, pv_share_kw = available_power_for_session_step(
             step_index=int(abs_step),
@@ -1962,7 +2054,7 @@ def charging_strategy_pv(
             base_load_kw_per_step=base_load_kw_per_step,
             reserved_total_ev_power_kw_per_step=reserved_total_ev_power_kw_per_step,
             reserved_pv_ev_power_kw_per_step=reserved_pv_ev_power_kw_per_step,
-            already_allocated_on_this_charger_kw=0.0,
+            already_allocated_on_this_charger_kw=float(plan_site_kw_per_step[local_i]),
             supply_mode="pv_only",
         )
 
@@ -1976,7 +2068,7 @@ def charging_strategy_pv(
         plan_site_kw_per_step[local_i] += pv_alloc_kw
         plan_pv_site_kw_per_step[local_i] += pv_share_kw
 
-        # Reservierungen (kW)
+        # Reservierungen (nur Zusatzleistung)
         reserved_total_ev_power_kw_per_step[abs_step] += pv_alloc_kw
         reserved_pv_ev_power_kw_per_step[abs_step] += pv_share_kw
 
@@ -1987,10 +2079,14 @@ def charging_strategy_pv(
         battery_energy_kwh = pv_alloc_kwh * eff
         state_of_charge = float(min(1.0, state_of_charge + battery_energy_kwh / battery_capacity_kwh))
 
-    # Wenn PV-only schon gereicht hat -> fertig
-    if remaining_site_kwh <= 1e-12 or state_of_charge >= 1.0 - 1e-12:
-        charged_site_kwh = float(np.sum(plan_site_kw_per_step) * step_hours_safe)
-        charged_pv_site_kwh = float(np.sum(np.clip(plan_pv_site_kw_per_step, 0.0, plan_site_kw_per_step)) * step_hours_safe)
+    # Totals aus den Planreihen
+    charged_site_kwh = float(np.sum(plan_site_kw_per_step) * step_hours_safe)
+    charged_pv_site_kwh = float(
+        np.sum(np.clip(plan_pv_site_kw_per_step, 0.0, plan_site_kw_per_step)) * step_hours_safe
+    )
+
+    # Wenn PV-only (inkl. Vorbelegung) schon gereicht hat -> fertig
+    if (required_site_energy_kwh - charged_site_kwh) <= 1e-12 or state_of_charge >= 1.0 - 1e-12:
         return {
             "plan_site_kw_per_step": plan_site_kw_per_step,
             "plan_pv_site_kw_per_step": plan_pv_site_kw_per_step,
@@ -2005,7 +2101,7 @@ def charging_strategy_pv(
     # ---------------------------------------------------------------------
     # (2) Grid-only als Market-Fallback: Re-Use der Market-Strategie
     # ---------------------------------------------------------------------
-    market_res = charging_strategy_market(
+    charging_strategy_market_result = charging_strategy_market(
         session_arrival_step=int(start),
         session_departure_step=int(end_excl),
         required_site_energy_kwh=float(required_site_energy_kwh),
@@ -2022,10 +2118,9 @@ def charging_strategy_pv(
         supply_mode="grid_only",
     )
 
-    charged_market_kwh = float(np.sum(np.asarray(market_res["plan_market_kw_per_step"], float)) * step_hours_safe)
-
-    market_res["charged_market_kwh"] = charged_market_kwh
-    return market_res
+    charged_market_kwh = float(np.sum(np.asarray(charging_strategy_market_result["plan_market_kw_per_step"], float)) * step_hours_safe)
+    charging_strategy_market_result["charged_market_kwh"] = charged_market_kwh
+    return charging_strategy_market_result
 
 
 def plan_charging_for_day(
