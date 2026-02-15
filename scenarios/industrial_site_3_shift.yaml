@@ -4,20 +4,27 @@ simulation_horizon_days: 3                                    # gewünschter Ana
 
 start_datetime: "2025-03-29 00:00"                            # Zeitpunkt, ab dem die Simulation beginnen soll
 
-charging_strategy: "generation"                               # "immediate" | "market" | "pv"
+charging_strategy: "pv"                                       # "immediate" | "market" | "pv"
 charging_strategy_fallback:                                   # "immediate" | "market" 
 localload_pv_market_csv: "../data/localload_pv_market.csv"    # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
+
+energy_expenses:
+  energy_cost_source: "csv"                                   # "csv" oder "fixed"
+  fixed_energy_cost_ct_per_kwh:                               # Energiekosten bei Bezug aus dem Netz, nur relevant, wenn "source = fixed"
+  energy_selling_price_ct_per_kwh: 40                         # Energieverkaufspreis an der Ladesäule für den Kunden
+
   
 timezone: "Europe/Berlin"                                     # Zeitzone, in der sich die Anlage befindet
 holidays:
   country: "DE"
-  subdivision: "BY"                                           # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
+  subdivision: "HH"                                           # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
   dates: []                                                   # zusätzliche bekannte betriebsfreie Tage manuell eingeben, getrennt durch neue Zeile (- "2026-01-01")
 
 site:
   number_chargers: 20                                         # Anzahl der Ladepunkte am Standort
-  rated_power_kw: 12                                          # Verfügbare Leistung pro Ladepunkt
+  charger_power_kw: 12                                        # Verfügbare Leistung pro Ladepunkt
   grid_limit_p_avb_kw: 1000                                   # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  expected_sessions_per_charger_per_day: 3                           # erwartete Ladevorgänge pro LP und Tag
   charger_efficiency: 0.95                                    # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
   allow_cross_day_charging: true                              # Ermöglicht Ladungen über Mitternacht hinaus
 

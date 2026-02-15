@@ -1,12 +1,17 @@
 site_type: retail                                                    # Standort des Ladepunkts
-time_resolution_min: 5                                               # Zeitschritt, in der die Simulation berechnet wird
+time_resolution_min: 15                                              # Zeitschritt, in der die Simulation berechnet wird
 simulation_horizon_days: 365                                         # gewünschter Analysehorizont in Tagen
 
-start_datetime: "2025-03-29 00:00"                                   # Zeitpunkt, ab dem die Simulation beginnen soll
+start_datetime: "2025-01-01 00:00"                                   # Zeitpunkt, ab dem die Simulation beginnen soll
 
-charging_strategy: "immediate"                                       # "immediate" | "market" | "pv"
-charging_strategy_fallback:                                          # "immediate" | "market" 
+charging_strategy: "pv"                                          # "immediate" | "market" | "pv"
+charging_strategy_fallback: "market"                                         # "immediate" | "market" 
 localload_pv_market_csv: "../data/localload_pv_market_retail.csv"    # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
+
+energy_expenses:
+  energy_cost_source: "csv"                                          # "csv" oder "fixed"
+  fixed_energy_cost_ct_per_kwh:                                      # Energiekosten bei Bezug aus dem Netz, nur relevant, wenn "source = fixed"
+  energy_selling_price_ct_per_kwh: 70                                # Energieverkaufspreis an der Ladesäule für den Kunden
   
 timezone: "Europe/Berlin"                                            # Zeitzone, in der sich die Anlage befindet
 holidays:
@@ -15,22 +20,22 @@ holidays:
   dates: []                                                          # zusätzliche bekannte betriebsfreie Tage manuell eingeben, getrennt durch neue Zeile (- "2026-01-01")
 
 site:
-  number_chargers: 2                                                 # Anzahl der Ladepunkte am Standort
-  rated_power_kw: 50                                                 # Verfügbare Leistung pro Ladepunkt
-  grid_limit_p_avb_kw: 200                                           # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
-  expected_sessions_per_charger_per_day: [2.0, 6.0]                  # erwartete Ladevorgänge pro LP und Tag
+  number_chargers: 4                                                 # Anzahl der Ladepunkte am Standort
+  charger_power_kw: 150                                                # Verfügbare Leistung pro Ladepunkt
+  grid_limit_p_avb_kw: 400                                           # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  expected_sessions_per_charger_per_day: 3                           # erwartete Ladevorgänge pro LP und Tag
   charger_efficiency: 0.95                                           # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
   allow_cross_day_charging: false                                    # Ermöglicht keine Ladungen über Mitternacht hinaus
 
   # =============================================================================
   # Angaben zur lokalen PV-Anlage
   # =============================================================================
-  pv_system_size_kwp: 100                                      # Größe der untersuchten Anlage in kWp
+  pv_system_size_kwp: 100                                            # Größe der untersuchten Anlage in kWp
   
   # =============================================================================
   # Grundlast des Standorts - Gebäudeprofil
   # =============================================================================
-  base_load_annual_kwh: 500000                                 # jährlicher standortspezifischer Verbrauch
+  base_load_annual_kwh: 500000                                       # jährlicher standortspezifischer Verbrauch
 
 # =============================================================================
 # Fuhrparkbeschreibung – Ladekurven + Kapazitäten kommen aus CSV
@@ -42,7 +47,7 @@ vehicles:
   fleet_mix:                                                   # Gewichtung der Fahrzeugtypen - PKW & Transporter
     PKW: 0.95
     Transporter: 0.05
-  vehicle_type: ["Mercedes E-Sprinter"]                        # Fahrzeuge können bei bekannten Fuhrpark spezifisch als In-Liste eingegeben werden (z.B. ["Fiat 500e Hatchback", "Audi e-tron GT", "Mercedes E-Sprinter"])
+  vehicle_type: []                                             # Fahrzeuge können bei bekannten Fuhrpark spezifisch als In-Liste eingegeben werden (z.B. ["Fiat 500e Hatchback", "Audi e-tron GT", "Mercedes E-Sprinter"])
 
 # =============================================================================
 # Ankunftszeiten, Standzeit und SoC bei Ankunft
@@ -55,9 +60,9 @@ arrival_time_distribution:
 
   # Skalierung der Ladevorgänge je nach Tagtyp
   weekday_weight:
-    working_day: [0.6, 1.0]                 # mittlerer bis hoher Betrieb an Werktagen
-    saturday: [1.0, 1.5]                    # hoher Betrieb am Samstag (Haupteinkaufstag)
-    sunday_holiday: [0.0, 0.1]              # kein bzw. vernachlässigbarer Betrieb an Sonn- und Feiertagen
+    working_day: 0.8                 # mittlerer bis hoher Betrieb an Werktagen
+    saturday: 1.3                    # hoher Betrieb am Samstag (Haupteinkaufstag)
+    sunday_holiday: 0                # kein bzw. vernachlässigbarer Betrieb an Sonn- und Feiertagen
 
   components_per_weekday:
     # Retail: Hauptpeaks mittags und am späten Nachmittag/Abend

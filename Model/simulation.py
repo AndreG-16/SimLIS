@@ -240,7 +240,7 @@ def read_scenario_from_yaml(scenario_path: str) -> Dict[str, Any]:
 
         Pflichtfelder in ``site``:
         - number_chargers
-        - rated_power_kw
+        - charger_power_kw
         - grid_limit_p_avb_kw
         - expected_sessions_per_charger_per_day
         - pv_system_size_kwp
@@ -289,7 +289,7 @@ def read_scenario_from_yaml(scenario_path: str) -> Dict[str, Any]:
 
     required_site = [
         "number_chargers",
-        "rated_power_kw",
+        "charger_power_kw",
         "grid_limit_p_avb_kw",
         "expected_sessions_per_charger_per_day",
         "pv_system_size_kwp",
@@ -1256,7 +1256,7 @@ def available_power_for_session_step(
         step_index:
             Absoluter Index im Simulationsraster.
         scenario:
-            Szenario-Dictionary mit mindestens ``site.rated_power_kw``, ``site.grid_limit_p_avb_kw``,
+            Szenario-Dictionary mit mindestens ``site.charger_power_kw``, ``site.grid_limit_p_avb_kw``,
             ``site.charger_efficiency`` und ``time_resolution_min``.
         curve:
             Fahrzeug-Ladekurve (SoC-Stützstellen und Ladeleistung auf Batterieseite) in kW.
@@ -1341,7 +1341,7 @@ def available_power_for_session_step(
         raise ValueError("supply_mode muss 'site', 'pv_only' oder 'grid_only' sein.")
 
     # (3) Chargerlimit
-    charger_limit_kw = float(site_configuration["rated_power_kw"])
+    charger_limit_kw = float(site_configuration["charger_power_kw"])
     charger_headroom_kw = float(max(charger_limit_kw - float(already_allocated_on_this_charger_kw), 0.0))
 
     # (4) Fahrzeuglimit aus Ladekurve (Batterieseite -> Standortseite)
@@ -1568,7 +1568,7 @@ def charging_strategy_immediate(
     return {
         "plan_site_kw_per_step": plan_site_kw_per_step,
         "plan_pv_site_kw_per_step": plan_pv_site_kw_per_step,
-        "plan_market_kw_per_step": plan_market_kw_per_step,  # immediate => 0
+        "plan_market_kw_per_step": plan_market_kw_per_step, 
         "charged_site_kwh": total_charged_site_kwh,
         "charged_pv_site_kwh": total_charged_pv_kwh,
         "remaining_site_kwh": float(max(required_site_energy_kwh - total_charged_site_kwh, 0.0)),
@@ -3692,3 +3692,115 @@ def build_pv_generation_and_usage_table(*, timeseries_dataframe: pd.DataFrame) -
     out.index.name = None
     out.columns = ["", ""] 
     return out
+
+def build_energy_ev_profitability_table(timeseries_dataframe: pd.DataFrame, scenario: dict):
+    df = timeseries_dataframe.copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+
+    # Schrittbreite in Stunden
+    if len(df) >= 2 and pd.notna(df["timestamp"].iloc[0]) and pd.notna(df["timestamp"].iloc[1]):
+        step_h = (df["timestamp"].iloc[1] - df["timestamp"].iloc[0]).total_seconds() / 3600.0
+    else:
+        step_h = float(scenario.get("time_resolution_min", 15)) / 60.0
+    step_h = max(float(step_h), 1e-12)
+
+    # --- Config lesen ---
+    ee = scenario.get("energy_expenses") or {}
+    cost_source = str(ee.get("energy_cost_source", "fixed")).strip().lower()
+
+    sell_ct = float(ee.get("energy_selling_price_ct_per_kwh", 0.0) or 0.0)
+    sell_eur = sell_ct / 100.0  # ct/kWh -> €/kWh
+
+    # --- EV Energie (verkauft) ---
+    if "ev_load_kw" not in df.columns:
+        raise ValueError("timeseries_dataframe muss die Spalte 'ev_load_kw' enthalten.")
+
+    ev_kw = df["ev_load_kw"].astype(float).fillna(0.0).to_numpy()
+    ev_sold_kwh = float(np.sum(ev_kw) * step_h)
+
+    # --- EV aus Netz (kW) bestimmen ---
+    if "grid_to_ev_kw_per_step" in df.columns:
+        grid_to_ev_kw = df["grid_to_ev_kw_per_step"].astype(float).fillna(0.0).to_numpy()
+
+    elif "pv_ev_tracked_kw_per_step" in df.columns:
+        pv_to_ev_kw = df["pv_ev_tracked_kw_per_step"].astype(float).fillna(0.0).to_numpy()
+        pv_to_ev_kw = np.clip(pv_to_ev_kw, 0.0, ev_kw)
+        grid_to_ev_kw = np.maximum(ev_kw - pv_to_ev_kw, 0.0)
+
+    else:
+        # PV-first Näherung: PV deckt Grundlast zuerst, dann EV
+        required_cols = {"pv_generation_kw", "base_load_kw"}
+        if not required_cols.issubset(df.columns):
+            raise ValueError(
+                "Für die PV-first Näherung müssen 'pv_generation_kw' und 'base_load_kw' im timeseries_dataframe vorhanden sein "
+                "(oder nutze debug_df, damit 'grid_to_ev_kw_per_step' vorhanden ist)."
+            )
+        pv_kw = df["pv_generation_kw"].astype(float).fillna(0.0).to_numpy()
+        base_kw = df["base_load_kw"].astype(float).fillna(0.0).to_numpy()
+
+        pv_to_base_kw = np.minimum(pv_kw, base_kw)
+        pv_after_base_kw = np.maximum(pv_kw - pv_to_base_kw, 0.0)
+        pv_to_ev_kw = np.minimum(pv_after_base_kw, ev_kw)
+        grid_to_ev_kw = np.maximum(ev_kw - pv_to_ev_kw, 0.0)
+
+    grid_kwh = float(np.sum(grid_to_ev_kw) * step_h)
+
+    # --- Energiekosten je nach Source ---
+    if cost_source == "fixed":
+        buy_ct = float(ee.get("fixed_energy_cost_ct_per_kwh", 0.0) or 0.0)
+        buy_eur = buy_ct / 100.0  # ct/kWh -> €/kWh
+
+        energy_costs_eur = grid_kwh * buy_eur
+        avg_buy_eur = buy_eur if grid_kwh > 1e-12 else 0.0
+
+    elif cost_source == "csv":
+        # erwartet €/MWh pro Step
+        if "market_price_eur_per_mwh" not in df.columns:
+            raise ValueError(
+                "energy_cost_source='csv' gesetzt, aber 'market_price_eur_per_mwh' fehlt im timeseries_dataframe."
+            )
+
+        price_eur_per_mwh = (
+            df["market_price_eur_per_mwh"]
+            .astype(float)
+            .ffill()
+            .fillna(0.0)
+            .to_numpy()
+        )
+        price_eur_per_kwh = price_eur_per_mwh / 1000.0  # €/kWh
+
+        grid_kwh_per_step = grid_to_ev_kw * step_h
+        energy_costs_eur = float(np.sum(grid_kwh_per_step * price_eur_per_kwh))
+
+        avg_buy_eur = float(energy_costs_eur / grid_kwh) if grid_kwh > 1e-12 else 0.0
+
+    else:
+        raise ValueError("energy_cost_source muss 'fixed' oder 'csv' sein.")
+
+    avg_buy_ct = avg_buy_eur * 100.0
+
+    # --- Erlöse & Marge (Energy-only) ---
+    revenues_eur = ev_sold_kwh * sell_eur
+    margin_eur = revenues_eur - energy_costs_eur
+
+    # --- Ausgabe (2 Spalten, schöne Labels, Einheiten) ---
+    rows = [
+        ("Energiekostenquelle", "CSV" if cost_source == "csv" else "Fixpreis"),
+        ("Netzbezug LIS [kWh]", f"{grid_kwh:.2f}"),
+        ("Ø Einkaufspreis [ct/kWh]", f"{avg_buy_ct:.2f}"),
+        ("Energiekosten Netzbezug LIS [€]", f"{energy_costs_eur:.2f}"),
+        ("Verkaufte Energie LIS [kWh]", f"{ev_sold_kwh:.2f}"),
+        ("Verkaufspreis [ct/kWh]", f"{sell_ct:.2f}"),
+        ("Erlöse Ladeinfrastruktur [€]", f"{revenues_eur:.2f}"),
+        ("Energiemarge [€]", f"{margin_eur:.2f}"),
+    ]
+
+    out = pd.DataFrame(rows, columns=["", ""])
+
+    sty = out.style
+    try:
+        sty = sty.hide(axis="index").hide(axis="columns")
+    except Exception:
+        sty = sty.hide_index().hide_columns()
+
+    return sty

@@ -1,12 +1,17 @@
 site_type: highway                                            # Standort des Ladepunkts
-time_resolution_min: 5                                        # Zeitschritt, in der die Simulation berechnet wird
+time_resolution_min: 15                                       # Zeitschritt, in der die Simulation berechnet wird
 simulation_horizon_days: 365                                  # gewünschter Analysehorizont in Tagen
 
 start_datetime: "2025-01-01 00:00"                            # Zeitpunkt, ab dem die Simulation beginnen soll
 
-charging_strategy: "immediate"                                # "immediate" | "market" | "pv"
-charging_strategy_fallback:                                   # "immediate" | "market" 
+charging_strategy: "pv"                                        # "immediate" | "market" | "pv"
+charging_strategy_fallback: "market"                                          # "immediate" | "market" 
 localload_pv_market_csv: "../data/localload_pv_market_highway.csv"    # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
+
+energy_expenses:
+  energy_cost_source: "csv"                                   # "csv" oder "fixed"
+  fixed_energy_cost_ct_per_kwh:                               # Energiekosten bei Bezug aus dem Netz, nur relevant, wenn "source = fixed"
+  energy_selling_price_ct_per_kwh: 70                         # Energieverkaufspreis an der Ladesäule für den Kunden
   
 timezone: "Europe/Berlin"                                     # Zeitzone, in der sich die Anlage befindet
 holidays:
@@ -16,9 +21,9 @@ holidays:
 
 site:
   number_chargers: 10                                         # Anzahl der Ladepunkte am Standort
-  rated_power_kw: 300                                         # Verfügbare Leistung pro Ladepunkt
+  charger_power_kw: 300                                         # Verfügbare Leistung pro Ladepunkt
   grid_limit_p_avb_kw: 2000                                   # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
-  expected_sessions_per_charger_per_day: [5.0, 14.0]          # erwartete Ladevorgänge pro LP und Tag
+  expected_sessions_per_charger_per_day: 7.0                  # erwartete Ladevorgänge pro LP und Tag (4 - 14)
   charger_efficiency: 0.95                                    # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
   allow_cross_day_charging: true                              # Ermöglicht Ladungen über Mitternacht hinaus
 
@@ -42,7 +47,7 @@ vehicles:
   fleet_mix:                                                   # Gewichtung der Fahrzeugtypen - PKW & Transporter
     PKW: 0.5
     Transporter: 0.5
-  vehicle_type: ["Mercedes E-Sprinter"]                        # Fahrzeuge können bei bekannten Fuhrpark spezifisch als In-Liste eingegeben werden (z.B. ["Fiat 500e Hatchback", "Audi e-tron GT", "Mercedes E-Sprinter"])
+  vehicle_type: []                                             # Fahrzeuge können bei bekannten Fuhrpark spezifisch als In-Liste eingegeben werden (z.B. ["Fiat 500e Hatchback", "Audi e-tron GT", "Mercedes E-Sprinter"])
 
 # =============================================================================
 # Ankunftszeiten, Standzeit und SoC bei Ankunft
