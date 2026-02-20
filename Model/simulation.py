@@ -685,7 +685,7 @@ def define_sample_from_distribution(spec: Any, random_generator: np.random.Gener
         ---------------------
         - Konstante: 3.5
         - Uniform-Range: [min, max]
-        - Einzelkomponente: {"distribution": "normal|beta|lognormal", ...}
+        - Einzelkomponente: {"distribution": "normal|beta"}
         - Mixture: {"type": "mixture", "components": [...]} oder direkt [...]-Liste
 
         Rückgabe
@@ -751,13 +751,6 @@ def define_sample_from_distribution(spec: Any, random_generator: np.random.Gener
         if alpha_value <= 0.0 or beta_value <= 0.0:
             raise ValueError("Betaverteilung benötigt alpha > 0 und beta > 0.")
         return float(random_generator.beta(a=float(alpha_value), b=float(beta_value)))
-
-    if distribution_name == "lognormal":
-        mean_value = define_sample_from_distribution(require("mu"), random_generator)
-        standard_deviation = define_sample_from_distribution(require("sigma"), random_generator)
-        if standard_deviation <= 0.0:
-            raise ValueError("Lognormalverteilung benötigt sigma > 0.")
-        return float(random_generator.lognormal(mean=float(mean_value), sigma=float(standard_deviation)))
 
     raise ValueError(f"Unbekannte distribution in spec: '{distribution_name}'")
 
@@ -2395,7 +2388,7 @@ def simulate_site_fcfs_with_planning(
             r["charger_id"] = int(charger_id_by_session_id[session_identifier])
             sessions_out.append(r)
 
-    # EV-Lastgang ist jetzt direkt die reservierte Leistung
+    # EV-Lastgang ist die reservierte Leistung
     ev_load_kw = np.asarray(reserved_total, dtype=float)
 
     debug_df = None
@@ -2530,40 +2523,13 @@ def _compute_debug_balance(
     """
     Erstellt eine Debug-Leistungsbilanz pro Simulationsschritt als DataFrame.
 
-    Die Bilanz zerlegt PV-Erzeugung und Netzbezug in nachvollziehbare Flüsse:
+    Anpassungen ggü. der Ausgangsversion:
+    - PV→EV wird zusätzlich durch die tatsächliche EV-Leistung `ev` begrenzt.
+    - Zusätzliche Debug-Spalten: PV-Überschuss (Export/Abregelung), unbediente Grundlast/EV,
+      Gesamt-Netzbezug, Plausibilitäts-/Bilanzchecks.
+    - Eingänge werden defensiv auf >= 0 geklippt (optional/Debug-freundlich).
 
-    - PV → Grundlast: PV deckt zuerst die Grundlast bis zur Höhe der Grundlast.
-    - PV → EV: verbleibender PV-Überschuss wird den EV-Ladevorgängen zugeordnet
-      (begrenzt durch den in ``reserved_pv_ev_power_kw_per_step`` getrackten PV-Anteil).
-    - Netz → Grundlast: Rest-Grundlast wird aus dem Netz gedeckt (begrenzt durch das Netzlimit).
-    - Netz → EV: verbleibender Netz-Spielraum nach Grundlast wird den EV-Ladevorgängen zugeordnet.
-
-    Diese Funktion dient ausschließlich der Plausibilisierung/Analyse (Debugging) und hat
-    keinen Einfluss auf die eigentliche Ladeplanung.
-
-    Parameter
-    ---------
-    timestamps:
-        Simulations-Zeitindex (Länge = Anzahl Simulationsschritte).
-    scenario:
-        Szenario-Konfiguration. Verwendet:
-        - ``scenario["site"]["grid_limit_p_avb_kw"]`` als Netzanschlussgrenze [kW].
-    pv_generation_kw_per_step:
-        PV-Erzeugung pro Schritt [kW/Schritt].
-    base_load_kw_per_step:
-        Grundlast pro Schritt [kW/Schritt].
-    reserved_total_ev_power_kw_per_step:
-        Gesamte EV-Ladeleistung pro Schritt (PV + Netz) [kW/Schritt].
-    reserved_pv_ev_power_kw_per_step:
-        Getrackter PV-Anteil der EV-Ladeleistung pro Schritt [kW/Schritt].
-
-    Rückgabe
-    --------
-    pd.DataFrame
-        DataFrame mit Zeitstempel und Bilanzspalten (alle in kW/Schritt), u. a.:
-        - ``pv_to_base_kw_per_step``, ``pv_to_ev_kw_per_step``
-        - ``grid_to_base_kw_per_step``, ``grid_to_ev_kw_per_step``
-        - ``grid_limit_kw_per_step`` (konstant pro Schritt)
+    Hinweis: rein für Debugging/Analyse, ohne Einfluss auf die Ladeplanung.
     """
     grid_limit_kw = float(scenario["site"]["grid_limit_p_avb_kw"])
 
@@ -2572,29 +2538,81 @@ def _compute_debug_balance(
     ev = np.asarray(reserved_total_ev_power_kw_per_step, dtype=float)
     pv_ev_tracked = np.asarray(reserved_pv_ev_power_kw_per_step, dtype=float)
 
+    n = len(pd.to_datetime(timestamps))
+    if not (len(pv) == len(base) == len(ev) == len(pv_ev_tracked) == n):
+        raise ValueError(
+            "Längen passen nicht zusammen: timestamps/pv/base/ev/pv_ev_tracked müssen gleich lang sein."
+        )
+
+    # Debug-robust: negative Werte sind in dieser Bilanz i. d. R. nicht sinnvoll
+    pv = np.clip(pv, 0.0, None)
+    base = np.clip(base, 0.0, None)
+    ev = np.clip(ev, 0.0, None)
+    pv_ev_tracked = np.clip(pv_ev_tracked, 0.0, None)
+
+    # 1) PV -> Grundlast
     pv_to_base = np.minimum(pv, base)
-    base_remaining = base - pv_to_base
+    base_remaining = base - pv_to_base  # >= 0
 
-    pv_after_base = np.maximum(pv - pv_to_base, 0.0)
-    pv_to_ev = np.minimum(pv_ev_tracked, pv_after_base)
-    ev_remaining = np.maximum(ev - pv_to_ev, 0.0)
+    # 2) PV -> EV (begrenzt durch getrackten PV-Anteil, verfügbaren PV-Überschuss und tatsächliche EV-Leistung)
+    pv_after_base = pv - pv_to_base  # >= 0
+    pv_to_ev = np.minimum.reduce([pv_ev_tracked, pv_after_base, ev])
+    ev_remaining = ev - pv_to_ev  # >= 0
 
+    # 3) Netz -> Grundlast (bis Netzlimit)
     grid_to_base = np.minimum(base_remaining, grid_limit_kw)
-    grid_headroom_after_base = np.maximum(grid_limit_kw - grid_to_base, 0.0)
+    grid_headroom_after_base = grid_limit_kw - grid_to_base  # >= 0
+
+    # 4) Netz -> EV (nur Restspielraum nach Grundlast)
     grid_to_ev = np.minimum(ev_remaining, grid_headroom_after_base)
+
+    # Zusatz: Unbediente Lasten (falls Netzlimit nicht reicht)
+    unmet_base = base_remaining - grid_to_base  # >= 0
+    unmet_ev = ev_remaining - grid_to_ev        # >= 0
+
+    # Zusatz: PV-Überschuss (Export/Abregelung), falls PV nach Base+EV noch übrig bleibt
+    pv_surplus = pv_after_base - pv_to_ev  # >= 0
+
+    # Zusatz: Summen/Checks
+    grid_import = grid_to_base + grid_to_ev
+    pv_used = pv_to_base + pv_to_ev
+    served_total = pv_used + grid_import
+    demand_total = base + ev
+
+    # Wenn alles bedient und kein PV-Überschuss: served_total == demand_total
+    # Allgemein gilt: served_total + unmet_total == demand_total
+    unmet_total = unmet_base + unmet_ev
+    balance_served_plus_unmet_minus_demand = (served_total + unmet_total) - demand_total  # ~0
 
     dataframe = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(timestamps),
+
             "pv_generation_kw_per_step": pv,
             "base_load_kw_per_step": base,
             "ev_load_kw_per_step": ev,
             "pv_ev_tracked_kw_per_step": pv_ev_tracked,
+
             "pv_to_base_kw_per_step": pv_to_base,
             "pv_to_ev_kw_per_step": pv_to_ev,
+            "pv_surplus_kw_per_step": pv_surplus, 
+
             "grid_to_base_kw_per_step": grid_to_base,
             "grid_to_ev_kw_per_step": grid_to_ev,
+            "grid_import_kw_per_step": grid_import,
+
+            "unmet_base_kw_per_step": unmet_base,
+            "unmet_ev_kw_per_step": unmet_ev,
+            "unmet_total_kw_per_step": unmet_total,
+
+            "pv_used_kw_per_step": pv_used,
+            "served_total_kw_per_step": served_total,
+            "demand_total_kw_per_step": demand_total,
+
             "grid_limit_kw_per_step": grid_limit_kw,
+
+            # Plausibilitätscheck: sollte numerisch sehr nahe bei 0 liegen
+            "balance_served_plus_unmet_minus_demand_kw_per_step": balance_served_plus_unmet_minus_demand,
         }
     )
     return dataframe
@@ -3728,7 +3746,6 @@ def build_energy_ev_profitability_table(timeseries_dataframe: pd.DataFrame, scen
         grid_to_ev_kw = np.maximum(ev_kw - pv_to_ev_kw, 0.0)
 
     else:
-        # PV-first Näherung: PV deckt Grundlast zuerst, dann EV
         required_cols = {"pv_generation_kw", "base_load_kw"}
         if not required_cols.issubset(df.columns):
             raise ValueError(
@@ -3748,13 +3765,11 @@ def build_energy_ev_profitability_table(timeseries_dataframe: pd.DataFrame, scen
     # --- Energiekosten je nach Source ---
     if cost_source == "fixed":
         buy_ct = float(ee.get("fixed_energy_cost_ct_per_kwh", 0.0) or 0.0)
-        buy_eur = buy_ct / 100.0  # ct/kWh -> €/kWh
-
+        buy_eur = buy_ct / 100.0
         energy_costs_eur = grid_kwh * buy_eur
         avg_buy_eur = buy_eur if grid_kwh > 1e-12 else 0.0
 
     elif cost_source == "csv":
-        # erwartet €/MWh pro Step
         if "market_price_eur_per_mwh" not in df.columns:
             raise ValueError(
                 "energy_cost_source='csv' gesetzt, aber 'market_price_eur_per_mwh' fehlt im timeseries_dataframe."
@@ -3771,7 +3786,6 @@ def build_energy_ev_profitability_table(timeseries_dataframe: pd.DataFrame, scen
 
         grid_kwh_per_step = grid_to_ev_kw * step_h
         energy_costs_eur = float(np.sum(grid_kwh_per_step * price_eur_per_kwh))
-
         avg_buy_eur = float(energy_costs_eur / grid_kwh) if grid_kwh > 1e-12 else 0.0
 
     else:
@@ -3779,20 +3793,19 @@ def build_energy_ev_profitability_table(timeseries_dataframe: pd.DataFrame, scen
 
     avg_buy_ct = avg_buy_eur * 100.0
 
-    # --- Erlöse & Marge (Energy-only) ---
     revenues_eur = ev_sold_kwh * sell_eur
     margin_eur = revenues_eur - energy_costs_eur
 
-    # --- Ausgabe (2 Spalten, schöne Labels, Einheiten) ---
+    # WICHTIG: hier keine f-Strings -> echte Zahlen!
     rows = [
         ("Energiekostenquelle", "CSV" if cost_source == "csv" else "Fixpreis"),
-        ("Netzbezug LIS [kWh]", f"{grid_kwh:.2f}"),
-        ("Ø Einkaufspreis [ct/kWh]", f"{avg_buy_ct:.2f}"),
-        ("Energiekosten Netzbezug LIS [€]", f"{energy_costs_eur:.2f}"),
-        ("Verkaufte Energie LIS [kWh]", f"{ev_sold_kwh:.2f}"),
-        ("Verkaufspreis [ct/kWh]", f"{sell_ct:.2f}"),
-        ("Erlöse Ladeinfrastruktur [€]", f"{revenues_eur:.2f}"),
-        ("Energiemarge [€]", f"{margin_eur:.2f}"),
+        ("Netzbezug LIS [kWh]", grid_kwh),
+        ("Ø Einkaufspreis [ct/kWh]", avg_buy_ct),
+        ("Energiekosten Netzbezug LIS [€]", energy_costs_eur),
+        ("Verkaufte Energie LIS [kWh]", ev_sold_kwh),
+        ("Verkaufspreis [ct/kWh]", sell_ct),
+        ("Erlöse Ladeinfrastruktur [€]", revenues_eur),
+        ("Energiemarge [€]", margin_eur),
     ]
 
     out = pd.DataFrame(rows, columns=["", ""])
@@ -3804,3 +3817,108 @@ def build_energy_ev_profitability_table(timeseries_dataframe: pd.DataFrame, scen
         sty = sty.hide_index().hide_columns()
 
     return sty
+
+
+def build_grid_work_and_peak_table(
+    *,
+    timeseries_dataframe: pd.DataFrame,
+    scenario: dict,
+    include_peak_timestamp: bool = True,
+):
+    dataframe = timeseries_dataframe.copy()
+    if "timestamp" not in dataframe:
+        raise ValueError("timeseries_dataframe muss eine Spalte 'timestamp' enthalten.")
+
+    timestamp_series = pd.to_datetime(dataframe["timestamp"], errors="coerce")
+    if timestamp_series.isna().all():
+        raise ValueError("Spalte 'timestamp' konnte nicht geparst werden.")
+
+    timezone_name = str(scenario.get("timezone", "Europe/Berlin"))
+    try:
+        timestamp_series = (
+            timestamp_series.dt.tz_localize(timezone_name, ambiguous="infer", nonexistent="shift_forward")
+            if timestamp_series.dt.tz is None
+            else timestamp_series.dt.tz_convert(timezone_name)
+        )
+    except Exception:
+        pass
+
+    dataframe = (
+        dataframe.assign(timestamp=timestamp_series)
+        .dropna(subset=["timestamp"])
+        .sort_values("timestamp")
+        .set_index("timestamp")
+    )
+
+    # grid_kw (debug bevorzugt, sonst fallback)
+    if {"grid_to_base_kw_per_step", "grid_to_ev_kw_per_step"}.issubset(dataframe.columns):
+        grid_power_kw = (
+            dataframe[["grid_to_base_kw_per_step", "grid_to_ev_kw_per_step"]]
+            .apply(pd.to_numeric, errors="coerce")
+            .fillna(0.0)
+            .sum(axis=1)
+        )
+    else:
+        if not {"base_load_kw", "ev_load_kw"}.issubset(dataframe.columns):
+            raise ValueError(
+                "Ohne Debug-Spalten braucht es mindestens 'base_load_kw' und 'ev_load_kw' "
+                "(optional 'pv_generation_kw')."
+            )
+
+        base_load_kw = pd.to_numeric(dataframe["base_load_kw"], errors="coerce").fillna(0.0)
+        ev_load_kw = pd.to_numeric(dataframe["ev_load_kw"], errors="coerce").fillna(0.0)
+        pv_generation_kw = (
+            pd.to_numeric(dataframe["pv_generation_kw"], errors="coerce").fillna(0.0)
+            if "pv_generation_kw" in dataframe
+            else 0.0
+        )
+
+        grid_power_kw = (base_load_kw + ev_load_kw - pv_generation_kw).clip(lower=0.0)
+
+        grid_limit_kw = float((scenario.get("site") or {}).get("grid_limit_p_avb_kw", np.inf))
+        if np.isfinite(grid_limit_kw) and grid_limit_kw > 0:
+            grid_power_kw = grid_power_kw.clip(upper=grid_limit_kw)
+
+    timestamp_index = dataframe.index
+    time_step_hours = (timestamp_index.to_series().shift(-1) - timestamp_index.to_series()).dt.total_seconds().div(3600.0)
+
+    typical_time_step_hours = float(np.nanmedian(time_step_hours)) if len(time_step_hours) else np.nan
+    if not np.isfinite(typical_time_step_hours) or typical_time_step_hours <= 0:
+        typical_time_step_hours = float(scenario.get("time_resolution_min", 15)) / 60.0
+
+    time_step_hours = time_step_hours.fillna(typical_time_step_hours).clip(lower=0.0)
+
+    grid_timeseries_dataframe = pd.DataFrame(
+        {"grid_kw": grid_power_kw.clip(lower=0.0).astype(float)},
+        index=timestamp_index,
+    )
+    grid_timeseries_dataframe["grid_kwh"] = grid_timeseries_dataframe["grid_kw"] * time_step_hours.to_numpy()
+
+    month_key = (
+        (timestamp_index.tz_localize(None) if timestamp_index.tz is not None else timestamp_index)
+        .to_period("M")
+    )
+    grouped_by_month = grid_timeseries_dataframe.groupby(month_key)
+
+    monthly_dataframe = pd.DataFrame(
+        {
+            "Arbeit W [kWh]": grouped_by_month["grid_kwh"].sum(),
+            "Höchstleistung P [kW]": grouped_by_month["grid_kw"].max(),
+        }
+    )
+
+    total_row = {
+        "Arbeit W [kWh]": float(grid_timeseries_dataframe["grid_kwh"].sum()),
+        "Höchstleistung P [kW]": float(grid_timeseries_dataframe["grid_kw"].max()) if len(grid_timeseries_dataframe) else 0.0,
+    }
+    monthly_dataframe.loc["Gesamt"] = total_row
+
+    numeric_columns = ["Arbeit W [kWh]", "Höchstleistung P [kW]"]
+    monthly_dataframe[numeric_columns] = monthly_dataframe[numeric_columns].apply(pd.to_numeric, errors="coerce").fillna(0.0).round(2)
+
+    output_dataframe = monthly_dataframe.rename_axis("Monat").reset_index()
+    styler = output_dataframe.style.format({column_name: "{:.2f}" for column_name in numeric_columns})
+    try:
+        return styler.hide(axis="index")
+    except Exception:
+        return styler.hide_index()
