@@ -4,8 +4,8 @@ simulation_horizon_days: 365                                           # gewüns
 
 start_datetime: "2025-01-01 00:00"                                    # Zeitpunkt, ab dem die Simulation beginnen soll
 
-charging_strategy: "immediate"                                           # "immediate" | "market" | "pv"
-charging_strategy_fallback:                                           # "immediate" | "market" 
+charging_strategy: "pv"                                               # "immediate" | "market" | "pv"
+charging_strategy_fallback: "market"                                  # "immediate" | "market" 
 localload_pv_market_csv: "../data/localload_pv_market_office.csv"     # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
 
 energy_expenses:
@@ -20,7 +20,7 @@ holidays:
   dates: []                                                           # zusätzliche bekannte betriebsfreie Tage manuell eingeben, getrennt durch neue Zeile (- "2026-01-01")
      
 site:
-  number_chargers: 10                                                  # Anzahl der Ladepunkte am Standort
+  number_chargers: 20                                                  # Anzahl der Ladepunkte am Standort
   charger_power_kw: 11                                                 # Verfügbare Leistung pro Ladepunkt
   grid_limit_p_avb_kw: 50                                              # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
   expected_sessions_per_charger_per_day: 1.2                           # erwartete Ladevorgänge pro Ladepunkt und Tag
@@ -30,7 +30,7 @@ site:
   # =============================================================================
   # Angaben zur lokalen PV-Anlage
   # =============================================================================
-  pv_system_size_kwp: 100                                      # Größe der untersuchten Anlage in kWp
+  pv_system_size_kwp: 300                                      # Größe der untersuchten Anlage in kWp
   
   # =============================================================================
   # Grundlast des Standorts - Gebäudeprofil

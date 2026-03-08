@@ -1,6 +1,6 @@
 site_type: logistics_center                                   # Standort des Ladepunkts
-time_resolution_min: 1                                       # Zeitschritt, in der die Simulation berechnet wird
-simulation_horizon_days: 10                                  # gewünschter Analysehorizont in Tagen
+time_resolution_min: 15                                       # Zeitschritt, in der die Simulation berechnet wird
+simulation_horizon_days: 365                                  # gewünschter Analysehorizont in Tagen
 
 start_datetime: "2025-01-01 00:00"                            # Zeitpunkt, ab dem die Simulation beginnen soll
 
@@ -21,7 +21,7 @@ holidays:
 
 site:
   number_chargers: 4                                         # Anzahl der Ladepunkte am Standort
-  charger_power_kw: 300                                        # Verfügbare Leistung pro Ladepunkt
+  charger_power_kw: 200                                        # Verfügbare Leistung pro Ladepunkt
   grid_limit_p_avb_kw: 300                                    # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
   expected_sessions_per_charger_per_day: 2.0                  # erwartete Ladevorgänge pro LP und Tag
   charger_efficiency: 0.95                                    # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung

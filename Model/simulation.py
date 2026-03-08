@@ -3729,79 +3729,118 @@ def build_energy_ev_profitability_table(timeseries_dataframe: pd.DataFrame, scen
     sell_ct = float(ee.get("energy_selling_price_ct_per_kwh", 0.0) or 0.0)
     sell_eur = sell_ct / 100.0  # ct/kWh -> €/kWh
 
-    # --- EV Energie (verkauft) ---
+    # --- Basis-Spalten prüfen ---
     if "ev_load_kw" not in df.columns:
         raise ValueError("timeseries_dataframe muss die Spalte 'ev_load_kw' enthalten.")
+    if "base_load_kw" not in df.columns:
+        raise ValueError("timeseries_dataframe muss die Spalte 'base_load_kw' enthalten.")
 
     ev_kw = df["ev_load_kw"].astype(float).fillna(0.0).to_numpy()
+    base_kw = df["base_load_kw"].astype(float).fillna(0.0).to_numpy()
     ev_sold_kwh = float(np.sum(ev_kw) * step_h)
 
-    # --- EV aus Netz (kW) bestimmen ---
-    if "grid_to_ev_kw_per_step" in df.columns:
+    # ------------------------------------------------------------
+    # Netzanteile bestimmen: Grundlast (grid_to_base_kw) & LIS (grid_to_ev_kw)
+    # Priorität:
+    #   1) Debug-Spalten (exakt)
+    #   2) PV-first Näherung (pv deckt base zuerst, Rest pv -> ev)
+    # ------------------------------------------------------------
+    if {"grid_to_ev_kw_per_step", "grid_to_base_kw_per_step"}.issubset(df.columns):
         grid_to_ev_kw = df["grid_to_ev_kw_per_step"].astype(float).fillna(0.0).to_numpy()
-
-    elif "pv_ev_tracked_kw_per_step" in df.columns:
-        pv_to_ev_kw = df["pv_ev_tracked_kw_per_step"].astype(float).fillna(0.0).to_numpy()
-        pv_to_ev_kw = np.clip(pv_to_ev_kw, 0.0, ev_kw)
-        grid_to_ev_kw = np.maximum(ev_kw - pv_to_ev_kw, 0.0)
+        grid_to_base_kw = df["grid_to_base_kw_per_step"].astype(float).fillna(0.0).to_numpy()
 
     else:
-        required_cols = {"pv_generation_kw", "base_load_kw"}
-        if not required_cols.issubset(df.columns):
+        # PV-first Näherung benötigt pv_generation_kw
+        if "pv_generation_kw" not in df.columns:
             raise ValueError(
-                "Für die PV-first Näherung müssen 'pv_generation_kw' und 'base_load_kw' im timeseries_dataframe vorhanden sein "
-                "(oder nutze debug_df, damit 'grid_to_ev_kw_per_step' vorhanden ist)."
+                "Für die Aufteilung Grundlast/LIS ohne Debug-Spalten muss 'pv_generation_kw' vorhanden sein "
+                "(oder nutze debug_df, damit 'grid_to_base_kw_per_step'/'grid_to_ev_kw_per_step' vorhanden sind)."
             )
+
         pv_kw = df["pv_generation_kw"].astype(float).fillna(0.0).to_numpy()
-        base_kw = df["base_load_kw"].astype(float).fillna(0.0).to_numpy()
 
         pv_to_base_kw = np.minimum(pv_kw, base_kw)
+        base_grid_kw = np.maximum(base_kw - pv_to_base_kw, 0.0)
+
         pv_after_base_kw = np.maximum(pv_kw - pv_to_base_kw, 0.0)
         pv_to_ev_kw = np.minimum(pv_after_base_kw, ev_kw)
-        grid_to_ev_kw = np.maximum(ev_kw - pv_to_ev_kw, 0.0)
+        ev_grid_kw = np.maximum(ev_kw - pv_to_ev_kw, 0.0)
 
-    grid_kwh = float(np.sum(grid_to_ev_kw) * step_h)
+        grid_to_base_kw = base_grid_kw
+        grid_to_ev_kw = ev_grid_kw
 
-    # --- Energiekosten je nach Source ---
-    if cost_source == "fixed":
-        buy_ct = float(ee.get("fixed_energy_cost_ct_per_kwh", 0.0) or 0.0)
-        buy_eur = buy_ct / 100.0
-        energy_costs_eur = grid_kwh * buy_eur
-        avg_buy_eur = buy_eur if grid_kwh > 1e-12 else 0.0
+    # Energiemengen
+    grid_base_kwh = float(np.sum(np.maximum(grid_to_base_kw, 0.0)) * step_h)
+    grid_ev_kwh = float(np.sum(np.maximum(grid_to_ev_kw, 0.0)) * step_h)
+    grid_site_kwh = float(grid_base_kwh + grid_ev_kwh)
 
-    elif cost_source == "csv":
-        if "market_price_eur_per_mwh" not in df.columns:
-            raise ValueError(
-                "energy_cost_source='csv' gesetzt, aber 'market_price_eur_per_mwh' fehlt im timeseries_dataframe."
+    # ------------------------------------------------------------
+    # Energiekosten je nach Quelle (fixed / csv)
+    # -> getrennt für Grundlast, LIS, Standort
+    # ------------------------------------------------------------
+    def compute_costs_and_avg_price_ct(grid_kw_per_step: np.ndarray):
+        grid_kw_per_step = np.maximum(np.asarray(grid_kw_per_step, float), 0.0)
+        grid_kwh_per_step = grid_kw_per_step * step_h
+        grid_kwh_total = float(np.sum(grid_kwh_per_step))
+
+        if cost_source == "fixed":
+            buy_ct = float(ee.get("fixed_energy_cost_ct_per_kwh", 0.0) or 0.0)
+            buy_eur = buy_ct / 100.0
+            costs_eur = float(grid_kwh_total * buy_eur)
+            avg_ct = float(buy_ct) if grid_kwh_total > 1e-12 else 0.0
+            return grid_kwh_total, avg_ct, costs_eur
+
+        if cost_source == "csv":
+            if "market_price_eur_per_mwh" not in df.columns:
+                raise ValueError(
+                    "energy_cost_source='csv' gesetzt, aber 'market_price_eur_per_mwh' fehlt im timeseries_dataframe."
+                )
+
+            price_eur_per_mwh = (
+                df["market_price_eur_per_mwh"]
+                .astype(float)
+                .ffill()
+                .fillna(0.0)
+                .to_numpy()
             )
+            price_eur_per_kwh = price_eur_per_mwh / 1000.0
 
-        price_eur_per_mwh = (
-            df["market_price_eur_per_mwh"]
-            .astype(float)
-            .ffill()
-            .fillna(0.0)
-            .to_numpy()
-        )
-        price_eur_per_kwh = price_eur_per_mwh / 1000.0  # €/kWh
+            costs_eur = float(np.sum(grid_kwh_per_step * price_eur_per_kwh))
+            avg_eur = float(costs_eur / grid_kwh_total) if grid_kwh_total > 1e-12 else 0.0
+            avg_ct = float(avg_eur * 100.0)
+            return grid_kwh_total, avg_ct, costs_eur
 
-        grid_kwh_per_step = grid_to_ev_kw * step_h
-        energy_costs_eur = float(np.sum(grid_kwh_per_step * price_eur_per_kwh))
-        avg_buy_eur = float(energy_costs_eur / grid_kwh) if grid_kwh > 1e-12 else 0.0
-
-    else:
         raise ValueError("energy_cost_source muss 'fixed' oder 'csv' sein.")
 
-    avg_buy_ct = avg_buy_eur * 100.0
+    # Kosten/Preise pro Teilbereich
+    _, avg_buy_base_ct, energy_costs_base_eur = compute_costs_and_avg_price_ct(grid_to_base_kw)
+    _, avg_buy_ev_ct, energy_costs_ev_eur = compute_costs_and_avg_price_ct(grid_to_ev_kw)
 
-    revenues_eur = ev_sold_kwh * sell_eur
-    margin_eur = revenues_eur - energy_costs_eur
+    # Standort aggregiert (gewichtet korrekt über Kosten / kWh)
+    energy_costs_site_eur = float(energy_costs_base_eur + energy_costs_ev_eur)
+    avg_buy_site_ct = float((energy_costs_site_eur / grid_site_kwh) * 100.0) if grid_site_kwh > 1e-12 else 0.0
 
-    # WICHTIG: hier keine f-Strings -> echte Zahlen!
+    # Erlöse/Marge (nur LIS verkauft)
+    revenues_eur = float(ev_sold_kwh * sell_eur)
+    margin_eur = float(revenues_eur - energy_costs_ev_eur)
+
     rows = [
         ("Energiekostenquelle", "CSV" if cost_source == "csv" else "Fixpreis"),
-        ("Netzbezug LIS [kWh]", grid_kwh),
-        ("Ø Einkaufspreis [ct/kWh]", avg_buy_ct),
-        ("Energiekosten Netzbezug LIS [€]", energy_costs_eur),
+
+        ("Netzbezug Grundlast [kWh]", grid_base_kwh),
+        ("Ø Einkaufspreis Grundlast [ct/kWh]", avg_buy_base_ct),
+        ("Energiekosten Netzbezug Grundlast [€]", energy_costs_base_eur),
+
+        ("Netzbezug LIS [kWh]", grid_ev_kwh),
+        ("Ø Einkaufspreis LIS [ct/kWh]", avg_buy_ev_ct),
+        ("Energiekosten Netzbezug LIS [€]", energy_costs_ev_eur),
+
+        ("Netzbezug Standort [kWh]", grid_site_kwh),
+        ("Ø Einkaufspreis Standort [ct/kWh]", avg_buy_site_ct),
+        ("Energiekosten Netzbezug Standort [€]", energy_costs_site_eur),
+
+        ("", ""),  # optische Trennung
+
         ("Verkaufte Energie LIS [kWh]", ev_sold_kwh),
         ("Verkaufspreis [ct/kWh]", sell_ct),
         ("Erlöse Ladeinfrastruktur [€]", revenues_eur),
