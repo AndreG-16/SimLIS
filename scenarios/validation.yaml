@@ -1,11 +1,11 @@
 site_type: office                                                     # Standort des Ladepunkts
 time_resolution_min: 15                                               # Zeitschritt, in der die Simulation berechnet wird
-simulation_horizon_days: 365                                           # gewünschter Analysehorizont in Tagen
+simulation_horizon_days: 14                                           # gewünschter Analysehorizont in Tagen
 
-start_datetime: "2025-01-01 00:00"                                    # Zeitpunkt, ab dem die Simulation beginnen soll
+start_datetime: "2025-08-01 00:00"                                    # Zeitpunkt, ab dem die Simulation beginnen soll
 
-charging_strategy: "pv"                                               # "immediate" | "market" | "pv"
-charging_strategy_fallback: "market"                                  # "immediate" | "market" 
+charging_strategy: "immediate"                                        # "immediate" | "market" | "pv"
+charging_strategy_fallback:                                           # "immediate" | "market" 
 localload_pv_market_csv: "../data/localload_pv_market_office.csv"     # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
 
 energy_expenses:
@@ -20,22 +20,22 @@ holidays:
   dates: []                                                           # zusätzliche bekannte betriebsfreie Tage manuell eingeben, getrennt durch neue Zeile (- "2026-01-01")
      
 site:
-  number_chargers: 20                                                  # Anzahl der Ladepunkte am Standort
-  charger_power_kw: 11                                                 # Verfügbare Leistung pro Ladepunkt
-  grid_limit_p_avb_kw: 50                                              # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
-  expected_sessions_per_charger_per_day: 1.2                           # erwartete Ladevorgänge pro Ladepunkt und Tag
-  charger_efficiency: 0.95                                             # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
-  allow_cross_day_charging: false                                      # Ermöglicht keine Ladungen über Mitternacht hinaus
+  number_chargers: 8                                                  # Anzahl der Ladepunkte am Standort
+  charger_power_kw: 11                                                # Verfügbare Leistung pro Ladepunkt
+  grid_limit_p_avb_kw: 100                                             # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  expected_sessions_per_charger_per_day: 1.7                          # erwartete Ladevorgänge pro Ladepunkt und Tag
+  charger_efficiency: 0.95                                            # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
+  allow_cross_day_charging: false                                     # Ermöglicht keine Ladungen über Mitternacht hinaus
   
   # =============================================================================
   # Angaben zur lokalen PV-Anlage
   # =============================================================================
-  pv_system_size_kwp: 90                                               # Größe der untersuchten Anlage in kWp
+  pv_system_size_kwp: 50                                              # Größe der untersuchten Anlage in kWp
   
   # =============================================================================
   # Grundlast des Standorts - Gebäudeprofil
   # =============================================================================
-  base_load_annual_kwh: 50000                                          # jährlicher standortspezifischer Verbrauch
+  base_load_annual_kwh: 50000                                         # jährlicher standortspezifischer Verbrauch
 
 
 # =============================================================================
@@ -60,27 +60,27 @@ arrival_time_distribution:
 
   # Skalierung der Ladevorgänge je nach Tagtyp
   weekday_weight:
-    working_day: 1.0               # hoher Betrieb an Arbeitstagen
-    saturday: 0.05                # sehr geringer Betrieb am Samstag
-    sunday_holiday: 0.01          # kein bzw. vernachlässigbarer Betrieb an Sonn- und Feiertagen
+    working_day: 1.0                       # hoher Betrieb an Arbeitstagen
+    saturday: 0.00                         # sehr geringer Betrieb am Samstag
+    sunday_holiday: 0.00                   # kein bzw. vernachlässigbarer Betrieb an Sonn- und Feiertagen
 
   components_per_weekday:
     # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
     working_day:
-      - name: peak_1                      # typische Ankunftszeit der Mitarbeiter am Morgen
+      - name: peak_1                       # typische Ankunftszeit der Mitarbeiter am Morgen
         distribution: normal
-        mu: 8.5                         # Peak in Stunden seit Mitternacht (z.B. 7.5 = 7:30 Uhr)
-        sigma: 1.0                 # Streuung in Stunden
-        weight: 0.7                       # Gewichtung innerhalb working_day
+        mu: 8.5                            # Peak in Stunden seit Mitternacht (z.B. 7.5 = 7:30 Uhr)
+        sigma: 0.5                         # Streuung in Stunden
+        weight: 0.7                        # Gewichtung innerhalb working_day
 
-      - name: peak_2                      # typische Ankunftszeit von Teilzeitkräften, später kommenden Mitarbeitern oder externen Besuchern
+      - name: peak_2                       # typische Ankunftszeit von Teilzeitkräften, später kommenden Mitarbeitern oder externen Besuchern
         distribution: normal
         mu: 12.5
-        sigma: 0.75
+        sigma: 0.5
         weight: 0.3
 
     saturday:
-      - name: peak_3                      # irreguläre Ankunftszeiten an einem Samstag durch Support- oder Sonderbetrieb
+      - name: peak_3                       # irreguläre Ankunftszeiten an einem Samstag durch Support- oder Sonderbetrieb
         distribution: normal
         mu: 11.0
         sigma: 1.5
@@ -106,19 +106,7 @@ parking_duration_distribution:
       distribution: normal
       weight: 1.0
       mu: 450                             # typische Parkdauer in Minuten
-      sigma: 60                           # Streuung in Minuten
-
-    - name: medium_stay                   # Teilzeitmitarbeiter / längere Meetings 
-      distribution: normal
-      weight: 0.2
-      mu: 180             
-      sigma: 45
-
-    - name: short_stay                    # Besucher / kurze Termine
-      distribution: normal
-      weight: 0.1
-      mu: 60               
-      sigma: 15
+      sigma: 30                           # Streuung in Minuten
 
 # Batteriezustand bei Ankunft; Verteilung ist eine Mischung aus gezieltem Laden und opportunistischem Laden
 # Office: Mischung aus Pendlern (mittlerer SoC) und Mitarbeitern, die „wenn möglich“ laden (höherer SoC)
@@ -130,13 +118,13 @@ soc_at_arrival_distribution:
   components:
   # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
     - name: low_battery_charging          # Pendler mit eher mittlerem SoC, die gezielt nachladen
-      distribution: beta
-      weight: 0.9
-      alpha: 3.5                   # formt Peak ungefähr bei 0.3–0.5
-      beta: 4.0
+      distribution: normal
+      weight: 0.0
+      mu: 0.2                          # formt Peak ungefähr bei 0.3–0.5
+      sigma: 0.1
 
     - name: opportunistic_charging        # „Wenn ich sowieso im Büro bin, lade ich mit“
       distribution: normal
-      weight: 0.1
-      mu: 0.6                      # eher höherer SoC bei Ankunft
+      weight: 1.0
+      mu: 0.5                             # eher höherer SoC bei Ankunft
       sigma: 0.1 

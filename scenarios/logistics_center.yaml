@@ -4,24 +4,24 @@ simulation_horizon_days: 365                                  # gewünschter Ana
 
 start_datetime: "2025-01-01 00:00"                            # Zeitpunkt, ab dem die Simulation beginnen soll
 
-charging_strategy: "pv"                                                 # "immediate" | "market" | "pv"
-charging_strategy_fallback: "market"                                        # "immediate" | "market" 
-localload_pv_market_csv: "../data/localload_pv_market_logistics_center.csv"    # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
+charging_strategy: "pv"                                                       # "immediate" | "market" | "pv"
+charging_strategy_fallback: "market"                                          # "immediate" | "market" 
+localload_pv_market_csv: "../data/localload_pv_market_logistics_center.csv"   # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
 
 energy_expenses:
-  energy_cost_source: "csv"                                 # "csv" oder "fixed"
+  energy_cost_source: "csv"                                   # "csv" oder "fixed"
   fixed_energy_cost_ct_per_kwh:                               # Energiekosten bei Bezug aus dem Netz, nur relevant, wenn "source = fixed"
   energy_selling_price_ct_per_kwh: 0                          # Energieverkaufspreis an der Ladesäule für den Kunden
   
 timezone: "Europe/Berlin"                                     # Zeitzone, in der sich die Anlage befindet
 holidays:
   country: "DE"
-  subdivision: "HH"                                           # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
+  subdivision: "BY"                                           # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
   dates: []                                                   # zusätzliche bekannte betriebsfreie Tage manuell eingeben, getrennt durch neue Zeile (- "2026-01-01")
 
 site:
-  number_chargers: 4                                         # Anzahl der Ladepunkte am Standort
-  charger_power_kw: 200                                        # Verfügbare Leistung pro Ladepunkt
+  number_chargers: 4                                          # Anzahl der Ladepunkte am Standort
+  charger_power_kw: 200                                       # Verfügbare Leistung pro Ladepunkt
   grid_limit_p_avb_kw: 300                                    # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
   expected_sessions_per_charger_per_day: 2.0                  # erwartete Ladevorgänge pro LP und Tag
   charger_efficiency: 0.95                                    # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
@@ -30,12 +30,12 @@ site:
   # =============================================================================
   # Angaben zur lokalen PV-Anlage
   # =============================================================================
-  pv_system_size_kwp: 750                                      # Größe der untersuchten Anlage in kWp
+  pv_system_size_kwp: 833                                     # Größe der untersuchten Anlage in kWp
   
   # =============================================================================
   # Grundlast des Standorts - Gebäudeprofil
   # =============================================================================
-  base_load_annual_kwh: 1000000                                 # jährlicher standortspezifischer Verbrauch
+  base_load_annual_kwh: 1000000                                # jährlicher standortspezifischer Verbrauch
 
 # =============================================================================
 # Fuhrparkbeschreibung – Ladekurven + Kapazitäten kommen aus CSV
@@ -47,7 +47,7 @@ vehicles:
   fleet_mix:                                                   # Gewichtung der Fahrzeugtypen - PKW & Transporter
     PKW: 0.1
     Transporter: 0.9
-  vehicle_type: ["LKW Dummy"]                                             # Fahrzeuge können bei bekannten Fuhrpark spezifisch als In-Liste eingegeben werden (z.B. ["Fiat 500e Hatchback", "Audi e-tron GT", "Mercedes E-Sprinter"])
+  vehicle_type: ["LKW Dummy"]                                  # Fahrzeuge können bei bekannten Fuhrpark spezifisch als In-Liste eingegeben werden (z.B. ["Fiat 500e Hatchback", "Audi e-tron GT", "Mercedes E-Sprinter"])
 
 # =============================================================================
 # Ankunftszeiten, Standzeit und SoC bei Ankunft
@@ -60,7 +60,7 @@ arrival_time_distribution:
 
   # Skalierung der Ladevorgänge je nach Tagtyp
   weekday_weight:
-    working_day: 1.0               # hoher Betrieb an Arbeitstagen (Schichtbetrieb)
+    working_day: 1.0                # hoher Betrieb an Arbeitstagen (Schichtbetrieb)
     saturday: 0.05                  # reduzierter Betrieb am Samstag
     sunday_holiday: 0.01            # geringer Betrieb an Sonn- und Feiertagen (z. B. Not-/Teilbetrieb)
 
