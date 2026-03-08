@@ -22,8 +22,8 @@ holidays:
 site:
   number_chargers: 8                                                  # Anzahl der Ladepunkte am Standort
   charger_power_kw: 11                                                # Verfügbare Leistung pro Ladepunkt
-  grid_limit_p_avb_kw: 100                                             # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
-  expected_sessions_per_charger_per_day: 1.7                          # erwartete Ladevorgänge pro Ladepunkt und Tag
+  grid_limit_p_avb_kw: 100                                            # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  expected_sessions_per_charger_per_day: 5.0                          # erwartete Ladevorgänge pro Ladepunkt und Tag
   charger_efficiency: 0.95                                            # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
   allow_cross_day_charging: false                                     # Ermöglicht keine Ladungen über Mitternacht hinaus
   
@@ -70,13 +70,13 @@ arrival_time_distribution:
       - name: peak_1                       # typische Ankunftszeit der Mitarbeiter am Morgen
         distribution: normal
         mu: 8.5                            # Peak in Stunden seit Mitternacht (z.B. 7.5 = 7:30 Uhr)
-        sigma: 0.5                         # Streuung in Stunden
+        sigma: 0.05                         # Streuung in Stunden
         weight: 0.7                        # Gewichtung innerhalb working_day
 
       - name: peak_2                       # typische Ankunftszeit von Teilzeitkräften, später kommenden Mitarbeitern oder externen Besuchern
         distribution: normal
         mu: 12.5
-        sigma: 0.5
+        sigma: 0.05
         weight: 0.3
 
     saturday:

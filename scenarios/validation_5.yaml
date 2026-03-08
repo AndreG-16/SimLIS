@@ -30,7 +30,7 @@ site:
   # =============================================================================
   # Angaben zur lokalen PV-Anlage
   # =============================================================================
-  pv_system_size_kwp: 50                                              # Größe der untersuchten Anlage in kWp
+  pv_system_size_kwp: 100                                              # Größe der untersuchten Anlage in kWp
   
   # =============================================================================
   # Grundlast des Standorts - Gebäudeprofil
@@ -71,13 +71,13 @@ arrival_time_distribution:
         distribution: normal
         mu: 8.5                            # Peak in Stunden seit Mitternacht (z.B. 7.5 = 7:30 Uhr)
         sigma: 0.5                         # Streuung in Stunden
-        weight: 0.7                        # Gewichtung innerhalb working_day
+        weight: 0.3                        # Gewichtung innerhalb working_day
 
       - name: peak_2                       # typische Ankunftszeit von Teilzeitkräften, später kommenden Mitarbeitern oder externen Besuchern
         distribution: normal
         mu: 12.5
         sigma: 0.5
-        weight: 0.3
+        weight: 0.7
 
     saturday:
       - name: peak_3                       # irreguläre Ankunftszeiten an einem Samstag durch Support- oder Sonderbetrieb

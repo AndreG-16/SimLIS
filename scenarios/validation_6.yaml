@@ -4,7 +4,7 @@ simulation_horizon_days: 14                                           # gewünsc
 
 start_datetime: "2025-08-01 00:00"                                    # Zeitpunkt, ab dem die Simulation beginnen soll
 
-charging_strategy: "immediate"                                        # "immediate" | "market" | "pv"
+charging_strategy: "market"                                           # "immediate" | "market" | "pv"
 charging_strategy_fallback:                                           # "immediate" | "market" 
 localload_pv_market_csv: "../data/localload_pv_market_office.csv"     # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
 
