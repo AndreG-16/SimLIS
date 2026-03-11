@@ -2778,30 +2778,43 @@ def build_plugged_sessions_preview_table(
     """
     Erzeugt eine Vorschau-Tabelle für die ersten n erfolgreichen Ladesessions.
 
-    (Umstellung auf kW/Step-Logik)
-    - Summen bleiben Energiemengen in kWh (charged_*, remaining_*).
-    - Zusätzlich werden mittlere Leistungen über die Session ergänzt (avg_*_kw),
-      abgeleitet aus Energie / Dauer.
-    - Zusätzlich werden Spitzenleistungen ergänzt:
-        - max_site_kw: max(plan_site_kw_per_step)
-        - max_pv_kw: max(plan_pv_site_kw_per_step)
-        - max_grid_kw: max(max(plan_site_kw_per_step - plan_pv_site_kw_per_step, 0))
-
-    Alle numerischen Werte werden am Ende auf 2 Nachkommastellen gerundet.
-
-    Parameter
-    ----------
-    sessions_out:
-        Session-Ergebnisliste aus der Simulation.
-    n:
-        Maximale Anzahl Zeilen.
-
-    Rückgabe
-    --------
-    pd.DataFrame
-        Vorschau mit wichtigen Session-Attributen.
+    Angezeigte Spalten:
+    - Session-ID
+    - Ladepunkt
+    - Ankunft
+    - Abfahrt
+    - Parkdauer [min]
+    - SoC Ankunft
+    - SoC Ende
+    - Geladene Energie [kWh]
+    - Durchschnittliche Ladeleistung [kW]
+    - Maximale Ladeleistung [kW]
+    - Fahrzeug
     """
     rows: list[dict[str, Any]] = []
+
+    def _format_datetime(value) -> str | None:
+        if value is None:
+            return None
+        try:
+            dt = pd.to_datetime(value)
+            return dt.strftime("%d.%m.%y, %H:%M")
+        except Exception:
+            return None
+
+    def _soc_pct(value) -> float:
+        try:
+            value = float(value)
+            return value * 100.0 if np.isfinite(value) else np.nan
+        except Exception:
+            return np.nan
+
+    def _parking_duration_min(value) -> float | int:
+        try:
+            value = float(value)
+            return int(round(value)) if np.isfinite(value) else np.nan
+        except Exception:
+            return np.nan
 
     for session in sessions_out:
         if str(session.get("status")) != "plugged":
@@ -2809,6 +2822,7 @@ def build_plugged_sessions_preview_table(
 
         a = session.get("arrival_time")
         d = session.get("departure_time")
+
         duration_h = np.nan
         try:
             if a is not None and d is not None:
@@ -2818,62 +2832,30 @@ def build_plugged_sessions_preview_table(
         duration_h = float(duration_h) if np.isfinite(duration_h) and duration_h > 0.0 else np.nan
 
         charged_site_kwh = float(session.get("charged_site_kwh", 0.0) or 0.0)
-        charged_pv_site_kwh = float(session.get("charged_pv_site_kwh", 0.0) or 0.0)
-        charged_market_kwh = float(session.get("charged_market_kwh", 0.0) or 0.0)
-        remaining_site_kwh = session.get("remaining_site_kwh")
-
         avg_site_kw = charged_site_kwh / duration_h if np.isfinite(duration_h) else np.nan
-        avg_pv_kw = charged_pv_site_kwh / duration_h if np.isfinite(duration_h) else np.nan
-        avg_grid_kw = (charged_site_kwh - charged_pv_site_kwh) / duration_h if np.isfinite(duration_h) else np.nan
 
         max_site_kw = np.nan
-        max_pv_kw = np.nan
-        max_grid_kw = np.nan
         try:
             plan_site = np.asarray(session.get("plan_site_kw_per_step", np.zeros(0)), float).reshape(-1)
-            plan_pv = np.asarray(session.get("plan_pv_site_kw_per_step", np.zeros(0)), float).reshape(-1)
-
             if plan_site.size > 0:
-                if plan_pv.size < plan_site.size:
-                    tmp = np.zeros(plan_site.size, float)
-                    tmp[: plan_pv.size] = plan_pv
-                    plan_pv = tmp
-                else:
-                    plan_pv = plan_pv[: plan_site.size]
-
                 plan_site = np.maximum(plan_site, 0.0)
-                plan_pv = np.clip(np.maximum(plan_pv, 0.0), 0.0, plan_site)
-
-                max_site_kw = float(np.nanmax(plan_site)) if plan_site.size else np.nan
-                max_pv_kw = float(np.nanmax(plan_pv)) if plan_pv.size else np.nan
-
-                grid_kw_per_step = np.maximum(plan_site - plan_pv, 0.0)
-                max_grid_kw = float(np.nanmax(grid_kw_per_step)) if grid_kw_per_step.size else np.nan
+                max_site_kw = float(np.nanmax(plan_site))
         except Exception:
             max_site_kw = np.nan
-            max_pv_kw = np.nan
-            max_grid_kw = np.nan
 
         rows.append(
             {
-                "session_id": session.get("session_id"),
-                "charger_id": session.get("charger_id"),
-                "arrival_time": a,
-                "departure_time": d,
-                "parking_duration_min": session.get("parking_duration_min"),
-                "soc_arrival": session.get("state_of_charge_at_arrival"),
-                "soc_end": session.get("final_soc"),
-                "charged_site_kwh": charged_site_kwh,
-                "charged_pv_site_kwh": charged_pv_site_kwh,
-                "charged_market_kwh": charged_market_kwh,
-                "remaining_site_kwh": remaining_site_kwh,
-                "avg_site_kw": avg_site_kw,
-                "avg_pv_kw": avg_pv_kw,
-                "avg_grid_kw": avg_grid_kw,
-                "max_site_kw": max_site_kw,
-                "max_pv_kw": max_pv_kw,
-                "max_grid_kw": max_grid_kw,
-                "vehicle_name": session.get("vehicle_name"),
+                "Session-ID": session.get("session_id"),
+                "Ladepunkt": session.get("charger_id"),
+                "Ankunft": _format_datetime(a),
+                "Abfahrt": _format_datetime(d),
+                "Parkdauer [min]": _parking_duration_min(session.get("parking_duration_min")),
+                "SoC Ankunft [%]": _soc_pct(session.get("state_of_charge_at_arrival")),
+                "SoC Ende [%]": _soc_pct(session.get("final_soc")),
+                "Geladene Energie [kWh]": charged_site_kwh,
+                "Durchschnittliche Ladeleistung [kW]": avg_site_kw,
+                "Maximale Ladeleistung [kW]": max_site_kw,
+                "Fahrzeug": session.get("vehicle_name"),
             }
         )
 
@@ -2882,12 +2864,20 @@ def build_plugged_sessions_preview_table(
         return dataframe
 
     dataframe = (
-        dataframe.sort_values(["arrival_time", "session_id"], na_position="last")
+        dataframe.sort_values(["Ankunft", "Session-ID"], na_position="last")
         .head(int(n))
         .reset_index(drop=True)
     )
 
-    numeric_cols = dataframe.select_dtypes(include=["number"]).columns
+    # Ganze Zahl für Parkdauer
+    if "Parkdauer [min]" in dataframe.columns:
+        dataframe["Parkdauer [min]"] = pd.to_numeric(
+            dataframe["Parkdauer [min]"], errors="coerce"
+        ).astype("Int64")
+
+    # Restliche numerische Spalten auf 2 Nachkommastellen
+    numeric_cols = dataframe.select_dtypes(include=["number"]).columns.tolist()
+    numeric_cols = [col for col in numeric_cols if col != "Parkdauer [min]"]
     dataframe[numeric_cols] = dataframe[numeric_cols].round(2)
 
     return dataframe
@@ -3423,6 +3413,95 @@ def get_most_used_vehicle_name(
     return c.most_common(1)[0][0] if c else ""
 
 
+def build_not_reached_sessions_table(summary: dict[str, Any]) -> pd.DataFrame:
+    """
+    Erstellt eine formatierte Tabelle für Sessions, die den Ziel-SoC nicht erreicht haben.
+
+    Spalten:
+    - Session-ID
+    - Ladepunkt
+    - Ankunft
+    - Parkdauer [min]
+    - SoC Ankunft [%]
+    - SoC Ende [%]
+    - Fehlende Energie [kWh]
+    """
+    rows = summary.get("not_reached_rows", []) or []
+    dataframe = pd.DataFrame(rows)
+
+    if len(dataframe) == 0:
+        return pd.DataFrame(
+            columns=[
+                "Session-ID",
+                "Ladepunkt",
+                "Ankunft",
+                "Parkdauer [min]",
+                "SoC Ankunft [%]",
+                "SoC Ende [%]",
+                "Fehlende Energie [kWh]",
+            ]
+        )
+
+    rename_map = {}
+    if "remaining_energy" in dataframe.columns and "remaining_energy_kwh" not in dataframe.columns:
+        rename_map["remaining_energy"] = "remaining_energy_kwh"
+    if "state_of_charge_at_arrival" in dataframe.columns and "soc_arrival" not in dataframe.columns:
+        rename_map["state_of_charge_at_arrival"] = "soc_arrival"
+    if "final_soc" in dataframe.columns and "soc_end" not in dataframe.columns:
+        rename_map["final_soc"] = "soc_end"
+    dataframe = dataframe.rename(columns=rename_map)
+
+    if "vehicle_name" in dataframe.columns:
+        dataframe = dataframe.drop(columns=["vehicle_name"])
+
+    if "arrival_time" in dataframe.columns:
+        arrival_ts = pd.to_datetime(dataframe["arrival_time"], errors="coerce")
+        dataframe["arrival_time"] = arrival_ts.dt.strftime("%d.%m.%y, %H:%M:%S")
+
+    for col in ["soc_arrival", "soc_end"]:
+        if col in dataframe.columns:
+            dataframe[col] = pd.to_numeric(dataframe[col], errors="coerce") * 100.0
+
+    if "parking_duration_min" in dataframe.columns:
+        dataframe["parking_duration_min"] = pd.to_numeric(dataframe["parking_duration_min"], errors="coerce")
+
+    if "remaining_energy_kwh" in dataframe.columns:
+        dataframe["remaining_energy_kwh"] = pd.to_numeric(dataframe["remaining_energy_kwh"], errors="coerce")
+        dataframe = dataframe.sort_values("remaining_energy_kwh", ascending=False, na_position="last")
+    else:
+        dataframe = dataframe.reset_index(drop=True)
+
+    wanted_cols = [
+        "session_id",
+        "charger_id",
+        "arrival_time",
+        "parking_duration_min",
+        "soc_arrival",
+        "soc_end",
+        "remaining_energy_kwh",
+    ]
+    existing_wanted_cols = [c for c in wanted_cols if c in dataframe.columns]
+    other_cols = [c for c in dataframe.columns if c not in existing_wanted_cols]
+    dataframe = dataframe[existing_wanted_cols + other_cols].reset_index(drop=True)
+
+    dataframe = dataframe.rename(
+        columns={
+            "session_id": "Session-ID",
+            "charger_id": "Ladepunkt",
+            "arrival_time": "Ankunft",
+            "parking_duration_min": "Parkdauer [min]",
+            "soc_arrival": "SoC Ankunft [%]",
+            "soc_end": "SoC Ende [%]",
+            "remaining_energy_kwh": "Fehlende Energie [kWh]",
+        }
+    )
+
+    numeric_cols = dataframe.select_dtypes(include=["number"]).columns
+    dataframe[numeric_cols] = dataframe[numeric_cols].round(2)
+
+    return dataframe
+
+
 def build_master_curve_and_actual_points_for_vehicle(
     *,
     charger_traces_dataframe: pd.DataFrame,
@@ -3686,9 +3765,9 @@ def build_pv_generation_and_surplus_table(*, timeseries_dataframe: pd.DataFrame)
 
     out = pd.DataFrame(
         [
-            {"row": "PV-Erzeugung", "": pv_gen_total},
-            {"row": "PV-Verbrauch", "": pv_consumption},
-            {"row": "PV-Überschuss", "": pv_surplus},
+        {"row": "PV-Erzeugung", "Energie [kWh]": pv_gen_total},
+        {"row": "PV-Verbrauch", "Energie [kWh]": pv_consumption},
+        {"row": "PV-Überschuss", "Energie [kWh]": pv_surplus},
         ]
     ).set_index("row")
 
@@ -3947,7 +4026,120 @@ def build_grid_work_and_peak_table(
     except Exception:
         return styler.hide_index()
 
-from pathlib import Path
+
+def build_site_power_balance_top10_table(
+    *,
+    timeseries_dataframe: pd.DataFrame,
+    n: int = 10,
+) -> pd.DataFrame:
+    """
+    Erstellt eine Tabelle der n Zeitpunkte mit dem höchsten Standortverbrauch.
+
+    Spalten:
+    - Zeitpunkt
+    - Leistung aus NAP [kW]
+    - Leistung PV-Erzeugung [kW]
+    - Versorgungsleistung Standort [kW]
+    - Verbrauch Grundlast [kW]
+    - Verbrauch LIS [kW]
+    - Verbrauch Standort [kW]
+
+    Hinweis:
+    - 'Versorgungsleistung Standort' ist die tatsächlich für den Verbrauch
+      genutzte Leistung:
+          Leistung aus NAP + PV-Verbrauch
+      und entspricht damit dem Standortverbrauch.
+    - Falls Debug-/Flussspalten vorhanden sind, werden diese bevorzugt genutzt.
+      Andernfalls wird PV-first angenommen.
+    """
+    df = timeseries_dataframe.copy()
+
+    if "timestamp" not in df.columns:
+        raise ValueError("timeseries_dataframe muss die Spalte 'timestamp' enthalten.")
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+
+    def _get_kw(col_kw: str) -> np.ndarray:
+        if col_kw in df.columns:
+            return df[col_kw].astype(float).fillna(0.0).to_numpy()
+        return np.zeros(len(df), dtype=float)
+
+    base_kw = np.maximum(_get_kw("base_load_kw"), 0.0)
+    pv_gen_kw = np.maximum(_get_kw("pv_generation_kw"), 0.0)
+    ev_kw = np.maximum(_get_kw("ev_load_kw"), 0.0)
+
+    has_debug_kw = {
+        "pv_to_base_kw_per_step",
+        "pv_to_ev_kw_per_step",
+        "grid_to_base_kw_per_step",
+        "grid_to_ev_kw_per_step",
+    }.issubset(df.columns)
+
+    has_debug_kwh = {
+        "pv_to_base_kwh_per_step",
+        "pv_to_ev_kwh_per_step",
+        "grid_to_base_kwh_per_step",
+        "grid_to_ev_kwh_per_step",
+    }.issubset(df.columns)
+
+    if len(df) >= 2:
+        step_h = float((df["timestamp"].iloc[1] - df["timestamp"].iloc[0]).total_seconds()) / 3600.0
+    else:
+        step_h = 0.25
+    step_h = float(max(step_h, 1e-12))
+
+    if has_debug_kw:
+        pv_to_base_kw = np.maximum(df["pv_to_base_kw_per_step"].astype(float).fillna(0.0).to_numpy(), 0.0)
+        pv_to_ev_kw = np.maximum(df["pv_to_ev_kw_per_step"].astype(float).fillna(0.0).to_numpy(), 0.0)
+        grid_to_base_kw = np.maximum(df["grid_to_base_kw_per_step"].astype(float).fillna(0.0).to_numpy(), 0.0)
+        grid_to_ev_kw = np.maximum(df["grid_to_ev_kw_per_step"].astype(float).fillna(0.0).to_numpy(), 0.0)
+
+    elif has_debug_kwh:
+        pv_to_base_kw = np.maximum(df["pv_to_base_kwh_per_step"].astype(float).fillna(0.0).to_numpy() / step_h, 0.0)
+        pv_to_ev_kw = np.maximum(df["pv_to_ev_kwh_per_step"].astype(float).fillna(0.0).to_numpy() / step_h, 0.0)
+        grid_to_base_kw = np.maximum(df["grid_to_base_kwh_per_step"].astype(float).fillna(0.0).to_numpy() / step_h, 0.0)
+        grid_to_ev_kw = np.maximum(df["grid_to_ev_kwh_per_step"].astype(float).fillna(0.0).to_numpy() / step_h, 0.0)
+
+    else:
+        pv_to_base_kw = np.minimum(pv_gen_kw, base_kw)
+        pv_after_base_kw = np.maximum(pv_gen_kw - pv_to_base_kw, 0.0)
+        pv_to_ev_kw = np.minimum(pv_after_base_kw, ev_kw)
+
+        grid_to_base_kw = np.maximum(base_kw - pv_to_base_kw, 0.0)
+        grid_to_ev_kw = np.maximum(ev_kw - pv_to_ev_kw, 0.0)
+
+    power_from_nap_kw = grid_to_base_kw + grid_to_ev_kw
+    pv_used_kw = pv_to_base_kw + pv_to_ev_kw
+
+    supplied_site_kw = power_from_nap_kw + pv_used_kw
+    site_consumption_kw = base_kw + ev_kw
+
+    out = pd.DataFrame(
+        {
+            "Zeitpunkt": df["timestamp"].dt.strftime("%d.%m.%y, %H:%M:%S"),
+            "Leistung aus NAP [kW]": power_from_nap_kw,
+            "Leistung PV-Erzeugung [kW]": pv_gen_kw,
+            "Versorgungsleistung Standort [kW]": supplied_site_kw,
+            "Verbrauch Grundlast [kW]": base_kw,
+            "Verbrauch LIS [kW]": ev_kw,
+            "Verbrauch Standort [kW]": site_consumption_kw,
+        }
+    )
+
+    out = (
+        out.sort_values(
+            by=["Verbrauch Standort [kW]", "Zeitpunkt"],
+            ascending=[False, True],
+        )
+        .head(int(n))
+        .reset_index(drop=True)
+    )
+
+    numeric_cols = out.select_dtypes(include=["number"]).columns
+    out[numeric_cols] = out[numeric_cols].round(2)
+
+    return out
 
 
 def export_site_energy_balance_excel(
@@ -3962,19 +4154,19 @@ def export_site_energy_balance_excel(
 
     Spalten:
     1. Datum + Uhrzeit
-    2. PV-Erzeugung
-    3. Energie aus NAP
-    4. Summe Energieverfügbarkeit
-    5. Energieverbrauch Grundlast NAP
-    6. Energieverbrauch Grundlast PV
-    7. Energieverbrauch Grundlast Summe
-    8. Energieverbrauch LIS NAP
-    9. Energieverbrauch LIS PV
-    10. Energieverbrauch LIS Summe
-    11. Summe Energieverbrauch Standort
-    12. Marktpreis
-    13. Verbleibende Netzenergie
-    14. PV-Überschuss
+    2. PV-Erzeugung [kWh/15 min]
+    3. Netzbezug [kWh/15 min]
+    4. Verfügbare Energie [kWh/15 min]
+    5. Grundlast aus Netz [kWh/15 min]
+    6. Grundlast aus PV [kWh/15 min]
+    7. Grundlast gesamt [kWh/15 min]
+    8. LIS aus Netz [kWh/15 min]
+    9. LIS aus PV [kWh/15 min]
+    10. LIS gesamt [kWh/15 min]
+    11. Standortverbrauch gesamt [kWh/15 min]
+    12. Marktpreis [€/MWh]
+    13. Freie Netzkapazität [kWh/15 min]
+    14. PV-Überschuss [kWh/15 min]
 
     Rückgabe
     --------
@@ -4059,21 +4251,21 @@ def export_site_energy_balance_excel(
     out = pd.DataFrame(
         {
             "Datum + Uhrzeit": df["timestamp"].dt.strftime("%d.%m.%y, %H:%M"),
-            "PV-Erzeugung": pv_gen_kwh,
-            "Energie aus NAP": energy_from_nap,
-            "Summe Energieverfügbarkeit": total_energy_available,
-            "Energieverbrauch Grundlast NAP": grid_to_base,
-            "Energieverbrauch Grundlast PV": pv_to_base,
-            "Energieverbrauch Grundlast Summe": base_sum,
-            "Energieverbrauch LIS NAP": grid_to_ev,
-            "Energieverbrauch LIS PV": pv_to_ev,
-            "Energieverbrauch LIS Summe": ev_sum,
-            "Summe Energieverbrauch Standort": site_sum,
-            "Marktpreis": market_price,
-            "Verbleibende Netzenergie": remaining_grid_energy,
-            "PV-Überschuss": pv_surplus,
+            "PV-Erzeugung [kWh/15 min]": pv_gen_kwh,
+            "Netzbezug [kWh/15 min]": energy_from_nap,
+            "Verfügbage Energie [kWh/15 min]": total_energy_available,
+            "Grundlast aus Netz [kWh/15 min]": grid_to_base,
+            "Grundlast aus PV [kWh/15 min]": pv_to_base,
+            "Grundlast gesamt [kWh/15 min]": base_sum,
+            "LIS aus Netz [kWh/15 min]": grid_to_ev,
+            "LIS aus PV [kWh/15 min]": pv_to_ev,
+            "LIS gesamt [kWh/15 min]": ev_sum,
+            "Standortverbrauch gesamt [kWh/15 min]": site_sum,
+            "Marktpreis [€/MWh]": market_price,
+            "Freie Netzkapazität [kWh/15 min]": remaining_grid_energy,
+            "PV-Überschuss [kWh/15 min]": pv_surplus,
         }
-    ).round(4)
+    ).round(2)
 
     excel_path = Path(excel_path)
     with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
@@ -4087,3 +4279,4 @@ def export_site_energy_balance_excel(
             worksheet.column_dimensions[column_cells[0].column_letter].width = min(max_length + 2, 28)
 
     return out
+
