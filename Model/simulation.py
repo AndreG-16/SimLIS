@@ -3946,3 +3946,144 @@ def build_grid_work_and_peak_table(
         return styler.hide(axis="index")
     except Exception:
         return styler.hide_index()
+
+from pathlib import Path
+
+
+def export_site_energy_balance_excel(
+    *,
+    timeseries_dataframe: pd.DataFrame,
+    scenario: dict,
+    excel_path: str | Path = "site_energy_balance.xlsx",
+    sheet_name: str = "Lastgang",
+) -> pd.DataFrame:
+    """
+    Exportiert den Lastgang als Excel in kWh pro 15-Minuten-Schritt.
+
+    Spalten:
+    1. Datum + Uhrzeit
+    2. PV-Erzeugung
+    3. Energie aus NAP
+    4. Summe Energieverfügbarkeit
+    5. Energieverbrauch Grundlast NAP
+    6. Energieverbrauch Grundlast PV
+    7. Energieverbrauch Grundlast Summe
+    8. Energieverbrauch LIS NAP
+    9. Energieverbrauch LIS PV
+    10. Energieverbrauch LIS Summe
+    11. Summe Energieverbrauch Standort
+    12. Marktpreis
+    13. Verbleibende Netzenergie
+    14. PV-Überschuss
+
+    Rückgabe
+    --------
+    pd.DataFrame
+        Exportiertes DataFrame; zusätzlich wird eine Excel-Datei geschrieben.
+    """
+    df = timeseries_dataframe.copy()
+    if "timestamp" not in df.columns:
+        raise ValueError("timeseries_dataframe muss die Spalte 'timestamp' enthalten.")
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+
+    if len(df) >= 2:
+        step_h = float((df["timestamp"].iloc[1] - df["timestamp"].iloc[0]).total_seconds()) / 3600.0
+    else:
+        step_h = float(scenario.get("time_resolution_min", 15)) / 60.0
+    step_h = float(max(step_h, 1e-12))
+
+    def _get_kwh_per_step(col_kwh: str, col_kw: str) -> np.ndarray:
+        if col_kwh in df.columns:
+            return df[col_kwh].astype(float).fillna(0.0).to_numpy()
+        if col_kw in df.columns:
+            return df[col_kw].astype(float).fillna(0.0).to_numpy() * step_h
+        return np.zeros(len(df), dtype=float)
+
+    base_kwh = np.maximum(_get_kwh_per_step("base_load_kwh_per_step", "base_load_kw"), 0.0)
+    pv_gen_kwh = np.maximum(_get_kwh_per_step("pv_generation_kwh_per_step", "pv_generation_kw"), 0.0)
+    ev_kwh = np.maximum(_get_kwh_per_step("ev_load_kwh_per_step", "ev_load_kw"), 0.0)
+
+    has_debug_kwh = {
+        "pv_to_base_kwh_per_step",
+        "pv_to_ev_kwh_per_step",
+        "grid_to_base_kwh_per_step",
+        "grid_to_ev_kwh_per_step",
+    }.issubset(df.columns)
+
+    has_debug_kw = {
+        "pv_to_base_kw_per_step",
+        "pv_to_ev_kw_per_step",
+        "grid_to_base_kw_per_step",
+        "grid_to_ev_kw_per_step",
+    }.issubset(df.columns)
+
+    if has_debug_kwh:
+        pv_to_base = np.maximum(df["pv_to_base_kwh_per_step"].astype(float).fillna(0.0).to_numpy(), 0.0)
+        pv_to_ev = np.maximum(df["pv_to_ev_kwh_per_step"].astype(float).fillna(0.0).to_numpy(), 0.0)
+        grid_to_base = np.maximum(df["grid_to_base_kwh_per_step"].astype(float).fillna(0.0).to_numpy(), 0.0)
+        grid_to_ev = np.maximum(df["grid_to_ev_kwh_per_step"].astype(float).fillna(0.0).to_numpy(), 0.0)
+
+    elif has_debug_kw:
+        pv_to_base = np.maximum(df["pv_to_base_kw_per_step"].astype(float).fillna(0.0).to_numpy() * step_h, 0.0)
+        pv_to_ev = np.maximum(df["pv_to_ev_kw_per_step"].astype(float).fillna(0.0).to_numpy() * step_h, 0.0)
+        grid_to_base = np.maximum(df["grid_to_base_kw_per_step"].astype(float).fillna(0.0).to_numpy() * step_h, 0.0)
+        grid_to_ev = np.maximum(df["grid_to_ev_kw_per_step"].astype(float).fillna(0.0).to_numpy() * step_h, 0.0)
+
+    else:
+        pv_to_base = np.minimum(pv_gen_kwh, base_kwh)
+        pv_after_base = np.maximum(pv_gen_kwh - pv_to_base, 0.0)
+        pv_to_ev = np.minimum(pv_after_base, ev_kwh)
+
+        grid_to_base = np.maximum(base_kwh - pv_to_base, 0.0)
+        grid_to_ev = np.maximum(ev_kwh - pv_to_ev, 0.0)
+
+    energy_from_nap = grid_to_base + grid_to_ev
+    total_energy_available = pv_gen_kwh + energy_from_nap
+
+    base_sum = grid_to_base + pv_to_base
+    ev_sum = grid_to_ev + pv_to_ev
+    site_sum = base_sum + ev_sum
+
+    pv_surplus = np.maximum(pv_gen_kwh - (pv_to_base + pv_to_ev), 0.0)
+
+    grid_limit_kw = float((scenario.get("site") or {}).get("grid_limit_p_avb_kw", 0.0) or 0.0)
+    remaining_grid_energy = np.maximum(grid_limit_kw * step_h - energy_from_nap, 0.0)
+
+    if "market_price_eur_per_mwh" in df.columns:
+        market_price = df["market_price_eur_per_mwh"].astype(float).ffill().fillna(0.0).to_numpy()
+    else:
+        market_price = np.full(len(df), np.nan)
+
+    out = pd.DataFrame(
+        {
+            "Datum + Uhrzeit": df["timestamp"].dt.strftime("%d.%m.%y, %H:%M"),
+            "PV-Erzeugung": pv_gen_kwh,
+            "Energie aus NAP": energy_from_nap,
+            "Summe Energieverfügbarkeit": total_energy_available,
+            "Energieverbrauch Grundlast NAP": grid_to_base,
+            "Energieverbrauch Grundlast PV": pv_to_base,
+            "Energieverbrauch Grundlast Summe": base_sum,
+            "Energieverbrauch LIS NAP": grid_to_ev,
+            "Energieverbrauch LIS PV": pv_to_ev,
+            "Energieverbrauch LIS Summe": ev_sum,
+            "Summe Energieverbrauch Standort": site_sum,
+            "Marktpreis": market_price,
+            "Verbleibende Netzenergie": remaining_grid_energy,
+            "PV-Überschuss": pv_surplus,
+        }
+    ).round(4)
+
+    excel_path = Path(excel_path)
+    with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
+        out.to_excel(writer, sheet_name=sheet_name, index=False)
+
+        worksheet = writer.sheets[sheet_name]
+        worksheet.freeze_panes = "A2"
+
+        for column_cells in worksheet.columns:
+            max_length = max(len(str(cell.value)) if cell.value is not None else 0 for cell in column_cells)
+            worksheet.column_dimensions[column_cells[0].column_letter].width = min(max_length + 2, 28)
+
+    return out
