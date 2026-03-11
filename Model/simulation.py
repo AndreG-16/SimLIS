@@ -3527,11 +3527,13 @@ def build_site_energy_summary_table(
     - Standort Gesamt
 
     Spalten:
-    - pv_kwh: Energie aus PV [kWh]
-    - grid_kwh: Energie aus Netz [kWh]
-    - total_kwh: Gesamtenergie [kWh]
-    - self_sufficiency_pct: Autarkiegrad in Prozent [0..100]
-      (= pv_kwh / total_kwh * 100)
+    - PV-Energieverbrauch [kWh]
+    - Netz-Energieverbrauch [kWh]
+    - Summe Energieverbrauch [kWh]
+    - Autarkiegrad [%]
+      (= PV / Gesamtverbrauch * 100)
+    - PV-Eigenverbrauchsquote [%]
+      (= PV-Verbrauch / PV-Erzeugung * 100)
 
     Falls Debug-Spalten (pv_to_* / grid_to_*) existieren, werden diese für die Aufteilung genutzt.
     Andernfalls wird PV-first angenommen (PV deckt Grundlast zuerst, Rest-PV deckt EV).
@@ -3577,6 +3579,8 @@ def build_site_energy_summary_table(
         grid_to_ev = np.maximum(ev_kwh - pv_to_ev, 0.0)
 
     # Summen
+    pv_gen_total = float(np.sum(pv_gen_kwh))
+
     base_pv = float(np.sum(pv_to_base))
     base_grid = float(np.sum(grid_to_base))
     base_total = base_pv + base_grid
@@ -3592,11 +3596,35 @@ def build_site_energy_summary_table(
     def _ss_pct(pv: float, total: float) -> float:
         return float(100.0 * pv / total) if total > 1e-12 else 0.0
 
+    def _pv_self_consumption_pct(pv: float, pv_gen: float) -> float:
+        return float(100.0 * pv / pv_gen) if pv_gen > 1e-12 else 0.0
+
     out = pd.DataFrame(
         [
-            {"row": "Grundlast", "pv_kwh": base_pv, "grid_kwh": base_grid, "total_kwh": base_total, "self_sufficiency_pct": _ss_pct(base_pv, base_total)},
-            {"row": "Ladeinfrastruktur", "pv_kwh": ev_pv, "grid_kwh": ev_grid, "total_kwh": ev_total, "self_sufficiency_pct": _ss_pct(ev_pv, ev_total)},
-            {"row": "Standort Gesamt", "pv_kwh": site_pv, "grid_kwh": site_grid, "total_kwh": site_total, "self_sufficiency_pct": _ss_pct(site_pv, site_total)},
+            {
+                "row": "Grundlast",
+                "PV-Energieverbrauch": base_pv,
+                "Netz-Energieverbrauch": base_grid,
+                "Summe Energieverbrauch": base_total,
+                "Autarkiegrad": _ss_pct(base_pv, base_total),
+                "PV-Eigenverbrauchsquote": _pv_self_consumption_pct(base_pv, pv_gen_total),
+            },
+            {
+                "row": "Ladeinfrastruktur",
+                "PV-Energieverbrauch": ev_pv,
+                "Netz-Energieverbrauch": ev_grid,
+                "Summe Energieverbrauch": ev_total,
+                "Autarkiegrad": _ss_pct(ev_pv, ev_total),
+                "PV-Eigenverbrauchsquote": _pv_self_consumption_pct(ev_pv, pv_gen_total),
+            },
+            {
+                "row": "Standort Gesamt",
+                "PV-Energieverbrauch": site_pv,
+                "Netz-Energieverbrauch": site_grid,
+                "Summe Energieverbrauch": site_total,
+                "Autarkiegrad": _ss_pct(site_pv, site_total),
+                "PV-Eigenverbrauchsquote": _pv_self_consumption_pct(site_pv, pv_gen_total),
+            },
         ]
     ).set_index("row")
 
@@ -3606,44 +3634,14 @@ def build_site_energy_summary_table(
     return out.round(2)
 
 
-def build_pv_generation_and_usage_table(*, timeseries_dataframe: pd.DataFrame) -> pd.DataFrame:
+def build_pv_generation_and_surplus_table(*, timeseries_dataframe: pd.DataFrame) -> pd.DataFrame:
     """
-    Erstellt eine kompakte Tabelle zur PV-Erzeugung und PV-Nutzung am Standort.
+    Erstellt eine kompakte Tabelle zur PV-Erzeugung am Standort.
 
-    Aufbau (7 Zeilen):
-    1) PV-Erzeugung
-    2) PV-Überschuss
-    3) Leerzeile
-    4) Abschnitts-Header: "PV-Verbrauch" | "PV-Eigenverbrauchsquote"
-    5) Grundlast
-    6) Ladeinfrastruktur
-    7) Standort Gesamt
-
-    Die Tabelle hat zwei Spalten (ohne Spaltenüberschrift, um den Abschnitts-Header
-    in der Mitte optisch wie im Mockup darzustellen):
-    - PV-Verbrauch: Energie aus PV [kWh]
-    - PV-Eigenverbrauchsquote: Anteil an der gesamten PV-Erzeugung [%]
-      (= PV-Verbrauch / PV-Erzeugung * 100)
-
-    Datenquelle:
-    - Wenn Debug-Spalten vorhanden sind (pv_to_* / grid_to_*), werden diese genutzt.
-    - Andernfalls wird PV-first angenommen: PV deckt Grundlast zuerst, Rest-PV deckt EV.
-
-    Parameter
-    ----------
-    timeseries_dataframe:
-        Zeitreihen-DataFrame der Simulation. Erwartete Spalten (mindestens):
-        - "timestamp" (für Schrittbreite) und
-        - entweder kWh/Step-Spalten (z. B. "pv_generation_kwh_per_step") oder kW-Spalten
-          (z. B. "pv_generation_kw", "base_load_kw", "ev_load_kw").
-        Optional für exakte Aufteilung:
-        - "pv_to_base_kwh_per_step", "pv_to_ev_kwh_per_step",
-          "grid_to_base_kwh_per_step", "grid_to_ev_kwh_per_step".
-
-    Rückgabe
-    --------
-    pd.DataFrame
-        Tabelle gemäß obigem Aufbau; numerische Werte sind auf 2 Nachkommastellen gerundet.
+    Zeilen:
+    - PV-Erzeugung
+    - PV-Verbrauch
+    - PV-Überschuss
     """
     df = timeseries_dataframe.copy()
 
@@ -3683,33 +3681,20 @@ def build_pv_generation_and_usage_table(*, timeseries_dataframe: pd.DataFrame) -
         pv_to_ev = np.minimum(pv_after_base, ev_kwh)
 
     pv_gen_total = float(np.sum(pv_gen_kwh))
-    base_pv = float(np.sum(pv_to_base))
-    ev_pv = float(np.sum(pv_to_ev))
-    site_pv = float(base_pv + ev_pv)
-    pv_surplus = float(max(pv_gen_total - site_pv, 0.0))
+    pv_consumption = float(np.sum(pv_to_base) + np.sum(pv_to_ev))
+    pv_surplus = float(max(pv_gen_total - pv_consumption, 0.0))
 
-    def _pct(part: float, whole: float) -> float:
-        return float(100.0 * part / whole) if whole > 1e-12 else 0.0
-
-    def _r(x: float) -> float:
-        return float(np.round(float(x), 2))
-
-    # Zwei Spalten ohne Überschrift; Header-Zeile wird als eigene Zeile eingefügt.
     out = pd.DataFrame(
         [
-            {"row": "PV-Erzeugung", "c1": _r(pv_gen_total), "c2": ""},
-            {"row": "PV-Überschuss", "c1": _r(pv_surplus), "c2": ""},
-            {"row": "", "c1": "", "c2": ""},
-            {"row": "", "c1": "PV-Verbrauch", "c2": "PV-Eigenverbrauchsquote"},
-            {"row": "Grundlast", "c1": _r(base_pv), "c2": _r(_pct(base_pv, pv_gen_total))},
-            {"row": "Ladeinfrastruktur", "c1": _r(ev_pv), "c2": _r(_pct(ev_pv, pv_gen_total))},
-            {"row": "Standort Gesamt", "c1": _r(site_pv), "c2": _r(_pct(site_pv, pv_gen_total))},
+            {"row": "PV-Erzeugung", "": pv_gen_total},
+            {"row": "PV-Verbrauch", "": pv_consumption},
+            {"row": "PV-Überschuss", "": pv_surplus},
         ]
     ).set_index("row")
 
     out.index.name = None
-    out.columns = ["", ""] 
-    return out
+    out.columns.name = None
+    return out.round(2)
 
 def build_energy_ev_profitability_table(timeseries_dataframe: pd.DataFrame, scenario: dict):
     df = timeseries_dataframe.copy()

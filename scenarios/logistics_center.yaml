@@ -1,6 +1,6 @@
 site_type: logistics_center                                   # Standort des Ladepunkts
 time_resolution_min: 15                                       # Zeitschritt, in der die Simulation berechnet wird
-simulation_horizon_days: 365                                  # gewünschter Analysehorizont in Tagen
+simulation_horizon_days: 30                                  # gewünschter Analysehorizont in Tagen
 
 start_datetime: "2025-01-01 00:00"                            # Zeitpunkt, ab dem die Simulation beginnen soll
 
@@ -35,7 +35,7 @@ site:
   # =============================================================================
   # Grundlast des Standorts - Gebäudeprofil
   # =============================================================================
-  base_load_annual_kwh: 1000000                                # jährlicher standortspezifischer Verbrauch
+  base_load_annual_kwh: 861041                                # jährlicher standortspezifischer Verbrauch
 
 # =============================================================================
 # Fuhrparkbeschreibung – Ladekurven + Kapazitäten kommen aus CSV
