@@ -1,8 +1,8 @@
 site_type: office                                                     # Standort des Ladepunkts
 time_resolution_min: 15                                               # Zeitschritt, in der die Simulation berechnet wird
-simulation_horizon_days: 14                                           # gewünschter Analysehorizont in Tagen
+simulation_horizon_days: 365                                          # gewünschter Analysehorizont in Tagen
 
-start_datetime: "2025-08-01 00:00"                                    # Zeitpunkt, ab dem die Simulation beginnen soll
+start_datetime: "2025-01-01 00:00"                                    # Zeitpunkt, ab dem die Simulation beginnen soll
 
 charging_strategy: "immediate"                                        # "immediate" | "market" | "pv"
 charging_strategy_fallback:                                           # "immediate" | "market" 
@@ -22,15 +22,15 @@ holidays:
 site:
   number_chargers: 8                                                  # Anzahl der Ladepunkte am Standort
   charger_power_kw: 11                                                # Verfügbare Leistung pro Ladepunkt
-  grid_limit_p_avb_kw: 10                                             # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
-  expected_sessions_per_charger_per_day: 1.7                          # erwartete Ladevorgänge pro Ladepunkt und Tag
+  grid_limit_p_avb_kw: 200                                            # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  expected_sessions_per_charger_per_day: 4.0                          # erwartete Ladevorgänge pro Ladepunkt und Tag
   charger_efficiency: 0.95                                            # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
   allow_cross_day_charging: false                                     # Ermöglicht keine Ladungen über Mitternacht hinaus
   
   # =============================================================================
   # Angaben zur lokalen PV-Anlage
   # =============================================================================
-  pv_system_size_kwp: 50                                              # Größe der untersuchten Anlage in kWp
+  pv_system_size_kwp: 500                                             # Größe der untersuchten Anlage in kWp
   
   # =============================================================================
   # Grundlast des Standorts - Gebäudeprofil
@@ -46,8 +46,8 @@ vehicles:
   soc_target: 0.95                                             # Gewünschter Ladezustand am Ende des Ladeprozesses
   vehicle_curve_csv: "../data/Ladekurven_Master.csv"           # Batteriekapazität und Ladekurve nach SOC
   fleet_mix:                                                   # Gewichtung der Fahrzeugtypen - PKW & Transporter
-    PKW: 0.99
-    Transporter: 0.01
+    PKW: 0.95
+    Transporter: 0.05
   vehicle_type: []                                             # Fahrzeuge können bei bekannten Fuhrpark spezifisch als In-Liste eingegeben werden (z.B. ["Fiat 500e Hatchback", "Audi e-tron GT", "Mercedes E-Sprinter"])
 
 # =============================================================================
@@ -70,7 +70,7 @@ arrival_time_distribution:
       - name: peak_1                       # typische Ankunftszeit der Mitarbeiter am Morgen
         distribution: normal
         mu: 8.5                            # Peak in Stunden seit Mitternacht (z.B. 7.5 = 7:30 Uhr)
-        sigma: 0.5                         # Streuung in Stunden
+        sigma: 0.2                         # Streuung in Stunden
         weight: 0.7                        # Gewichtung innerhalb working_day
 
       - name: peak_2                       # typische Ankunftszeit von Teilzeitkräften, später kommenden Mitarbeitern oder externen Besuchern
@@ -104,9 +104,17 @@ parking_duration_distribution:
   # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
     - name: long_stay                     # Vollzeitmitarbeiter
       distribution: normal
-      weight: 1.0
-      mu: 450                             # typische Parkdauer in Minuten
+      weight: 0.8
+      mu: 480                             # typische Parkdauer in Minuten
       sigma: 30                           # Streuung in Minuten
+
+    - name: medium_stay                     # Vollzeitmitarbeiter
+      distribution: normal
+      weight: 0.2
+      mu: 300                             # typische Parkdauer in Minuten
+      sigma: 15                           # Streuung in Minuten
+
+
 
 # Batteriezustand bei Ankunft; Verteilung ist eine Mischung aus gezieltem Laden und opportunistischem Laden
 # Office: Mischung aus Pendlern (mittlerer SoC) und Mitarbeitern, die „wenn möglich“ laden (höherer SoC)
@@ -119,12 +127,12 @@ soc_at_arrival_distribution:
   # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
     - name: low_battery_charging          # Pendler mit eher mittlerem SoC, die gezielt nachladen
       distribution: normal
-      weight: 0.0
+      weight: 0.1
       mu: 0.2                          # formt Peak ungefähr bei 0.3–0.5
-      sigma: 0.1
+      sigma: 0.05
 
     - name: opportunistic_charging        # „Wenn ich sowieso im Büro bin, lade ich mit“
       distribution: normal
-      weight: 1.0
+      weight: 0.9
       mu: 0.5                             # eher höherer SoC bei Ankunft
       sigma: 0.1 

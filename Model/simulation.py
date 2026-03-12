@@ -2611,7 +2611,6 @@ def _compute_debug_balance(
 
             "grid_limit_kw_per_step": grid_limit_kw,
 
-            # Plausibilitätscheck: sollte numerisch sehr nahe bei 0 liegen
             "balance_served_plus_unmet_minus_demand_kw_per_step": balance_served_plus_unmet_minus_demand,
         }
     )
@@ -2868,14 +2867,11 @@ def build_plugged_sessions_preview_table(
         .head(int(n))
         .reset_index(drop=True)
     )
-
-    # Ganze Zahl für Parkdauer
     if "Parkdauer [min]" in dataframe.columns:
         dataframe["Parkdauer [min]"] = pd.to_numeric(
             dataframe["Parkdauer [min]"], errors="coerce"
         ).astype("Int64")
 
-    # Restliche numerische Spalten auf 2 Nachkommastellen
     numeric_cols = dataframe.select_dtypes(include=["number"]).columns.tolist()
     numeric_cols = [col for col in numeric_cols if col != "Parkdauer [min]"]
     dataframe[numeric_cols] = dataframe[numeric_cols].round(2)
@@ -3162,39 +3158,6 @@ def build_power_per_charger_timeseries(charger_traces_dataframe: pd.DataFrame, *
     if end is not None:
         dataframe = dataframe[dataframe["timestamp"] <= pd.Timestamp(end)]
     return dataframe.sort_values("timestamp").reset_index(drop=True)
-
-
-def build_soc_timeseries_by_charger(*, charger_traces_dataframe: pd.DataFrame, charger_ids: list[int], start=None, end=None) -> dict[int, pd.DataFrame]:
-    """
-    Erzeugt SoC-Zeitreihen je Ladepunkt.
-    
-    Parameter
-    ---------
-    charger_traces_dataframe:
-        Trace-DataFrame aus `build_charger_traces_dataframe`.
-    charger_ids:
-        Liste der gewünschten Ladepunkt-IDs.
-    start, end:
-        Optionales Zeitfenster.
-    
-    Rückgabe
-    --------
-    dict[int, pd.DataFrame]
-        Zuordnung charger_id -> DataFrame(timestamp, soc, session_id).
-    """
-    output: dict[int, pd.DataFrame] = {}
-    charger_traces_dataframe_copy = charger_traces_dataframe.copy()
-    if len(charger_traces_dataframe_copy) == 0:
-        return {int(charger_id): pd.DataFrame() for charger_id in charger_ids}
-    charger_traces_dataframe_copy["timestamp"] = pd.to_datetime(charger_traces_dataframe_copy["timestamp"])
-    if start is not None:
-        charger_traces_dataframe_copy = charger_traces_dataframe_copy[charger_traces_dataframe_copy["timestamp"] >= pd.Timestamp(start)]
-    if end is not None:
-        charger_traces_dataframe_copy = charger_traces_dataframe_copy[charger_traces_dataframe_copy["timestamp"] <= pd.Timestamp(end)]
-    for charger_id in charger_ids:
-        dataframe = charger_traces_dataframe_copy[charger_traces_dataframe_copy["charger_id"] == int(charger_id)].sort_values("timestamp")
-        output[int(charger_id)] = dataframe[[c for c in ["timestamp", "soc", "session_id"] if c in dataframe.columns]].reset_index(drop=True)
-    return output
 
 
 def build_charger_power_heatmap_matrix(charger_traces_dataframe: pd.DataFrame, *, start=None, end=None) -> dict[str, Any]:
