@@ -4,8 +4,8 @@ simulation_horizon_days: 7                                            # gewünsc
 
 start_datetime: "2025-01-01 00:00"                                    # Zeitpunkt, ab dem die Simulation beginnen soll
 
-charging_strategy: "immediate"                                        # "immediate" | "market" | "pv"
-charging_strategy_fallback:                                           # "immediate" | "market" 
+charging_strategy: "pv"                                               # "immediate" | "market" | "pv"
+charging_strategy_fallback: "immediate"                               # "immediate" | "market" 
 localload_pv_market_csv: "../data/localload_pv_market_office.csv"     # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
 
 energy_expenses:
@@ -20,9 +20,9 @@ holidays:
   dates: []                                                           # zusätzliche bekannte betriebsfreie Tage manuell eingeben, getrennt durch neue Zeile (- "2026-01-01")
      
 site:
-  number_chargers: 8                                                  # Anzahl der Ladepunkte am Standort
+  number_chargers: 10                                                 # Anzahl der Ladepunkte am Standort
   charger_power_kw: 11                                                # Verfügbare Leistung pro Ladepunkt
-  grid_limit_p_avb_kw: 10                                            # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  grid_limit_p_avb_kw: 100                                            # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
   expected_sessions_per_charger_per_day: 4.0                          # erwartete Ladevorgänge pro Ladepunkt und Tag
   charger_efficiency: 0.95                                            # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
   allow_cross_day_charging: false                                     # Ermöglicht keine Ladungen über Mitternacht hinaus
@@ -30,7 +30,7 @@ site:
   # =============================================================================
   # Angaben zur lokalen PV-Anlage
   # =============================================================================
-  pv_system_size_kwp: 0                                               # Größe der untersuchten Anlage in kWp
+  pv_system_size_kwp: 500                                             # Größe der untersuchten Anlage in kWp
   
   # =============================================================================
   # Grundlast des Standorts - Gebäudeprofil
@@ -102,19 +102,11 @@ parking_duration_distribution:
 
   components:
   # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
-    - name: long_stay                     # Vollzeitmitarbeiter
+    - name: short_stay                     # Vollzeitmitarbeiter
       distribution: normal
-      weight: 0.8
-      mu: 480                             # typische Parkdauer in Minuten
-      sigma: 30                           # Streuung in Minuten
-
-    - name: medium_stay                     # Vollzeitmitarbeiter
-      distribution: normal
-      weight: 0.2
-      mu: 300                             # typische Parkdauer in Minuten
+      weight: 1.0
+      mu: 30                              # typische Parkdauer in Minuten
       sigma: 15                           # Streuung in Minuten
-
-
 
 # Batteriezustand bei Ankunft; Verteilung ist eine Mischung aus gezieltem Laden und opportunistischem Laden
 # Office: Mischung aus Pendlern (mittlerer SoC) und Mitarbeitern, die „wenn möglich“ laden (höherer SoC)

@@ -2,9 +2,9 @@ site_type: office                                                     # Standort
 time_resolution_min: 15                                               # Zeitschritt, in der die Simulation berechnet wird
 simulation_horizon_days: 7                                            # gewünschter Analysehorizont in Tagen
 
-start_datetime: "2025-01-01 00:00"                                    # Zeitpunkt, ab dem die Simulation beginnen soll
+start_datetime: "2025-08-01 00:00"                                    # Zeitpunkt, ab dem die Simulation beginnen soll
 
-charging_strategy: "immediate"                                        # "immediate" | "market" | "pv"
+charging_strategy: "market"                                           # "immediate" | "market" | "pv"
 charging_strategy_fallback:                                           # "immediate" | "market" 
 localload_pv_market_csv: "../data/localload_pv_market_office.csv"     # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
 
@@ -22,7 +22,7 @@ holidays:
 site:
   number_chargers: 8                                                  # Anzahl der Ladepunkte am Standort
   charger_power_kw: 11                                                # Verfügbare Leistung pro Ladepunkt
-  grid_limit_p_avb_kw: 10                                            # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  grid_limit_p_avb_kw: 200                                            # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
   expected_sessions_per_charger_per_day: 4.0                          # erwartete Ladevorgänge pro Ladepunkt und Tag
   charger_efficiency: 0.95                                            # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
   allow_cross_day_charging: false                                     # Ermöglicht keine Ladungen über Mitternacht hinaus
@@ -30,7 +30,7 @@ site:
   # =============================================================================
   # Angaben zur lokalen PV-Anlage
   # =============================================================================
-  pv_system_size_kwp: 0                                               # Größe der untersuchten Anlage in kWp
+  pv_system_size_kwp: 200                                             # Größe der untersuchten Anlage in kWp
   
   # =============================================================================
   # Grundlast des Standorts - Gebäudeprofil
