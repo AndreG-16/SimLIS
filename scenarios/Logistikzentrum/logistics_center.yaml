@@ -1,11 +1,11 @@
 site_type: logistics_center                                    # Standort des Ladepunkts
-time_resolution_min: 1                                         # Zeitschritt, in der die Simulation berechnet wird
+time_resolution_min: 15                                        # Zeitschritt, in der die Simulation berechnet wird
 simulation_horizon_days: 365                                   # gewünschter Analysehorizont in Tagen
 
 start_datetime: "2025-01-01 00:00"                             # Zeitpunkt, ab dem die Simulation beginnen soll
 
-charging_strategy: "pv"                                                       # "immediate" | "market" | "pv"
-charging_strategy_fallback: "market"                                          # "immediate" | "market" 
+charging_strategy: "immediate"                                                       # "immediate" | "market" | "pv"
+charging_strategy_fallback:                                           # "immediate" | "market" 
 localload_pv_market_csv: "../data/localload_pv_market_logistics_center.csv"   # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
 
 energy_expenses:
@@ -101,7 +101,7 @@ parking_duration_distribution:
       distribution: normal
       weight: 1.0
       mu: 780                                                 # Parkdauer über Nacht 
-      sigma: 60                               
+      sigma: 45                               
 
 
 # Batteriezustand bei Ankunft; Verteilung ist eine Mischung aus gezieltem Laden und opportunistischem Laden
@@ -116,11 +116,11 @@ soc_at_arrival_distribution:
     - name: low_charging_1                                     # Laden aufgrund leerer Batterie / gezielte Anfahrt
       distribution: normal
       weight: 1.0
-      mu: 0.45
-      sigma: 0.1
+      mu: 0.4
+      sigma: 0.05
 
     - name: low_charging_2                                     # Laden aufgrund leerer Batterie / gezielte Anfahrt
       distribution: normal
       weight: 1.0
       mu: 0.35
-      sigma: 0.1
+      sigma: 0.05

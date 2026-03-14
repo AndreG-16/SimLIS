@@ -4111,30 +4111,61 @@ def export_site_energy_balance_excel(
     scenario: dict,
     excel_path: str | Path = "site_energy_balance.xlsx",
     sheet_name: str = "Lastgang",
+    export_freq: str = "15min",
 ) -> pd.DataFrame:
     """
-    Exportiert den Lastgang als Excel in kWh pro 15-Minuten-Schritt.
+    Exportiert die Standort-Energiebilanz als Excel-Datei.
 
-    Spalten:
-    1. Datum + Uhrzeit
-    2. PV-Erzeugung [kWh/15 min]
-    3. Netzbezug [kWh/15 min]
-    4. Verfügbare Energie [kWh/15 min]
-    5. Grundlast aus Netz [kWh/15 min]
-    6. Grundlast aus PV [kWh/15 min]
-    7. Grundlast gesamt [kWh/15 min]
-    8. LIS aus Netz [kWh/15 min]
-    9. LIS aus PV [kWh/15 min]
-    10. LIS gesamt [kWh/15 min]
-    11. Standortverbrauch gesamt [kWh/15 min]
-    12. Marktpreis [€/MWh]
-    13. Freie Netzkapazität [kWh/15 min]
-    14. PV-Überschuss [kWh/15 min]
+    Die Funktion berechnet zunächst alle relevanten Energieströme aus dem
+    übergebenen Zeitreihen-DataFrame. Falls die Simulation in einer feineren
+    Auflösung als 15 Minuten vorliegt, werden die Werte für den Export auf
+    15-Minuten-Intervalle aggregiert.
 
-    Rückgabe
-    --------
-    pd.DataFrame
-        Exportiertes DataFrame; zusätzlich wird eine Excel-Datei geschrieben.
+    Es werden folgende Größen exportiert:
+    - PV-Erzeugung
+    - Netzbezug
+    - verfügbare Energie
+    - Grundlast aus Netz und PV
+    - LIS aus Netz und PV
+    - Gesamtverbrauch am Standort
+    - Marktpreis
+    - freie Netzkapazität
+    - PV-Überschuss
+
+    Energiespalten werden je Exportintervall aufsummiert, der Marktpreis wird
+    gemittelt.
+
+    Args:
+        timeseries_dataframe (pd.DataFrame):
+            Zeitreihen-DataFrame der Simulation. Erwartet mindestens die Spalte
+            ``timestamp``. Weitere benötigte Spalten werden direkt verwendet oder
+            aus vorhandenen Leistungswerten abgeleitet.
+
+        scenario (dict):
+            Szenario-Dictionary mit technischen Randbedingungen des Standorts.
+            Verwendet werden insbesondere ``time_resolution_min`` sowie
+            ``scenario["site"]["grid_limit_p_avb_kw"]``.
+
+        excel_path (str | Path, optional):
+            Zielpfad der zu erzeugenden Excel-Datei.
+            Standardwert ist ``"site_energy_balance.xlsx"``.
+
+        export_freq (str, optional):
+            Zielauflösung für den Excel-Export als Pandas-Frequenzstring.
+            Standardwert ist ``"15min"``.
+
+    Returns:
+        pd.DataFrame:
+            Das exportierte DataFrame in der gewünschten Exportauflösung.
+            Die Excel-Datei wird zusätzlich unter ``excel_path`` gespeichert.
+
+    Raises:
+        ValueError:
+            Falls ``timeseries_dataframe`` keine Spalte ``timestamp`` enthält.
+
+        ValueError:
+            Falls die Simulationsauflösung gröber ist als das gewünschte
+            Exportintervall und deshalb keine saubere Aggregation möglich ist.
     """
     df = timeseries_dataframe.copy()
     if "timestamp" not in df.columns:
@@ -4148,6 +4179,14 @@ def export_site_energy_balance_excel(
     else:
         step_h = float(scenario.get("time_resolution_min", 15)) / 60.0
     step_h = float(max(step_h, 1e-12))
+
+    export_step_h = pd.Timedelta(export_freq).total_seconds() / 3600.0
+
+    if step_h > export_step_h + 1e-12:
+        raise ValueError(
+            f"Die Simulationsauflösung ({step_h:.4f} h) ist gröber als das Exportintervall "
+            f"({export_step_h:.4f} h). Eine saubere Verdichtung auf {export_freq} ist so nicht möglich."
+        )
 
     def _get_kwh_per_step(col_kwh: str, col_kw: str) -> np.ndarray:
         if col_kwh in df.columns:
@@ -4211,12 +4250,12 @@ def export_site_energy_balance_excel(
     else:
         market_price = np.full(len(df), np.nan)
 
-    out = pd.DataFrame(
+    raw_out = pd.DataFrame(
         {
-            "Datum + Uhrzeit": df["timestamp"].dt.strftime("%d.%m.%y, %H:%M"),
+            "timestamp": df["timestamp"],
             "PV-Erzeugung [kWh/15 min]": pv_gen_kwh,
             "Netzbezug [kWh/15 min]": energy_from_nap,
-            "Verfügbage Energie [kWh/15 min]": total_energy_available,
+            "Verfügbare Energie [kWh/15 min]": total_energy_available,
             "Grundlast aus Netz [kWh/15 min]": grid_to_base,
             "Grundlast aus PV [kWh/15 min]": pv_to_base,
             "Grundlast gesamt [kWh/15 min]": base_sum,
@@ -4228,7 +4267,52 @@ def export_site_energy_balance_excel(
             "Freie Netzkapazität [kWh/15 min]": remaining_grid_energy,
             "PV-Überschuss [kWh/15 min]": pv_surplus,
         }
-    ).round(2)
+    ).set_index("timestamp")
+
+    energy_cols = [
+        "PV-Erzeugung [kWh/15 min]",
+        "Netzbezug [kWh/15 min]",
+        "Verfügbare Energie [kWh/15 min]",
+        "Grundlast aus Netz [kWh/15 min]",
+        "Grundlast aus PV [kWh/15 min]",
+        "Grundlast gesamt [kWh/15 min]",
+        "LIS aus Netz [kWh/15 min]",
+        "LIS aus PV [kWh/15 min]",
+        "LIS gesamt [kWh/15 min]",
+        "Standortverbrauch gesamt [kWh/15 min]",
+        "Freie Netzkapazität [kWh/15 min]",
+        "PV-Überschuss [kWh/15 min]",
+    ]
+
+    if step_h < export_step_h - 1e-12:
+        out = raw_out.resample(export_freq, label="left", closed="left").agg(
+            {**{col: "sum" for col in energy_cols}, "Marktpreis [€/MWh]": "mean"}
+        )
+    else:
+        out = raw_out.copy()
+
+    out = out.reset_index()
+    out["Datum + Uhrzeit"] = out["timestamp"].dt.strftime("%d.%m.%y, %H:%M")
+    out = out.drop(columns=["timestamp"])
+
+    out = out[
+        [
+            "Datum + Uhrzeit",
+            "PV-Erzeugung [kWh/15 min]",
+            "Netzbezug [kWh/15 min]",
+            "Verfügbare Energie [kWh/15 min]",
+            "Grundlast aus Netz [kWh/15 min]",
+            "Grundlast aus PV [kWh/15 min]",
+            "Grundlast gesamt [kWh/15 min]",
+            "LIS aus Netz [kWh/15 min]",
+            "LIS aus PV [kWh/15 min]",
+            "LIS gesamt [kWh/15 min]",
+            "Standortverbrauch gesamt [kWh/15 min]",
+            "Marktpreis [€/MWh]",
+            "Freie Netzkapazität [kWh/15 min]",
+            "PV-Überschuss [kWh/15 min]",
+        ]
+    ].round(2)
 
     excel_path = Path(excel_path)
     with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
@@ -4242,4 +4326,3 @@ def export_site_energy_balance_excel(
             worksheet.column_dimensions[column_cells[0].column_letter].width = min(max_length + 2, 28)
 
     return out
-
