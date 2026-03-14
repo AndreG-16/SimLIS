@@ -1,41 +1,41 @@
-site_type: logistics_center                                   # Standort des Ladepunkts
-time_resolution_min: 15                                       # Zeitschritt, in der die Simulation berechnet wird
-simulation_horizon_days: 30                                  # gewünschter Analysehorizont in Tagen
+site_type: logistics_center                                    # Standort des Ladepunkts
+time_resolution_min: 1                                         # Zeitschritt, in der die Simulation berechnet wird
+simulation_horizon_days: 365                                   # gewünschter Analysehorizont in Tagen
 
-start_datetime: "2025-01-01 00:00"                            # Zeitpunkt, ab dem die Simulation beginnen soll
+start_datetime: "2025-01-01 00:00"                             # Zeitpunkt, ab dem die Simulation beginnen soll
 
 charging_strategy: "pv"                                                       # "immediate" | "market" | "pv"
 charging_strategy_fallback: "market"                                          # "immediate" | "market" 
 localload_pv_market_csv: "../data/localload_pv_market_logistics_center.csv"   # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
 
 energy_expenses:
-  energy_cost_source: "csv"                                   # "csv" oder "fixed"
-  fixed_energy_cost_ct_per_kwh:                               # Energiekosten bei Bezug aus dem Netz, nur relevant, wenn "source = fixed"
-  energy_selling_price_ct_per_kwh: 0                          # Energieverkaufspreis an der Ladesäule für den Kunden
+  energy_cost_source: "csv"                                    # "csv" oder "fixed"
+  fixed_energy_cost_ct_per_kwh:                                # Energiekosten bei Bezug aus dem Netz, nur relevant, wenn "source = fixed"
+  energy_selling_price_ct_per_kwh: 0                           # Energieverkaufspreis an der Ladesäule für den Kunden
   
-timezone: "Europe/Berlin"                                     # Zeitzone, in der sich die Anlage befindet
+timezone: "Europe/Berlin"                                      # Zeitzone, in der sich die Anlage befindet
 holidays:
   country: "DE"
-  subdivision: "BY"                                           # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
-  dates: []                                                   # zusätzliche bekannte betriebsfreie Tage manuell eingeben, getrennt durch neue Zeile (- "2026-01-01")
+  subdivision: "BY"                                            # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
+  dates: []                                                    # zusätzliche bekannte betriebsfreie Tage manuell eingeben, getrennt durch neue Zeile (- "2026-01-01")
 
 site:
-  number_chargers: 4                                          # Anzahl der Ladepunkte am Standort
-  charger_power_kw: 200                                       # Verfügbare Leistung pro Ladepunkt
-  grid_limit_p_avb_kw: 300                                    # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
-  expected_sessions_per_charger_per_day: 2.0                  # erwartete Ladevorgänge pro LP und Tag
-  charger_efficiency: 0.95                                    # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
-  allow_cross_day_charging: true                              # Ermöglicht Ladungen über Mitternacht hinaus
+  number_chargers: 4                                           # Anzahl der Ladepunkte am Standort
+  charger_power_kw: 200                                        # Verfügbare Leistung pro Ladepunkt
+  grid_limit_p_avb_kw: 300                                     # Maximale Anschlussleistung durch Netzbetreiber vorgegeben
+  expected_sessions_per_charger_per_day: 1.0                   # erwartete Ladevorgänge pro LP und Tag
+  charger_efficiency: 0.95                                     # Verhältnis Fahrzeugaufnahme zu abgegebener LP-Leistung
+  allow_cross_day_charging: true                               # Ermöglicht Ladungen über Mitternacht hinaus
 
   # =============================================================================
   # Angaben zur lokalen PV-Anlage
   # =============================================================================
-  pv_system_size_kwp: 833                                     # Größe der untersuchten Anlage in kWp
+  pv_system_size_kwp: 833                                      # Größe der untersuchten Anlage in kWp
   
   # =============================================================================
   # Grundlast des Standorts - Gebäudeprofil
   # =============================================================================
-  base_load_annual_kwh: 861041                                # jährlicher standortspezifischer Verbrauch
+  base_load_annual_kwh: 861041                                 # jährlicher standortspezifischer Verbrauch
 
 # =============================================================================
 # Fuhrparkbeschreibung – Ladekurven + Kapazitäten kommen aus CSV
@@ -45,8 +45,8 @@ vehicles:
   soc_target: 0.95                                             # Gewünschter Ladezustand am Ende des Ladeprozesses
   vehicle_curve_csv: "../data/Ladekurven_Master.csv"           # Batteriekapazität und Ladekurve nach SOC
   fleet_mix:                                                   # Gewichtung der Fahrzeugtypen - PKW & Transporter
-    PKW: 0.1
-    Transporter: 0.9
+    PKW: 0.0
+    Transporter: 1.0
   vehicle_type: ["LKW Dummy"]                                  # Fahrzeuge können bei bekannten Fuhrpark spezifisch als In-Liste eingegeben werden (z.B. ["Fiat 500e Hatchback", "Audi e-tron GT", "Mercedes E-Sprinter"])
 
 # =============================================================================
@@ -60,53 +60,31 @@ arrival_time_distribution:
 
   # Skalierung der Ladevorgänge je nach Tagtyp
   weekday_weight:
-    working_day: 1.0                # hoher Betrieb an Arbeitstagen (Schichtbetrieb)
-    saturday: 0.05                  # reduzierter Betrieb am Samstag
-    sunday_holiday: 0.01            # geringer Betrieb an Sonn- und Feiertagen (z. B. Not-/Teilbetrieb)
+    working_day: 1.0                                           # hoher Betrieb an Arbeitstagen (Schichtbetrieb)
+    saturday: 0.0                                              # reduzierter Betrieb am Samstag
+    sunday_holiday: 0.0                                        # geringer Betrieb an Sonn- und Feiertagen (z. B. Not-/Teilbetrieb)
 
   components_per_weekday:
     # Logistics Center: zeitfensterbasierte Ankünfte (Slots/Touren) – Peaks um 07:00, 13:00 und 23:00
     # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
     working_day:
-      - name: peak_1                      # Rückkehr kurze Touren
+      - name: peak_1                                           # Rückkehr kurze Touren
         distribution: normal
-        mu: 14.0                          # Mittelwert in Stunden seit Mitternacht
-        sigma: 1.0                        # Streuung in Stunden
-        weight: 0.25                      # Gewichtung innerhalb working_day
+        mu: 14.0                                               # Mittelwert in Stunden seit Mitternacht
+        sigma: 0.5                                             # Streuung in Stunden
+        weight: 0.25                                           # Gewichtung innerhalb working_day
 
-      - name: peak_2                      # Rückkehr mittellange Touren 
+      - name: peak_2                                           # Rückkehr mittellange Touren 
         distribution: normal
         mu: 16.0
-        sigma: 1.0                       
+        sigma: 0.5                       
         weight: 0.5
 
-      - name: peak_3                      # Rückkehr Langstreckentour
+      - name: peak_3                                           # Rückkehr Langstreckentour
         distribution: normal
         mu: 18.5
-        sigma: 1.0                        # Streuung in Stunden (2h = 120 min)
+        sigma: 0.5                                            
         weight: 0.25
-
-    # Samstag: typischerweise weniger Schichten 
-    saturday:
-      - name: peak_4
-        distribution: normal
-        mu: 8.00
-        sigma: 2.0
-        weight: 0.7
-
-      - name: peak_5
-        distribution: normal
-        mu: 15.00
-        sigma: 1.00
-        weight: 0.3
-
-    # Sonntag/Feiertag: Notbetrieb / Wartung / Security / einzelne Lieferfenster
-    sunday_holiday:
-      - name: peak_6
-        distribution: normal
-        mu: 11.00
-        sigma: 3.0
-        weight: 1.0
 
 
 # Parkdauer in Minuten ab Ankunft; Verteilung ist eine Mischung aus Kurz- und Langzeitparkern
@@ -114,41 +92,35 @@ arrival_time_distribution:
 parking_duration_distribution:
   type: mixture
   time_unit: minutes
-  max_duration_minutes: 600                 # Obergrenze maximale Ladedauer
-  min_duration_minutes: 90                  # Untergrenze minimale Ladedauer
+  max_duration_minutes: 900                                   # Obergrenze maximale Ladedauer
+  min_duration_minutes: 300                                   # Untergrenze minimale Ladedauer
 
   components:
   # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
-    - name: long_stay                       # Nachtladungen (lange Standzeit)
+    - name: long_stay                                         # Nachtladungen (lange Standzeit)
       distribution: normal
-      weight: 0.8
-      mu: 480                               # typische Parkdauer über Nacht 8 Stunden
-      sigma: 75                             # Streuung 1–2 Stunden
-
-    - name: short_stay                      # kürzere Parkzeit bei Schichtwechsel
-      distribution: normal
-      weight: 0.2
-      mu: 120                                # typische Parkdauer 1 Stunde
-      sigma: 45
+      weight: 1.0
+      mu: 780                                                 # Parkdauer über Nacht 
+      sigma: 60                               
 
 
 # Batteriezustand bei Ankunft; Verteilung ist eine Mischung aus gezieltem Laden und opportunistischem Laden
 # Logistics Center: stärker bedarfsgetrieben (niedriger bis mittlerer SoC), opportunistisches Laden seltener
 soc_at_arrival_distribution:
   type: mixture
-  value_unit: fraction                      # 0.0 bis 1.0
-  max_soc: 0.80                             # maximales SoC bei Ankunft
+  value_unit: fraction                                        # 0.0 bis 1.0
+  max_soc: 0.60                                               # maximales SoC bei Ankunft
 
   components:
   # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
-    - name: low_battery_charging            # Laden aufgrund leerer Batterie / gezielte Anfahrt
-      distribution: beta
-      weight: 0.7
-      alpha: 1.7                     
-      beta: 5.0
-
-    - name: opportunistic_charging          # Transporter / Last-Mile
+    - name: low_charging_1                                     # Laden aufgrund leerer Batterie / gezielte Anfahrt
       distribution: normal
-      weight: 0.4
-      mu: 0.3
+      weight: 1.0
+      mu: 0.45
+      sigma: 0.1
+
+    - name: low_charging_2                                     # Laden aufgrund leerer Batterie / gezielte Anfahrt
+      distribution: normal
+      weight: 1.0
+      mu: 0.35
       sigma: 0.1
