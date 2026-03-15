@@ -1,11 +1,11 @@
 site_type: office                                                     # Standort des Ladepunkts
-time_resolution_min: 1                                                # Zeitschritt, in der die Simulation berechnet wird
+time_resolution_min: 15                                               # Zeitschritt, in der die Simulation berechnet wird
 simulation_horizon_days: 365                                          # gewünschter Analysehorizont in Tagen
 
 start_datetime: "2025-01-01 00:00"                                    # Zeitpunkt, ab dem die Simulation beginnen soll
 
-charging_strategy: "pv"                                               # "immediate" | "market" | "pv"
-charging_strategy_fallback: "market"                                  # "immediate" | "market" 
+charging_strategy: "immediate"                                                   # "immediate" | "market" | "pv"
+charging_strategy_fallback:                                           # "immediate" | "market" 
 localload_pv_market_csv: "../data/localload_pv_market_office.csv"     # CSV-Datei mit den Daten zur Grundlast, PV-Erzeugung und Marktpreisen
 
 energy_expenses:
@@ -16,7 +16,7 @@ energy_expenses:
 timezone: "Europe/Berlin"                                             # Zeitzone, in der sich die Anlage befindet
 holidays:   
   country: "DE"                                                       # Land, iin der sich die Anlage befindet
-  subdivision: "TH"                                                   # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
+  subdivision: "HE"                                                   # Bundesland als Code: BW, BY, BE, BB, HB, HH, HE, MV, NI, NW, RP, SL, SN, ST, SH, TH
   dates: []                                                           # zusätzliche bekannte betriebsfreie Tage manuell eingeben, getrennt durch neue Zeile (- "2026-01-01")
      
 site:
@@ -70,14 +70,14 @@ arrival_time_distribution:
       - name: peak_1                                                  # typische Ankunftszeit der Mitarbeiter am Morgen
         distribution: normal
         mu: 8.5                                                       # Peak in Stunden seit Mitternacht (z.B. 7.5 = 7:30 Uhr)
-        sigma: 1.0                                                    # Streuung in Stunden
-        weight: 0.8                                                   # Gewichtung innerhalb working_day
+        sigma: 0.5                                                    # Streuung in Stunden
+        weight: 0.9                                                   # Gewichtung innerhalb working_day
 
       - name: peak_2                                                  # Ankunftszeit von Teilzeitkräften, später kommenden Mitarbeitern oder externen Besuchern
         distribution: normal
-        mu: 12.5
-        sigma: 0.75
-        weight: 0.2
+        mu: 13.5
+        sigma: 0.5
+        weight: 0.1
 
 # Parkdauer in Minuten ab Ankunft; Verteilung ist eine Mischung aus Kurz- und Langzeitparkern
 parking_duration_distribution:
@@ -96,13 +96,13 @@ parking_duration_distribution:
 
     - name: medium_stay                                               # Teilzeitmitarbeiter / längere Meetings 
       distribution: normal
-      weight: 0.2
+      weight: 0.25
       mu: 300             
       sigma: 30
 
     - name: short_stay                                                # Besucher / kurze Termine
       distribution: normal
-      weight: 0.1
+      weight: 0.05
       mu: 90               
       sigma: 15
 
@@ -116,13 +116,13 @@ soc_at_arrival_distribution:
   components:
   # Die Bennenung 'name' hat keine Funktion für den Code und kann beliebig angepasst werden
     - name: low_battery_charging                                     # Fahrer mit eher niedrigem bis mittlerem SoC, die gezielt nachladen
-      distribution: beta
-      weight: 0.9
-      alpha: 3.5                                                     
-      beta: 4.0
+      distribution: normal
+      weight: 0.6
+      mu: 0.3                                                     
+      sigma: 0.1
 
     - name: opportunistic_charging                                   # Laden aus Gelegenheit aber nicht Notwendigkeit
       distribution: normal
-      weight: 0.1
-      mu: 0.6                                                        # eher höherer SoC bei Ankunft
+      weight: 0.4
+      mu: 0.5                                                        # eher höherer SoC bei Ankunft
       sigma: 0.1 

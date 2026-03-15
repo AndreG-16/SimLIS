@@ -1041,11 +1041,8 @@ def sample_sessions_for_simulation_day(
     sampled_sessions: List[SampledSession] = []
 
     def ceil_index(target: pd.Timestamp) -> int:
-        # searchsorted funktioniert nur korrekt, wenn ts_index sortiert ist (sollte es sein).
         """Rundet einen Zeitpunkt auf den nächsten Simulationsschritt auf.
-        
             Rückgabe ist der erste Index mit `timestamps[index] >= target`.
-        
         """
         idx = int(simulation_time_index.searchsorted(target, side="left"))
         return idx
@@ -3645,27 +3642,27 @@ def build_site_energy_summary_table(
         [
             {
                 "row": "Grundlast",
-                "PV-Energieverbrauch": base_pv,
-                "Netz-Energieverbrauch": base_grid,
-                "Summe Energieverbrauch": base_total,
-                "Autarkiegrad": _ss_pct(base_pv, base_total),
-                "PV-Eigenverbrauchsquote": _pv_self_consumption_pct(base_pv, pv_gen_total),
+                "PV-Energieverbrauch [kWh]": base_pv,
+                "Netz-Energieverbrauch [kWh]": base_grid,
+                "Summe Energieverbrauch [kWh]": base_total,
+                "Autarkiegrad [%]": _ss_pct(base_pv, base_total),
+                "PV-Eigenverbrauchsquote [%]": _pv_self_consumption_pct(base_pv, pv_gen_total),
             },
             {
                 "row": "Ladeinfrastruktur",
-                "PV-Energieverbrauch": ev_pv,
-                "Netz-Energieverbrauch": ev_grid,
-                "Summe Energieverbrauch": ev_total,
-                "Autarkiegrad": _ss_pct(ev_pv, ev_total),
-                "PV-Eigenverbrauchsquote": _pv_self_consumption_pct(ev_pv, pv_gen_total),
+                "PV-Energieverbrauch [kWh]": ev_pv,
+                "Netz-Energieverbrauch [kWh]": ev_grid,
+                "Summe Energieverbrauch [kWh]": ev_total,
+                "Autarkiegrad [%]": _ss_pct(ev_pv, ev_total),
+                "PV-Eigenverbrauchsquote [%]": _pv_self_consumption_pct(ev_pv, pv_gen_total),
             },
             {
                 "row": "Standort Gesamt",
-                "PV-Energieverbrauch": site_pv,
-                "Netz-Energieverbrauch": site_grid,
-                "Summe Energieverbrauch": site_total,
-                "Autarkiegrad": _ss_pct(site_pv, site_total),
-                "PV-Eigenverbrauchsquote": _pv_self_consumption_pct(site_pv, pv_gen_total),
+                "PV-Energieverbrauch [kWh]": site_pv,
+                "Netz-Energieverbrauch [kWh]": site_grid,
+                "Summe Energieverbrauch [kWh]": site_total,
+                "Autarkiegrad [%]": _ss_pct(site_pv, site_total),
+                "PV-Eigenverbrauchsquote [%]": _pv_self_consumption_pct(site_pv, pv_gen_total),
             },
         ]
     ).set_index("row")
