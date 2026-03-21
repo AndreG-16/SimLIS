@@ -93,11 +93,8 @@ def _localize_wall_time_index(
     if idx.has_duplicates:
         duplicate_mask = idx.duplicated(keep=False)
 
-        # Count occurrences per timestamp: 0 for first, 1 for second, ...
         occurrence_index = pd.Series(np.arange(len(idx))).groupby(idx).cumcount().to_numpy()
 
-        # For ambiguous duplicated wall times:
-        # first occurrence -> DST=True, second -> DST=False
         ambiguous = np.where(duplicate_mask, occurrence_index == 0, False)
 
         return idx.tz_localize(
@@ -570,7 +567,7 @@ def read_vehicle_load_profiles_from_csv(
             "(z. B. 0, 0.5, 1, ...)."
         )
 
-    # SoC: wenn max > 1 -> Prozent -> in Anteil umrechnen
+    # Interpretiert SoC-Werte > 1 als Prozentangaben
     if float(np.nanmax(soc_values)) > 1.0:
         state_of_charge_fraction = np.clip(soc_values / 100.0, 0.0, 1.0)
     else:
@@ -730,9 +727,7 @@ def define_sample_from_distribution(spec: Any, random_generator: np.random.Gener
 
     def require(key: str) -> Any:
         """Liest einen Pflichtparameter aus einer Verteilungsspezifikation.
-        
             Wirft einen Fehler, wenn der Parameter fehlt.
-        
         """
         if key not in spec:
             raise ValueError(f"Distribution '{distribution_name}' benötigt Parameter '{key}'.")
@@ -1009,11 +1004,8 @@ def sample_sessions_for_simulation_day(
         return []
 
     day_start_abs_step = int(simulation_time_index.get_loc(day_timestamps[0]))
-    day_end_excl = day_start_abs_step + steps_per_day  # Ende-exklusiv (erster Step des Folgetags)
+    day_end_excl = day_start_abs_step + steps_per_day  
 
-    # -------------------------------------------------------------------------
-    # Anzahl Sessions via Erwartungswert * Tagesgewichtung.
-    # -------------------------------------------------------------------------
     site_configuration = scenario["site"]
     number_chargers = int(site_configuration["number_chargers"])
 
@@ -1057,9 +1049,6 @@ def sample_sessions_for_simulation_day(
             )
         )
 
-        # ---------------------------------------------------------------------
-        # Arrival: Stunden -> Minuten -> Wandzeit -> Raster (nearest)
-        # ---------------------------------------------------------------------
         arrival_minutes = float(np.clip(arrival_hours * 60.0, 0.0, 24.0 * 60.0 - 1e-9))
         arrival_wall = day_start_ts + pd.Timedelta(minutes=arrival_minutes)
 
@@ -1069,16 +1058,11 @@ def sample_sessions_for_simulation_day(
         arrival_abs_step = int(np.clip(arrival_abs_step, day_start_abs_step, day_end_excl - 1))
         arrival_time = pd.to_datetime(simulation_time_index[arrival_abs_step]).to_pydatetime()
 
-        # ---------------------------------------------------------------------
-        # Departure: Wandzeit + Parkdauer -> Raster (CEIL, Ende-exklusiv)
-        # ---------------------------------------------------------------------
-        # Parkdauer mind. 1 Zeitschritt (damit departure > arrival)
         parking_duration_minutes = float(max(parking_duration_minutes, step_minutes))
         departure_wall = arrival_wall + pd.Timedelta(minutes=parking_duration_minutes)
 
         departure_abs_step = ceil_index(pd.Timestamp(departure_wall))
 
-        # Mindestens 1 Step Standzeit erzwingen
         if departure_abs_step <= arrival_abs_step:
             departure_abs_step = arrival_abs_step + 1
 
@@ -1088,11 +1072,9 @@ def sample_sessions_for_simulation_day(
             if departure_abs_step <= arrival_abs_step:
                 departure_abs_step = min(arrival_abs_step + 1, day_end_excl)
 
-        # departure_time bestimmen (Ende-exklusiv => Timestamp an departure_abs_step)
         if departure_abs_step < len(simulation_time_index):
             departure_time = pd.to_datetime(simulation_time_index[departure_abs_step]).to_pydatetime()
         else:
-            # Falls ganz am Ende des Horizonts: virtueller Endpunkt ein Schritt danach
             departure_time = (
                 pd.to_datetime(simulation_time_index[-1]) + pd.Timedelta(minutes=time_resolution_min)
             ).to_pydatetime()
@@ -2359,7 +2341,6 @@ def simulate_site_fcfs_with_planning(
         charger_id_by_session_id[str(session.session_id)] = charger_id
         plugged.append(session)
 
-    # --- Planung: pro Arrival-Tag ---
     plugged_by_day = _group_sessions_by_arrival_day(plugged, timestamps)
 
     for day_key in sorted(plugged_by_day.keys()):
@@ -2378,14 +2359,12 @@ def simulate_site_fcfs_with_planning(
             else None,
         )
 
-        # Charger-ID + Status ergänzen
         for r in day_results:
             session_identifier = str(r["session_id"])
             r["status"] = "plugged"
             r["charger_id"] = int(charger_id_by_session_id[session_identifier])
             sessions_out.append(r)
 
-    # EV-Lastgang ist die reservierte Leistung
     ev_load_kw = np.asarray(reserved_total, dtype=float)
 
     debug_df = None
@@ -2518,15 +2497,63 @@ def _compute_debug_balance(
     reserved_pv_ev_power_kw_per_step: np.ndarray,
 ) -> pd.DataFrame:
     """
-    Erstellt eine Debug-Leistungsbilanz pro Simulationsschritt als DataFrame.
+    Erstellt eine Debug-Leistungsbilanz pro Simulationsschritt.
 
-    Anpassungen ggü. der Ausgangsversion:
-    - PV→EV wird zusätzlich durch die tatsächliche EV-Leistung `ev` begrenzt.
-    - Zusätzliche Debug-Spalten: PV-Überschuss (Export/Abregelung), unbediente Grundlast/EV,
-      Gesamt-Netzbezug, Plausibilitäts-/Bilanzchecks.
-    - Eingänge werden defensiv auf >= 0 geklippt (optional/Debug-freundlich).
+    Die Funktion zerlegt die Lastflüsse des Standorts in Beiträge aus PV und Netz
+    für Grundlast und EV-Ladeleistung. Zusätzlich werden unbediente Lasten,
+    PV-Überschüsse sowie einfache Bilanz- und Plausibilitätsgrößen berechnet.
 
-    Hinweis: rein für Debugging/Analyse, ohne Einfluss auf die Ladeplanung.
+    Die Zuordnung erfolgt in dieser Reihenfolge:
+    1) PV -> Grundlast
+    2) PV -> EV
+    3) Netz -> Grundlast (bis zum Netzlimit)
+    4) Netz -> EV (nur mit verbleibendem Netzspielraum)
+
+    Dabei wird der PV-Anteil der EV-Ladung durch den tatsächlich getrackten
+    PV-EV-Anteil, den verbleibenden PV-Überschuss nach Deckung der Grundlast
+    und die tatsächliche EV-Leistung begrenzt. Alle Eingangszeitreihen werden
+    defensiv auf nichtnegative Werte geklippt.
+
+        Parameter
+        ----------
+        timestamps:
+            Simulationszeitindex. Die Länge definiert die erwartete Länge aller
+            Eingangszeitreihen.
+        scenario:
+            Szenario-Dictionary. Verwendet wird insbesondere
+            ``scenario["site"]["grid_limit_p_avb_kw"]`` als verfügbares Netzlimit
+            je Simulationsschritt.
+        pv_generation_kw_per_step:
+            PV-Erzeugung je Simulationsschritt als Leistung in kW.
+        base_load_kw_per_step:
+            Grundlast je Simulationsschritt als Leistung in kW.
+        reserved_total_ev_power_kw_per_step:
+            Gesamte reservierte EV-Ladeleistung je Simulationsschritt in kW.
+        reserved_pv_ev_power_kw_per_step:
+            Getrackter PV-Anteil der reservierten EV-Ladeleistung je
+            Simulationsschritt in kW.
+
+        Rückgabe
+        --------
+        pd.DataFrame
+            DataFrame mit einer Zeile pro Simulationsschritt. Enthalten sind die
+            Eingangsgrößen sowie daraus abgeleitete Bilanzspalten, u. a.
+            ``pv_to_base_kw_per_step``, ``pv_to_ev_kw_per_step``,
+            ``grid_to_base_kw_per_step``, ``grid_to_ev_kw_per_step``,
+            ``grid_import_kw_per_step``, ``pv_surplus_kw_per_step``,
+            ``unmet_*_kw_per_step`` und
+            ``balance_served_plus_unmet_minus_demand_kw_per_step``.
+
+        Ausnahmen
+        ---------
+        ValueError
+            Wenn die Längen von ``timestamps`` und den Eingangszeitreihen nicht
+            übereinstimmen.
+
+        Hinweise
+        --------
+        Die Funktion dient ausschließlich der Analyse und Validierung von
+        Simulationsergebnissen. Sie hat keinen Einfluss auf die Ladeplanung.
     """
     grid_limit_kw = float(scenario["site"]["grid_limit_p_avb_kw"])
 
@@ -2772,20 +2799,43 @@ def build_plugged_sessions_preview_table(
     sessions_out: list[dict[str, Any]], *, n: int = 10
 ) -> pd.DataFrame:
     """
-    Erzeugt eine Vorschau-Tabelle für die ersten n erfolgreichen Ladesessions.
+    Erstellt eine Vorschau-Tabelle für erfolgreiche Ladesessions.
 
-    Angezeigte Spalten:
-    - Session-ID
-    - Ladepunkt
-    - Ankunft
-    - Abfahrt
-    - Parkdauer [min]
-    - SoC Ankunft
-    - SoC Ende
-    - Geladene Energie [kWh]
-    - Durchschnittliche Ladeleistung [kW]
-    - Maximale Ladeleistung [kW]
-    - Fahrzeug
+    Berücksichtigt werden ausschließlich Sessions mit Status ``"plugged"``.
+    Für jede Session werden zentrale Stammdaten, SoC-Werte sowie einfache
+    Leistungs- und Energiekennzahlen in eine tabellarische Ansicht überführt.
+
+    Die Ausgabe wird nach ``Ankunft`` und ``Session-ID`` sortiert, auf die
+    ersten ``n`` Zeilen begrenzt und numerische Spalten werden auf zwei
+    Nachkommastellen gerundet. Die Parkdauer wird – sofern vorhanden – als
+    ganzzahlige Nullable-Integer-Spalte ausgegeben.
+
+    Parameter
+    ---------
+    sessions_out:
+        Session-Ergebnisliste aus der Simulation.
+    n:
+        Maximale Anzahl auszugebender Sessions (Default: 10).
+
+    Rückgabe
+    --------
+    pd.DataFrame
+        Vorschau-Tabelle mit einer Zeile pro berücksichtigter Session. Die
+        Tabelle enthält u. a. die Spalten ``Session-ID``, ``Ladepunkt``,
+        ``Ankunft``, ``Abfahrt``, ``Parkdauer [min]``,
+        ``SoC Ankunft [%]``, ``SoC Ende [%]``,
+        ``Geladene Energie [kWh]``,
+        ``Durchschnittliche Ladeleistung [kW]``,
+        ``Maximale Ladeleistung [kW]`` und ``Fahrzeug``.
+        Wenn keine passende Session vorliegt, wird ein leeres DataFrame
+        zurückgegeben.
+
+    Hinweise
+    --------
+    Die durchschnittliche Ladeleistung wird aus ``charged_site_kwh`` und der
+    aus Ankunfts- und Abfahrtszeit berechneten Parkdauer bestimmt. Die
+    maximale Ladeleistung wird aus ``plan_site_kw_per_step`` als Maximum der
+    nichtnegativen Werte abgeleitet.
     """
     rows: list[dict[str, Any]] = []
 
@@ -3375,16 +3425,43 @@ def get_most_used_vehicle_name(
 
 def build_not_reached_sessions_table(summary: dict[str, Any]) -> pd.DataFrame:
     """
-    Erstellt eine formatierte Tabelle für Sessions, die den Ziel-SoC nicht erreicht haben.
+    Erstellt eine formatierte Tabelle für Sessions mit nicht erreichtem Ziel-SoC.
 
-    Spalten:
-    - Session-ID
-    - Ladepunkt
-    - Ankunft
-    - Parkdauer [min]
-    - SoC Ankunft [%]
-    - SoC Ende [%]
-    - Fehlende Energie [kWh]
+    Die Funktion liest die Einträge aus ``summary["not_reached_rows"]`` und
+    überführt sie in eine einheitlich benannte und für die Analyse geeignete
+    Tabellenform. Dabei werden ältere bzw. alternative Spaltennamen auf das
+    erwartete Schema normalisiert, nicht benötigte Spalten entfernt und
+    relevante Kennzahlen formatiert.
+
+    Falls vorhanden, werden Ankunftszeitpunkte als Zeichenkette formatiert,
+    SoC-Werte von Anteilen in Prozent umgerechnet und die fehlende Energie
+    numerisch aufbereitet. Liegt ``remaining_energy_kwh`` vor, wird die
+    Ausgabe absteigend nach der fehlenden Energie sortiert.
+
+    Parameter
+    ---------
+    summary:
+        Zusammenfassungs-Dictionary der Simulation. Erwartet insbesondere
+        die Liste ``summary["not_reached_rows"]`` mit den Rohdaten der
+        Sessions, die den Ziel-SoC nicht erreicht haben.
+
+    Rückgabe
+    --------
+    pd.DataFrame
+        Formatierte Tabelle mit einer Zeile pro betroffener Session. Die
+        Standardausgabe enthält die Spalten ``Session-ID``, ``Ladepunkt``,
+        ``Ankunft``, ``Parkdauer [min]``, ``SoC Ankunft [%]``,
+        ``SoC Ende [%]`` und ``Fehlende Energie [kWh]``.
+        Wenn keine entsprechenden Einträge vorliegen, wird ein leeres
+        DataFrame mit diesem Spaltenschema zurückgegeben.
+
+    Hinweise
+    --------
+    Die Funktion akzeptiert sowohl das neuere Spaltenschema
+    (``remaining_energy_kwh``, ``soc_arrival``, ``soc_end``) als auch
+    ältere Bezeichnungen wie ``remaining_energy``,
+    ``state_of_charge_at_arrival`` und ``final_soc``. Numerische Spalten
+    werden in der Rückgabe auf zwei Nachkommastellen gerundet.
     """
     rows = summary.get("not_reached_rows", []) or []
     dataframe = pd.DataFrame(rows)
@@ -3470,19 +3547,55 @@ def build_master_curve_and_actual_points_for_vehicle(
     power_tolerance_kw: float = 1e-6,
 ) -> dict[str, object]:
     """
-    Bereitet Daten für den Vergleich von Master-Ladekurve und Ist-Ladepunkten auf.
+    Bereitet Vergleichsdaten zwischen Master-Ladekurve und gemessenen Ladepunkten vor.
 
-    Hinweis zur Leistungsdefinition
-    -------------------------------
-    - Masterkurve ``curve.power_kw`` ist auf **Batterieseite**.
-    - Trace-Leistung ist auf **Standort-/Ladepunktseite** (typisch Spalte ``power_kw``).
-      Für den Vergleich wird auf Batterieseite umgerechnet:
-      ``power_batt_kw = power_site_kw * charger_efficiency``.
+    Die Funktion extrahiert aus den Charger-Trace-Daten alle Messpunkte des in
+    ``curve`` referenzierten Fahrzeugs und stellt diese der hinterlegten
+    Master-Ladekurve gegenüber. Dafür werden SoC- und Leistungswerte bereinigt,
+    auf Batterieseite umgerechnet und anschließend gegen die zulässige
+    Masterkurve interpoliert geprüft.
 
-    Erwartete Spalten im charger_traces_dataframe
-    ---------------------------------------------
-    - vehicle_name, timestamp, soc
-    - Leistungsspalte: bevorzugt ``power_kw``; alternativ wird auch ``site_power_kw`` akzeptiert.
+    Die Masterkurve ``curve.power_kw`` ist auf Batterieseite definiert.
+    Die gemessene Ladeleistung im Trace wird dagegen auf Standort- bzw.
+    Ladepunktseite erwartet und für den Vergleich mit
+    ``charger_efficiency`` auf Batterieseite umgerechnet.
+
+    Parameter
+    ---------
+    charger_traces_dataframe:
+        Trace-Tabelle mit Messpunkten je Fahrzeug und Zeitpunkt. Erwartet werden
+        mindestens die Spalten ``vehicle_name``, ``timestamp`` und ``soc`` sowie
+        eine Leistungsspalte. Bevorzugt wird ``power_kw`` verwendet, alternativ
+        ``site_power_kw``.
+    scenario:
+        Szenario-Dictionary. Verwendet wird insbesondere
+        ``scenario["site"]["charger_efficiency"]`` zur Umrechnung der
+        Trace-Leistung von Standort- auf Batterieseite.
+    curve:
+        Master-Ladekurve des betrachteten Fahrzeugs.
+    power_tolerance_kw:
+        Zulässige absolute Toleranz in kW bei der Prüfung, ob ein gemessener
+        Ladepunkt oberhalb der interpolierten Masterkurve liegt.
+
+    Rückgabe
+    --------
+    dict[str, object]
+        Dictionary mit den für die Auswertung benötigten Vergleichsdaten. Die
+        Rückgabe enthält insbesondere ``vehicle_name``, ``master_soc``,
+        ``master_power_battery_kw``, ``actual_soc``, ``actual_power_batt_kw``,
+        ``violation_mask`` sowie ``number_violations``.
+        ``violation_mask`` markiert alle Messpunkte, deren tatsächliche
+        Batterieleistung oberhalb der zulässigen, aus der Masterkurve
+        interpolierten Leistung liegt.
+
+    Hinweise
+    --------
+    Nicht verwertbare Messpunkte werden entfernt. SoC-Werte werden auf den
+    Bereich ``[0.0, 1.0]`` begrenzt, negative Leistungen werden zu ``0.0``
+    gekappt. Wenn keine geeigneten Trace-Daten vorliegen, erforderliche
+    Spalten fehlen oder die Masterkurve weniger als zwei Stützstellen enthält,
+    wird ein Ergebnis ohne Verstöße und ggf. mit leeren Ist-Daten
+    zurückgegeben.
     """
     master_soc = np.asarray(curve.state_of_charge_fraction, dtype=float).reshape(-1)
     master_power_batt_kw = np.asarray(curve.power_kw, dtype=float).reshape(-1)
@@ -3558,24 +3671,51 @@ def build_site_energy_summary_table(
     timeseries_dataframe: pd.DataFrame,
 ) -> pd.DataFrame:
     """
-    Erstellt eine kompakte Energiebilanz über den gesamten Simulationshorizont.
+    Erstellt eine kompakte Energiebilanz für den gesamten Simulationshorizont.
 
-    Zeilen:
-    - Grundlast
-    - Ladeinfrastruktur
-    - Standort Gesamt
+    Die Funktion aggregiert Grundlast, Ladeinfrastruktur und den gesamten
+    Standort zu einer tabellarischen Gesamtübersicht. Für jede dieser drei
+    Betrachtungsebenen werden PV- und Netzanteil des Energieverbrauchs, der
+    Gesamtverbrauch sowie daraus abgeleitete Kennzahlen berechnet.
 
-    Spalten:
-    - PV-Energieverbrauch [kWh]
-    - Netz-Energieverbrauch [kWh]
-    - Summe Energieverbrauch [kWh]
-    - Autarkiegrad [%]
-      (= PV / Gesamtverbrauch * 100)
-    - PV-Eigenverbrauchsquote [%]
-      (= PV-Verbrauch / PV-Erzeugung * 100)
+    Sofern Debug-Spalten zur expliziten Aufteilung der Energieflüsse vorhanden
+    sind, werden diese direkt verwendet. Andernfalls wird eine vereinfachte
+    PV-first-Logik angenommen: PV deckt zunächst die Grundlast und anschließend
+    die Ladeinfrastruktur; verbleibende Verbräuche werden dem Netz zugeordnet.
 
-    Falls Debug-Spalten (pv_to_* / grid_to_*) existieren, werden diese für die Aufteilung genutzt.
-    Andernfalls wird PV-first angenommen (PV deckt Grundlast zuerst, Rest-PV deckt EV).
+    Parameter
+    ---------
+    timeseries_dataframe:
+        Zeitreihen-DataFrame der Simulation. Erwartet werden insbesondere
+        Zeitreihen für Grundlast, PV-Erzeugung und EV-Last, wahlweise bereits
+        als Energie je Schritt (``*_kwh_per_step``) oder als Leistung in kW
+        (``*_kw``). Optional können Debug-Spalten wie
+        ``pv_to_base_kwh_per_step``, ``pv_to_ev_kwh_per_step``,
+        ``grid_to_base_kwh_per_step`` und ``grid_to_ev_kwh_per_step``
+        enthalten sein.
+
+    Rückgabe
+    --------
+    pd.DataFrame
+        Kompakte Energiebilanz mit den Zeilen ``Grundlast``,
+        ``Ladeinfrastruktur`` und ``Standort Gesamt``. Die Spalten umfassen
+        ``PV-Energieverbrauch [kWh]``, ``Netz-Energieverbrauch [kWh]``,
+        ``Summe Energieverbrauch [kWh]``, ``Autarkiegrad [%]`` und
+        ``PV-Eigenverbrauchsquote [%]``.
+        Die Werte werden auf zwei Nachkommastellen gerundet zurückgegeben.
+
+    Hinweise
+    --------
+    Falls keine Energiespalten je Simulationsschritt vorliegen, werden
+    Leistungsspalten mithilfe der Schrittweite in Energie umgerechnet. Die
+    Schrittweite wird nach Möglichkeit aus der Zeitstempelspalte bestimmt;
+    falls dies nicht möglich ist, wird ein Standardwert von 0,25 Stunden
+    angenommen.
+
+    Der Autarkiegrad wird als Anteil des PV-Energieverbrauchs am jeweiligen
+    Gesamtverbrauch berechnet. Die PV-Eigenverbrauchsquote beschreibt den
+    Anteil der insgesamt erzeugten PV-Energie, der in der jeweiligen
+    Betrachtungsebene direkt genutzt wurde.
     """
     df = timeseries_dataframe.copy()
 
@@ -3675,12 +3815,48 @@ def build_site_energy_summary_table(
 
 def build_pv_generation_and_surplus_table(*, timeseries_dataframe: pd.DataFrame) -> pd.DataFrame:
     """
-    Erstellt eine kompakte Tabelle zur PV-Erzeugung am Standort.
+    Erstellt eine kompakte Übersicht zur PV-Erzeugung und -Nutzung am Standort.
 
-    Zeilen:
-    - PV-Erzeugung
-    - PV-Verbrauch
-    - PV-Überschuss
+    Die Funktion aggregiert die PV-Energie über den gesamten
+    Simulationshorizont und stellt erzeugte, direkt verbrauchte und
+    überschüssige PV-Energie tabellarisch gegenüber.
+
+    Sofern Debug-Spalten zur expliziten Aufteilung der Energieflüsse vorhanden
+    sind, werden diese direkt verwendet, um den PV-Verbrauch zu bestimmen.
+    Andernfalls wird eine vereinfachte PV-first-Logik angenommen: PV deckt
+    zunächst die Grundlast und anschließend die Ladeinfrastruktur; nicht
+    direkt genutzte PV-Energie wird als Überschuss ausgewiesen.
+
+    Parameter
+    ---------
+    timeseries_dataframe:
+        Zeitreihen-DataFrame der Simulation. Erwartet werden insbesondere
+        Zeitreihen für Grundlast, PV-Erzeugung und EV-Last, wahlweise bereits
+        als Energie je Schritt (``*_kwh_per_step``) oder als Leistung in kW
+        (``*_kw``). Optional können Debug-Spalten wie
+        ``pv_to_base_kwh_per_step``, ``pv_to_ev_kwh_per_step``,
+        ``grid_to_base_kwh_per_step`` und ``grid_to_ev_kwh_per_step``
+        enthalten sein.
+
+    Rückgabe
+    --------
+    pd.DataFrame
+        Kompakte Tabelle mit den Zeilen ``PV-Erzeugung``, ``PV-Verbrauch``
+        und ``PV-Überschuss`` sowie der Spalte ``Energie [kWh]``.
+        Die Werte werden auf zwei Nachkommastellen gerundet zurückgegeben.
+
+    Hinweise
+    --------
+    Falls keine Energiespalten je Simulationsschritt vorliegen, werden
+    Leistungsspalten mithilfe der Schrittweite in Energie umgerechnet. Die
+    Schrittweite wird nach Möglichkeit aus der Zeitstempelspalte bestimmt;
+    falls dies nicht möglich ist, wird ein Standardwert von 0,25 Stunden
+    angenommen.
+
+    Der PV-Verbrauch umfasst ausschließlich die direkt am Standort genutzte
+    PV-Energie für Grundlast und Ladeinfrastruktur. Der PV-Überschuss ergibt
+    sich als positive Differenz zwischen gesamter PV-Erzeugung und direktem
+    PV-Verbrauch.
     """
     df = timeseries_dataframe.copy()
 
@@ -3736,6 +3912,70 @@ def build_pv_generation_and_surplus_table(*, timeseries_dataframe: pd.DataFrame)
     return out.round(2)
 
 def build_energy_ev_profitability_table(timeseries_dataframe: pd.DataFrame, scenario: dict):
+    """
+    Erstellt eine kompakte Übersicht zu Energiebezug, Energiekosten und
+    Energiemarge der Ladeinfrastruktur.
+
+    Die Funktion berechnet für Grundlast, Ladeinfrastruktur (LIS) und den
+    gesamten Standort den Netzbezug, den durchschnittlichen Einkaufspreis
+    sowie die daraus resultierenden Energiekosten über den gesamten
+    Simulationshorizont. Zusätzlich werden für die Ladeinfrastruktur die
+    verkaufte Energie, die Erlöse und die Energiemarge ausgewiesen.
+
+    Die Aufteilung des Netzbezugs in Grundlast und LIS erfolgt bevorzugt
+    über vorhandene Debug-Spalten. Falls diese nicht vorliegen, wird eine
+    vereinfachte PV-first-Logik verwendet: PV deckt zunächst die Grundlast
+    und anschließend die Ladeinfrastruktur; verbleibende Verbräuche werden
+    dem Netz zugeordnet.
+
+    Parameter
+    ---------
+    timeseries_dataframe:
+        Zeitreihen-DataFrame der Simulation. Erwartet werden mindestens die
+        Spalten ``timestamp``, ``ev_load_kw`` und ``base_load_kw``.
+        Für die exakte Aufteilung des Netzbezugs können optional
+        ``grid_to_base_kw_per_step`` und ``grid_to_ev_kw_per_step``
+        enthalten sein. Falls diese fehlen, wird zusätzlich
+        ``pv_generation_kw`` benötigt.
+        Bei ``energy_cost_source="csv"`` muss außerdem die Spalte
+        ``market_price_eur_per_mwh`` vorhanden sein.
+    scenario:
+        Szenario-Dictionary. Verwendet werden insbesondere die Angaben unter
+        ``scenario["energy_expenses"]`` zur Quelle der Energiekosten
+        (``"fixed"`` oder ``"csv"``), zum festen Einkaufspreis sowie zum
+        Verkaufspreis der Ladeenergie. Falls die Schrittweite nicht aus den
+        Zeitstempeln bestimmt werden kann, wird ersatzweise
+        ``scenario["time_resolution_min"]`` verwendet.
+
+    Rückgabe
+    --------
+    pandas.io.formats.style.Styler
+        Formatierte Tabelle als ``Styler`` mit Kennzahlen zu Netzbezug,
+        Einkaufspreisen, Energiekosten, verkaufter Energie, Erlösen und
+        Energiemarge. Die Tabelle ist für die Anzeige gedacht und blendet
+        Index und Spaltenüberschriften aus.
+
+    Ausnahmen
+    ---------
+    ValueError
+        Wenn erforderliche Spalten im ``timeseries_dataframe`` fehlen,
+        ``energy_cost_source`` weder ``"fixed"`` noch ``"csv"`` ist oder
+        bei ``energy_cost_source="csv"`` keine Marktpreisspalte vorhanden
+        ist.
+
+    Hinweise
+    --------
+    Die Schrittweite wird nach Möglichkeit aus den ersten beiden
+    Zeitstempeln bestimmt. Falls dies nicht möglich ist, wird die im
+    Szenario konfigurierte Zeitauflösung verwendet. Bei ``"fixed"`` werden
+    die Energiekosten mit einem konstanten Preis in ct/kWh berechnet; bei
+    ``"csv"`` werden die zeitvariablen Marktpreise aus
+    ``market_price_eur_per_mwh`` schrittweise berücksichtigt.
+
+    Die Energiemarge wird ausschließlich für die Ladeinfrastruktur
+    berechnet und ergibt sich aus ``Erlöse Ladeinfrastruktur`` minus
+    ``Energiekosten Netzbezug LIS``.
+    """
     df = timeseries_dataframe.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
 
@@ -3888,6 +4128,69 @@ def build_grid_work_and_peak_table(
     scenario: dict,
     include_peak_timestamp: bool = True,
 ):
+    """
+    Erstellt eine Monatsübersicht zu Netzarbeit und Höchstleistung am Standort.
+
+    Die Funktion leitet aus den Zeitreihen des Standorts eine
+    Netzbezugs-Zeitreihe ab, integriert diese zu Netzarbeit und aggregiert
+    die Ergebnisse monatsweise. Zusätzlich wird je Monat die maximale
+    bezogene Leistung bestimmt. Optional wird eine Gesamtsumme bzw.
+    Gesamtzeile über den gesamten Simulationshorizont ergänzt.
+
+    Für die Bestimmung der Netzleistung werden vorhandene Debug-Spalten
+    bevorzugt verwendet. Falls diese nicht vorliegen, wird die Netzleistung
+    näherungsweise aus Grundlast, EV-Last und optionaler PV-Erzeugung
+    abgeleitet. Dabei werden negative Werte zu ``0.0`` gekappt; ein im
+    Szenario definierter Netzanschlussgrenzwert wird im Fallback-Fall als
+    Obergrenze berücksichtigt.
+
+    Parameter
+    ---------
+    timeseries_dataframe:
+        Zeitreihen-DataFrame der Simulation. Erforderlich ist mindestens die
+        Spalte ``timestamp``. Für die bevorzugte exakte Berechnung können
+        die Debug-Spalten ``grid_to_base_kw_per_step`` und
+        ``grid_to_ev_kw_per_step`` enthalten sein. Andernfalls werden
+        mindestens ``base_load_kw`` und ``ev_load_kw`` benötigt; optional
+        kann ``pv_generation_kw`` zur Fallback-Berechnung verwendet werden.
+    scenario:
+        Szenario-Dictionary. Verwendet werden insbesondere
+        ``scenario["timezone"]`` zur Zeitzonenbehandlung,
+        ``scenario["time_resolution_min"]`` als Fallback für die
+        Schrittweite sowie optional
+        ``scenario["site"]["grid_limit_p_avb_kw"]`` als Obergrenze für die
+        abgeleitete Netzleistung.
+    include_peak_timestamp:
+        Reservierter Parameter für eine optionale spätere Erweiterung um den
+        Zeitstempel der Höchstleistung. Der aktuelle Rückgabewert wird durch
+        diesen Parameter nicht verändert.
+
+    Rückgabe
+    --------
+    pandas.io.formats.style.Styler
+        Formatierte Monatsübersicht als ``Styler`` mit den Spalten
+        ``Monat``, ``Arbeit W [kWh]`` und ``Höchstleistung P [kW]``.
+        Zusätzlich enthält die Ausgabe eine Zeile ``Gesamt`` für den
+        gesamten Simulationshorizont. Der Index wird in der Darstellung
+        ausgeblendet.
+
+    Ausnahmen
+    ---------
+    ValueError
+        Wenn ``timeseries_dataframe`` keine Spalte ``timestamp`` enthält,
+        die Zeitstempel nicht geparst werden können oder im Fallback-Fall
+        die für die Netzleistungsberechnung erforderlichen Lastspalten
+        fehlen.
+
+    Hinweise
+    --------
+    Die Schrittweite wird aus den Abständen aufeinanderfolgender
+    Zeitstempel bestimmt. Fehlende oder nicht bestimmbare Schrittweiten
+    werden mit der typischen Schrittweite bzw. ersatzweise mit
+    ``scenario["time_resolution_min"]`` aufgefüllt. Für die monatliche
+    Aggregation werden die Zeitstempel in Monatsperioden überführt; eine
+    ggf. vorhandene Zeitzone wird dabei für die Periodenbildung entfernt.
+    """
     dataframe = timeseries_dataframe.copy()
     if "timestamp" not in dataframe:
         raise ValueError("timeseries_dataframe muss eine Spalte 'timestamp' enthalten.")
@@ -3912,8 +4215,7 @@ def build_grid_work_and_peak_table(
         .sort_values("timestamp")
         .set_index("timestamp")
     )
-
-    # grid_kw (debug bevorzugt, sonst fallback)
+    # Bestimmt grid_kw bevorzugt aus Debug-Spalten, andernfalls per Fallback
     if {"grid_to_base_kw_per_step", "grid_to_ev_kw_per_step"}.issubset(dataframe.columns):
         grid_power_kw = (
             dataframe[["grid_to_base_kw_per_step", "grid_to_ev_kw_per_step"]]
@@ -3993,24 +4295,64 @@ def build_site_power_balance_top10_table(
     n: int = 10,
 ) -> pd.DataFrame:
     """
-    Erstellt eine Tabelle der n Zeitpunkte mit dem höchsten Standortverbrauch.
+    Erstellt eine Tabelle mit den ``n`` Zeitpunkten des höchsten Standortverbrauchs.
 
-    Spalten:
-    - Zeitpunkt
-    - Leistung aus NAP [kW]
-    - Leistung PV-Erzeugung [kW]
-    - Versorgungsleistung Standort [kW]
-    - Verbrauch Grundlast [kW]
-    - Verbrauch LIS [kW]
-    - Verbrauch Standort [kW]
+    Die Funktion bereitet für jeden Simulationsschritt eine Leistungsbilanz des
+    Standorts auf und gibt anschließend die Zeitpunkte mit dem höchsten
+    Gesamtverbrauch tabellarisch aus. Berücksichtigt werden Netzbezug,
+    PV-Erzeugung, daraus abgeleitete Versorgungsleistung sowie die Verbräuche
+    von Grundlast, Ladeinfrastruktur und Gesamtstandort.
 
-    Hinweis:
-    - 'Versorgungsleistung Standort' ist die tatsächlich für den Verbrauch
-      genutzte Leistung:
-          Leistung aus NAP + PV-Verbrauch
-      und entspricht damit dem Standortverbrauch.
-    - Falls Debug-/Flussspalten vorhanden sind, werden diese bevorzugt genutzt.
-      Andernfalls wird PV-first angenommen.
+    Für die Aufteilung der Leistungsflüsse werden vorhandene Debug- bzw.
+    Flussspalten bevorzugt verwendet. Liegen nur Energiespalten je
+    Simulationsschritt vor, werden diese über die Schrittweite in Leistungen
+    umgerechnet. Falls keine solchen Spalten vorhanden sind, wird eine
+    vereinfachte PV-first-Logik angenommen: PV deckt zunächst die Grundlast
+    und anschließend die Ladeinfrastruktur; verbleibende Verbräuche werden
+    dem Netz zugeordnet.
+
+    Parameter
+    ---------
+    timeseries_dataframe:
+        Zeitreihen-DataFrame der Simulation. Erforderlich ist mindestens die
+        Spalte ``timestamp``. Erwartet werden außerdem typischerweise
+        ``base_load_kw``, ``pv_generation_kw`` und ``ev_load_kw``.
+        Optional können Debug-Leistungsspalten wie
+        ``pv_to_base_kw_per_step``, ``pv_to_ev_kw_per_step``,
+        ``grid_to_base_kw_per_step`` und ``grid_to_ev_kw_per_step`` oder
+        entsprechende Energiespalten mit ``*_kwh_per_step`` enthalten sein.
+    n:
+        Anzahl der auszugebenden Zeitpunkte mit dem höchsten
+        Standortverbrauch (Default: 10).
+
+    Rückgabe
+    --------
+    pd.DataFrame
+        Tabelle mit maximal ``n`` Zeilen, sortiert nach
+        ``Verbrauch Standort [kW]`` absteigend und bei Gleichstand nach dem
+        Zeitpunkt aufsteigend. Die Ausgabe enthält die Spalten
+        ``Zeitpunkt``, ``Leistung aus NAP [kW]``,
+        ``Leistung PV-Erzeugung [kW]``,
+        ``Versorgungsleistung Standort [kW]``,
+        ``Verbrauch Grundlast [kW]``, ``Verbrauch LIS [kW]`` und
+        ``Verbrauch Standort [kW]``.
+        Numerische Spalten werden auf zwei Nachkommastellen gerundet.
+
+    Ausnahmen
+    ---------
+    ValueError
+        Wenn ``timeseries_dataframe`` keine Spalte ``timestamp`` enthält.
+
+    Hinweise
+    --------
+    Die ``Versorgungsleistung Standort`` beschreibt die tatsächlich zur
+    Versorgung des Standortverbrauchs genutzte Leistung und ergibt sich aus
+    ``Leistung aus NAP`` plus lokal genutzter PV-Leistung. Sie entspricht
+    damit der Summe aus Grundlast- und LIS-Verbrauch.
+
+    Die Schrittweite wird nach Möglichkeit aus den ersten beiden
+    Zeitstempeln bestimmt. Falls dies nicht möglich ist, wird ein
+    Standardwert von 0,25 Stunden verwendet.
     """
     df = timeseries_dataframe.copy()
 
@@ -4111,58 +4453,72 @@ def export_site_energy_balance_excel(
     export_freq: str = "15min",
 ) -> pd.DataFrame:
     """
-    Exportiert die Standort-Energiebilanz als Excel-Datei.
+    Exportiert eine Standort-Energiebilanz als Excel-Datei und gibt die
+    exportierten Daten als DataFrame zurück.
 
-    Die Funktion berechnet zunächst alle relevanten Energieströme aus dem
-    übergebenen Zeitreihen-DataFrame. Falls die Simulation in einer feineren
-    Auflösung als 15 Minuten vorliegt, werden die Werte für den Export auf
-    15-Minuten-Intervalle aggregiert.
-
-    Es werden folgende Größen exportiert:
-    - PV-Erzeugung
-    - Netzbezug
-    - verfügbare Energie
-    - Grundlast aus Netz und PV
-    - LIS aus Netz und PV
-    - Gesamtverbrauch am Standort
-    - Marktpreis
-    - freie Netzkapazität
-    - PV-Überschuss
-
-    Energiespalten werden je Exportintervall aufsummiert, der Marktpreis wird
+    Die Funktion berechnet aus dem übergebenen Zeitreihen-DataFrame die
+    wesentlichen Energieströme des Standorts, darunter PV-Erzeugung,
+    Netzbezug, Grundlast- und LIS-Anteile aus Netz und PV, gesamte
+    Standortverbräuche, freie Netzkapazität, PV-Überschuss sowie optional
+    den Marktpreis. Falls die Simulation in einer feineren zeitlichen
+    Auflösung als das gewünschte Exportintervall vorliegt, werden die
+    Energieströme auf das Zielintervall aggregiert; der Marktpreis wird dabei
     gemittelt.
 
-    Args:
-        timeseries_dataframe (pd.DataFrame):
-            Zeitreihen-DataFrame der Simulation. Erwartet mindestens die Spalte
-            ``timestamp``. Weitere benötigte Spalten werden direkt verwendet oder
-            aus vorhandenen Leistungswerten abgeleitet.
+    Für die Aufteilung der Energieflüsse werden vorhandene Debug-Spalten
+    bevorzugt verwendet. Liegen diese nicht vor, wird eine vereinfachte
+    PV-first-Logik angenommen: PV deckt zunächst die Grundlast und
+    anschließend die Ladeinfrastruktur; verbleibende Verbräuche werden dem
+    Netz zugeordnet.
 
-        scenario (dict):
-            Szenario-Dictionary mit technischen Randbedingungen des Standorts.
-            Verwendet werden insbesondere ``time_resolution_min`` sowie
-            ``scenario["site"]["grid_limit_p_avb_kw"]``.
+    Parameter
+    ---------
+    timeseries_dataframe:
+        Zeitreihen-DataFrame der Simulation. Erforderlich ist mindestens die
+        Spalte ``timestamp``. Weitere Energieströme werden entweder direkt
+        aus vorhandenen Energie- bzw. Leistungsspalten gelesen oder daraus
+        abgeleitet. Optional kann die Spalte
+        ``market_price_eur_per_mwh`` enthalten sein.
+    scenario:
+        Szenario-Dictionary. Verwendet werden insbesondere
+        ``scenario["time_resolution_min"]`` als Fallback für die
+        Simulationsschrittweite sowie
+        ``scenario["site"]["grid_limit_p_avb_kw"]`` zur Berechnung der freien
+        Netzkapazität.
+    excel_path:
+        Zielpfad der zu erzeugenden Excel-Datei.
+    sheet_name:
+        Name des Excel-Arbeitsblatts.
+    export_freq:
+        Zielauflösung für den Export als Pandas-Frequenzstring, z. B.
+        ``"15min"``.
 
-        excel_path (str | Path, optional):
-            Zielpfad der zu erzeugenden Excel-Datei.
-            Standardwert ist ``"site_energy_balance.xlsx"``.
+    Rückgabe
+    --------
+    pd.DataFrame
+        Das tatsächlich exportierte DataFrame in der gewünschten
+        Exportauflösung. Zusätzlich wird die Excel-Datei unter
+        ``excel_path`` gespeichert.
 
-        export_freq (str, optional):
-            Zielauflösung für den Excel-Export als Pandas-Frequenzstring.
-            Standardwert ist ``"15min"``.
+    Ausnahmen
+    ---------
+    ValueError
+        Wenn ``timeseries_dataframe`` keine Spalte ``timestamp`` enthält.
+    ValueError
+        Wenn die Simulationsauflösung gröber ist als das gewünschte
+        Exportintervall und daher keine saubere Aggregation auf
+        ``export_freq`` möglich ist.
 
-    Returns:
-        pd.DataFrame:
-            Das exportierte DataFrame in der gewünschten Exportauflösung.
-            Die Excel-Datei wird zusätzlich unter ``excel_path`` gespeichert.
+    Hinweise
+    --------
+    Falls keine Energie-spalten je Simulationsschritt vorliegen, werden
+    vorhandene Leistungsspalten mithilfe der Simulationsschrittweite in
+    Energie umgerechnet. Die Schrittweite wird nach Möglichkeit aus den
+    ersten beiden Zeitstempeln bestimmt; andernfalls wird
+    ``scenario["time_resolution_min"]`` verwendet.
 
-    Raises:
-        ValueError:
-            Falls ``timeseries_dataframe`` keine Spalte ``timestamp`` enthält.
-
-        ValueError:
-            Falls die Simulationsauflösung gröber ist als das gewünschte
-            Exportintervall und deshalb keine saubere Aggregation möglich ist.
+    Die Excel-Datei wird mit fixierter Kopfzeile exportiert; die
+    Spaltenbreiten werden anschließend automatisch an den Inhalt angepasst.
     """
     df = timeseries_dataframe.copy()
     if "timestamp" not in df.columns:
